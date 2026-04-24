@@ -1,0 +1,172 @@
+openapi: 3.1.0
+info:
+  title: Fetchmark API
+  version: "0.1.0"
+  description: |
+    Fetchmark is a self-hostable alternative to Tavily / Exa. It runs
+    SearXNG under the hood, fetches the returned URLs in parallel with
+    SSRF-safe egress, extracts clean content with Trafilatura, and
+    re-ranks results with BM25 + engine-diversity bonus.
+
+    Authentication: every /v1/* endpoint requires either
+    `Authorization: Bearer <api_key>` or `X-API-Key: <api_key>`.
+    Fields flagged "admin only" require the caller's key to be in
+    `FM_ADMIN_API_KEYS`; otherwise the request is rejected with 403.
+
+servers:
+  - url: http://localhost:8080
+    description: Local dev
+
+security:
+  - apiKeyHeader: []
+  - apiKeyBearer: []
+
+components:
+  securitySchemes:
+    apiKeyHeader:
+      type: apiKey
+      in: header
+      name: X-API-Key
+    apiKeyBearer:
+      type: http
+      scheme: bearer
+
+  schemas:
+    SearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query:           { type: string, example: "site:go.dev slices" }
+        engines:         { type: array, items: { type: string } }
+        max_results:     { type: integer, minimum: 1, maximum: 50, default: 10 }
+        formats:         { type: array, items: { type: string, enum: [json, markdown, html] } }
+        timeout_ms:      { type: integer, minimum: 1, maximum: 60000 }
+        respect_robots:
+          type: boolean
+          description: "Admin only when set to false."
+        proxy_url:
+          type: string
+          description: "Admin only. When set, bypasses cache."
+
+    ParseRequest:
+      type: object
+      required: [urls]
+      properties:
+        urls:            { type: array, items: { type: string, format: uri } }
+        query:           { type: string, description: "Optional — enables ranking." }
+        formats:         { type: array, items: { type: string, enum: [json, markdown, html] } }
+        timeout_ms:      { type: integer }
+        respect_robots:  { type: boolean, description: "Admin only when false." }
+        proxy_url:       { type: string,  description: "Admin only." }
+
+    SearchResult:
+      type: object
+      properties:
+        url:            { type: string, format: uri }
+        title:          { type: string }
+        snippet:        { type: string }
+        engines:        { type: array, items: { type: string } }
+        from_cache:     { type: boolean }
+        fetch_ms:       { type: integer }
+        status:         { type: integer, description: "HTTP status returned by upstream." }
+        score:          { type: number, format: float }
+        content:        { $ref: "#/components/schemas/Content" }
+        unsupported:    { type: string, description: "Reason if parsing could not complete: non_html, js_required, robots_disallowed, egress_blocked, fetch_failed, extract_failed." }
+
+    Content:
+      type: object
+      properties:
+        url:           { type: string, format: uri }
+        title:         { type: string }
+        author:        { type: string }
+        site_name:     { type: string }
+        description:   { type: string }
+        language:      { type: string }
+        published_at:  { type: string, format: date-time }
+        main_text:     { type: string }
+        markdown:      { type: string }
+        cleaned_html:  { type: string }
+        unsupported_reason: { type: string }
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:     { type: string }
+
+paths:
+  /healthz:
+    get:
+      summary: Liveness probe.
+      security: []
+      responses:
+        "200": { description: ok }
+
+  /readyz:
+    get:
+      summary: Readiness — verifies SearXNG and Redis reachability.
+      security: []
+      responses:
+        "200": { description: ok }
+        "503": { description: unready }
+
+  /metrics:
+    get:
+      summary: Prometheus scrape endpoint.
+      security: []
+      responses:
+        "200": { description: Prometheus text exposition format. }
+
+  /v1/search:
+    post:
+      summary: Full pipeline — search + parallel fetch + extract + rank.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SearchRequest" }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  query:   { type: string }
+                  count:   { type: integer }
+                  results: { type: array, items: { $ref: "#/components/schemas/SearchResult" } }
+        "400": { description: bad_request, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "401": { description: missing_or_invalid_api_key }
+        "403": { description: admin_only_flag_used_with_non_admin_key }
+        "429": { description: rate_limited }
+        "502": { description: search_failed }
+
+  /v1/parse:
+    post:
+      summary: Parse one or more URLs in parallel (skips search).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ParseRequest" }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count:   { type: integer }
+                  results: { type: array, items: { $ref: "#/components/schemas/SearchResult" } }
+        "400": { description: urls_required }
+        "401": { description: missing_or_invalid_api_key }
+        "403": { description: admin_only_flag_used_with_non_admin_key }
+        "429": { description: rate_limited }
+
+  /v1/summarize:
+    post:
+      summary: (v1 stub) Returns 501 with the v2 request/response schema.
+      responses:
+        "501":
+          description: not_implemented — schema returned in the body.

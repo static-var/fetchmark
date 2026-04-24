@@ -5,30 +5,36 @@ dependencies; this file mirrors it for humans.
 
 ## In progress
 
-- **P0 — Repo skeleton & config**: chi router, slog, env config,
-  `/healthz`, `/readyz`, `/metrics`, Dockerfile, docker-compose (bundled +
-  external), API-key + request-ID middleware.
+_(none — v1 scope landed)_
+
+## Done (v1)
+
+- P0 — Repo skeleton & config; `/healthz`, `/readyz`, `/metrics`, API-key
+  + request-ID middleware, Dockerfile, compose (bundled + external).
+- P1 — SearXNG adapter + `/v1/search v0`.
+- P2a — Egress / SSRF policy.
+- P2 — Parallel fetch pipeline (resty, proxy, retry, UA pool).
+- P2b — Fetch safety budgets (body/decompressed caps, MIME sniff,
+  header timeout, per-host concurrency).
+- P3 — Content extraction to Markdown / JSON / cleaned HTML.
+- P3a — Versioned two-layer cache + `singleflight`.
+- P3b — Exact content dedupe + JS-required detection.
+- P4 — BM25 re-rank with engine-diversity bonus.
+- P5 — `/v1/parse` endpoint.
+- P6 — Per-API-key rate limits (Redis + local fallback).
+- P6a — Admin-only overrides & dashboard basic-auth.
+- P7 — Read-only ops dashboard (html/template + HTMX).
+- P8 / P8a / P8b — Prometheus metrics, SearXNG engine-health,
+  request-ID propagation.
+- P9 — `/v1/summarize` stub (501) + OpenAPI spec.
+- P10 — `docs/` mirror scaffolded.
+- P11 — GHCR multi-arch release workflow.
 
 ## Queued
 
-- P1 — SearXNG adapter + `/v1/search v0`
-- P2a — Egress / SSRF policy module
-- P2 — Parallel fetch pipeline (resty, proxy, retry, UA)
-- P2b — Fetch safety budgets
-- P3 — Content extraction (Markdown / JSON / cleaned HTML)
-- P3a — Versioned cache + `singleflight`
-- P3b — Content dedupe + JS-required detection
-- P4 — Hand-rolled BM25 re-rank + engine-diversity bonus
-- P5 — `/v1/parse` endpoint
-- P6 — API-key rate limits
-- P6a — Admin-only overrides & dashboard basic-auth
-- P8 — Prometheus metrics
-- P8a — SearXNG engine-health metrics
-- P8b — Request-ID tracing hooks
-- P7 — Ops dashboard (templ + HTMX)
-- P9 — `/v1/summarize` stub + OpenAPI
-- P10 — `docs/` mirror + this file
-- P11 — GHCR multi-arch release
+- Per-package docs under `docs/dev/staticvar/fetchmark/*.md` (only the
+  index exists today).
+- README quickstart with concrete `docker compose up` snippet.
 
 ## Deferred (v2)
 

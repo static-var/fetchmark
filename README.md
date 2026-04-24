@@ -4,7 +4,8 @@ A self-hostable, Docker-first alternative to Tavily/Exa. Powered by
 SearXNG, with parallel readability extraction (Markdown / JSON /
 cleaned-HTML) and BM25 re-ranking.
 
-> **Status:** early development. See `docs/tasks.md` for the live backlog.
+> **Status:** v1 scope complete. See `docs/openapi.yaml` for the API
+> contract and `docs/tasks.md` for the live backlog.
 
 ## Quickstart (bundled SearXNG + Redis)
 
@@ -40,9 +41,10 @@ make docker     # build distroless image
 
 | Method | Path           | Status       | Notes                                   |
 | ------ | -------------- | ------------ | --------------------------------------- |
-| POST   | `/v1/search`   | stubbed      | Full pipeline lands in P1–P4            |
-| POST   | `/v1/parse`    | stubbed      | Parse-only endpoint, lands in P5        |
+| POST   | `/v1/search`   | ready        | Search + parallel fetch + extract + BM25 |
+| POST   | `/v1/parse`    | ready        | Parse-only; ranks when `query` is set   |
 | POST   | `/v1/summarize`| **501**      | Designed; LLM wiring deferred to v2     |
 | GET    | `/healthz`     | ready        | Liveness                                |
-| GET    | `/readyz`      | ready        | Dependency reachability                 |
+| GET    | `/readyz`      | ready        | SearXNG + Redis reachability            |
 | GET    | `/metrics`     | ready        | Prometheus exposition                   |
+| GET    | `/dashboard`   | opt-in       | Basic-Auth; off unless `FM_DASHBOARD_*` set |
