@@ -66,6 +66,29 @@ type Config struct {
 	RendererTimeout time.Duration `env:"FM_RENDERER_TIMEOUT"  envDefault:"20s"`
 	RendererMaxBody int64         `env:"FM_RENDERER_MAX_BODY" envDefault:"10485760"` // 10 MiB
 	RendererToken   string        `env:"FM_RENDERER_TOKEN"`
+
+	// /v1/summarize runtime configuration. Env vars bootstrap one or
+	// two profiles (one per provider kind) at boot; admin PUT calls
+	// can add or update profiles at runtime but those mutations are
+	// process-local. Leaving FM_SUMMARIZE_*_MODEL empty for a given
+	// kind skips that profile entirely.
+	SummarizeDefaultProvider string `env:"FM_SUMMARIZE_DEFAULT_PROVIDER"`
+
+	SummarizeOpenAIBaseURL     string        `env:"FM_SUMMARIZE_OPENAI_BASE_URL"`
+	SummarizeOpenAIAPIKey      string        `env:"FM_SUMMARIZE_OPENAI_API_KEY"`
+	SummarizeOpenAIModel       string        `env:"FM_SUMMARIZE_OPENAI_MODEL"`
+	SummarizeOpenAIMaxTokens   int           `env:"FM_SUMMARIZE_OPENAI_MAX_TOKENS"   envDefault:"1024"`
+	SummarizeOpenAITimeout     time.Duration `env:"FM_SUMMARIZE_OPENAI_TIMEOUT"      envDefault:"60s"`
+	SummarizeOpenAIThinking    bool          `env:"FM_SUMMARIZE_OPENAI_THINKING"     envDefault:"false"`
+	SummarizeOpenAIThinkEffort string        `env:"FM_SUMMARIZE_OPENAI_THINK_EFFORT"`
+
+	SummarizeAnthropicBaseURL    string        `env:"FM_SUMMARIZE_ANTHROPIC_BASE_URL"`
+	SummarizeAnthropicAPIKey     string        `env:"FM_SUMMARIZE_ANTHROPIC_API_KEY"`
+	SummarizeAnthropicModel      string        `env:"FM_SUMMARIZE_ANTHROPIC_MODEL"`
+	SummarizeAnthropicMaxTokens  int           `env:"FM_SUMMARIZE_ANTHROPIC_MAX_TOKENS"  envDefault:"1024"`
+	SummarizeAnthropicTimeout    time.Duration `env:"FM_SUMMARIZE_ANTHROPIC_TIMEOUT"     envDefault:"60s"`
+	SummarizeAnthropicThinking   bool          `env:"FM_SUMMARIZE_ANTHROPIC_THINKING"    envDefault:"false"`
+	SummarizeAnthropicThinkBudget int          `env:"FM_SUMMARIZE_ANTHROPIC_THINK_BUDGET" envDefault:"0"`
 }
 
 // Load reads configuration from the environment, applies defaults,
