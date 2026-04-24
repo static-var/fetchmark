@@ -70,3 +70,56 @@ func TestShingleSet_ShortText(t *testing.T) {
 		t.Fatalf("expected fallback unigram set of size 2, got %d", len(s))
 	}
 }
+
+// CJK bodies have no whitespace word boundaries, so the word-3-gram
+// shingler collapses to a near-empty set and Jaccard refuses to group
+// obvious duplicates. These tests pin the CJK branch: identical bodies
+// dedupe, unrelated bodies don't, and the set is dense enough for
+// Jaccard to be meaningful.
+func TestShingleSet_CJKUsesCharBigrams(t *testing.T) {
+// 30-rune Chinese passage — word 3-grams would yield at most 1
+// shingle (the whole string); char bi-grams should yield 29.
+cn := "机器学习是人工智能的一个分支它研究计算机如何模拟学习"
+s := shingleSet(cn, shingleSize)
+if len(s) < 10 {
+t.Fatalf("CJK body should produce dense char shingles; got %d", len(s))
+}
+}
+
+func TestDedupeNearDuplicates_CJKIdenticalBodiesCollapse(t *testing.T) {
+body := "机器学习是人工智能的一个分支它研究计算机如何模拟学习过程使系统能够从数据中学习"
+in := []model.SearchResult{
+{URL: "https://a/", Score: 2, Content: &model.Content{MainText: body}},
+{URL: "https://b/", Score: 1, Content: &model.Content{MainText: body}},
+}
+out := dedupeNearDuplicates(in)
+if len(out) != 1 || out[0].URL != "https://a/" {
+t.Fatalf("expected identical CJK bodies to collapse to higher-score a; got %+v", out)
+}
+}
+
+func TestDedupeNearDuplicates_CJKUnrelatedBodiesSurvive(t *testing.T) {
+a := "机器学习是人工智能的一个分支它研究计算机如何模拟学习过程"
+b := "气候变化是当前全球面临的最严重的环境问题之一需要各国共同努力"
+in := []model.SearchResult{
+{URL: "https://a/", Content: &model.Content{MainText: a}},
+{URL: "https://b/", Content: &model.Content{MainText: b}},
+}
+out := dedupeNearDuplicates(in)
+if len(out) != 2 {
+t.Fatalf("unrelated CJK bodies should both survive; got %d", len(out))
+}
+}
+
+func TestIsCJKDominant_MixedAsciiPunctuation(t *testing.T) {
+// Mostly-Chinese sentence with routine ASCII punctuation — must
+// still take the CJK path (CJK ratio by non-punct rune count).
+if !isCJKDominant("机器学习, is 人工智能的一个分支.") {
+t.Fatal("mixed CJK-dominant body should trip isCJKDominant")
+}
+// ASCII-dominant body with a stray Chinese character must NOT
+// flip the heuristic.
+if isCJKDominant("the quick brown fox jumps over 猫") {
+t.Fatal("ASCII-dominant body should not trip isCJKDominant")
+}
+}
