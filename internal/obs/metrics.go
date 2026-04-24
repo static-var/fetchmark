@@ -127,3 +127,36 @@ var RendererDuration = promauto.NewHistogram(
 		Buckets: []float64{0.25, 0.5, 1, 2, 4, 8, 15, 30, 60},
 	},
 )
+
+// SummarizeOutcome counts /v1/summarize invocations by provider and
+// outcome class. Outcome labels stay coarse so cardinality stays
+// bounded (ok, fetch_failed, parse_empty, provider_auth,
+// provider_rate_limit, provider_upstream, provider_timeout, error).
+var SummarizeOutcome = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "fetchmark_summarize_total",
+		Help: "Summarize endpoint invocations.",
+	},
+	[]string{"provider", "outcome"},
+)
+
+// SummarizeDuration records end-to-end summarize latency (including
+// the fetch+parse step) for successful calls only.
+var SummarizeDuration = promauto.NewHistogramVec(
+	prometheus.HistogramOpts{
+		Name:    "fetchmark_summarize_duration_seconds",
+		Help:    "Summarize end-to-end latency (successful only).",
+		Buckets: []float64{0.5, 1, 2, 4, 8, 15, 30, 60, 120},
+	},
+	[]string{"provider"},
+)
+
+// SummarizeTokens counts tokens consumed by summarize calls. Labels
+// are bounded to provider and class (prompt, completion, reasoning).
+var SummarizeTokens = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "fetchmark_summarize_tokens_total",
+		Help: "Tokens consumed by summarize.",
+	},
+	[]string{"provider", "class"},
+)
