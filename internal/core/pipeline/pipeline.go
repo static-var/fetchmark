@@ -428,6 +428,12 @@ func (p *Pipeline) renderAndExtract(ctx context.Context, o Options, r *model.Sea
 // produces a real extraction. The rendered blob is cached under the
 // rendered key; the plain key is left untouched so cheap paths stay
 // cheap.
+//
+// When a cache is configured, the renderer call is guarded by a
+// Redis-backed stampede lock on the rendered key so concurrent auto-
+// render upgrades for the same URL collapse to a single renderer
+// invocation. The lock TTL is sized against a render budget (not the
+// caller's fetch timeout) because auto-render runs with o.Render=false.
 func (p *Pipeline) tryAutoRender(ctx context.Context, o Options, r *model.SearchResult, cacheBypass bool) ([]byte, error) {
 	renderedKey := cache.RenderedArtifactKey(r.URL)
 	if !cacheBypass && p.Cache != nil {
@@ -441,7 +447,54 @@ func (p *Pipeline) tryAutoRender(ctx context.Context, o Options, r *model.Search
 			}
 		}
 	}
-	return p.renderAndExtract(ctx, o, r, renderedKey, cacheBypass)
+	if cacheBypass || p.Cache == nil {
+		return p.renderAndExtract(ctx, o, r, renderedKey, cacheBypass)
+	}
+
+	// lockTTL/lockWait read o.Render to size against the renderer
+	// timeout. Auto-render arrives with o.Render=false, so derive the
+	// budget from a Render=true clone to avoid lock expiry mid-render.
+	ro := o
+	ro.Render = true
+
+	raw, err := p.Cache.WithLock(ctx, renderedKey, cache.LockOptions{
+		LockTTL:      p.lockTTL(ro),
+		WaitMax:      p.lockWait(ro),
+		PollInterval: 100 * time.Millisecond,
+	}, func(ctx context.Context) ([]byte, error) {
+		// Re-check inside the lock — a peer may have populated the
+		// rendered cache while we were waiting. If so, reuse it.
+		if raw, _ := p.Cache.Get(ctx, renderedKey); raw != nil {
+			var c model.Content
+			if err := json.Unmarshal(raw, &c); err == nil && c.UnsupportedReason != extractor.ReasonJSRequired {
+				applyContent(r, &c)
+				r.FromCache = true
+				obs.CacheEvents.WithLabelValues("fa", "hit").Inc()
+				return raw, nil
+			}
+		}
+		return p.renderAndExtract(ctx, o, r, renderedKey, cacheBypass)
+	})
+	if err != nil {
+		return nil, err
+	}
+	// The WithLock path returns either the blob produced by our fn or
+	// one populated by a peer while we waited. In the peer-populated
+	// case our fn did not run, so r still carries the js_required plain
+	// content from the earlier fetch — unconditionally re-apply so the
+	// caller sees the rendered upgrade.
+	if raw != nil && r.FromCache == false {
+		var c model.Content
+		if err := json.Unmarshal(raw, &c); err == nil && c.UnsupportedReason != extractor.ReasonJSRequired {
+			// Clear the stale js_required so applyContent can promote
+			// the rendered title/markdown onto r.
+			r.Title = ""
+			r.Unsupported = ""
+			applyContent(r, &c)
+			r.FromCache = true
+		}
+	}
+	return raw, nil
 }
 
 // applyRaw decodes a cached artifact blob onto r. It is the symmetric

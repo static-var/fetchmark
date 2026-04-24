@@ -4,7 +4,13 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/staticvar/fetchmark/internal/adapters/cache"
 	"github.com/staticvar/fetchmark/internal/adapters/extractor"
@@ -126,6 +132,77 @@ func TestPipeline_RendererAutoOff_KeepsJSRequired(t *testing.T) {
 	if out[0].Unsupported != extractor.ReasonJSRequired {
 		t.Fatalf("expected js_required to stick, got %+v", out[0])
 	}
+}
+
+// TestPipeline_RendererAuto_RenderedKeyLock proves the second Redis
+// lock on the rendered key coalesces concurrent auto-render upgrades
+// across pipelines (replicas). We exercise tryAutoRender directly with
+// a shared Redis-backed cache; without the lock the renderer would be
+// called twice for the same URL.
+func TestPipeline_RendererAuto_RenderedKeyLock(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	t.Cleanup(mr.Close)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+
+	shared := cache.New(rdb, time.Minute)
+	url := "https://spa.example/shared"
+	rend := &slowRenderer{body: []byte("RENDERED body"), block: make(chan struct{})}
+
+	newPipe := func() *Pipeline {
+		return &Pipeline{
+			Extractor:       jsAwareExtractor{},
+			Cache:           shared,
+			Renderer:        rend,
+			RendererAuto:    true,
+			RendererTimeout: 5 * time.Second,
+		}
+	}
+	p1, p2 := newPipe(), newPipe()
+
+	r1 := &model.SearchResult{URL: url, Unsupported: extractor.ReasonJSRequired}
+	r2 := &model.SearchResult{URL: url, Unsupported: extractor.ReasonJSRequired}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, _ = p1.tryAutoRender(context.Background(), Options{Timeout: time.Second}, r1, false)
+	}()
+	time.Sleep(25 * time.Millisecond)
+	go func() {
+		defer wg.Done()
+		_, _ = p2.tryAutoRender(context.Background(), Options{Timeout: time.Second}, r2, false)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	close(rend.block)
+	wg.Wait()
+
+	if got := rend.hits.Load(); got != 1 {
+		t.Fatalf("rendered-key lock failed to coalesce; renderer hits=%d, want 1", got)
+	}
+	if r1.Title != "Rendered" || r2.Title != "Rendered" {
+		t.Fatalf("both callers must observe rendered content; r1.Title=%q r2.Title=%q", r1.Title, r2.Title)
+	}
+}
+
+type slowRenderer struct {
+	body  []byte
+	block chan struct{}
+	hits  atomic.Int64
+}
+
+func (s *slowRenderer) Render(ctx context.Context, _ string) ([]byte, error) {
+	s.hits.Add(1)
+	select {
+	case <-s.block:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return s.body, nil
 }
 
 func TestPipeline_RenderExplicit_ErrorFlagsResult(t *testing.T) {
