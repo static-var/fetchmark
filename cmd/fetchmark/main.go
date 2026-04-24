@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/staticvar/fetchmark/internal/adapters/egress"
+	"github.com/staticvar/fetchmark/internal/adapters/searxng"
 	"github.com/staticvar/fetchmark/internal/api"
 	"github.com/staticvar/fetchmark/internal/config"
 )
@@ -28,10 +30,24 @@ func run() error {
 	}
 	log := newLogger(cfg.LogLevel)
 
+	// SearXNG lives on a trusted internal network (docker-compose) or a
+	// user-trusted URL; use the internal egress policy so private IPs
+	// are permitted. External user-URL fetches will receive their own
+	// DefaultExternal client in P2.
+	internal := egress.DefaultInternal().HTTPClient(10 * time.Second)
+	sx, err := searxng.New(cfg.SearxngURL, internal)
+	if err != nil {
+		return err
+	}
+
 	handler := api.NewRouter(api.Deps{
-		Log:        log,
-		Config:     cfg,
-		ReadyCheck: func() error { return nil }, // wired up in P1/P2
+		Log:    log,
+		Config: cfg,
+		ReadyCheck: func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			return sx.Ping(ctx)
+		},
 	})
 
 	srv := &http.Server{
