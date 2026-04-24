@@ -94,6 +94,10 @@ func run() error {
 		Extractor: extractor.New(true),
 		Cache:     c,
 		Ranker:    rank.New(),
+		// Close the SSRF gap on the render path: the fetcher's
+		// DialControl doesn't run when the renderer is called
+		// directly, so the pipeline validates the URL itself.
+		EgressValidate: external.Validate,
 	}
 
 	// Optional headless renderer. A dedicated HTTP client is used so
@@ -111,6 +115,7 @@ func run() error {
 		}
 		pipe.Renderer = rend
 		pipe.RendererAuto = cfg.RendererAuto
+		pipe.RendererTimeout = cfg.RendererTimeout
 		log.Info("headless renderer enabled", "endpoint", cfg.RendererURL, "auto", cfg.RendererAuto)
 	}
 

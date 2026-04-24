@@ -84,6 +84,18 @@ type Pipeline struct {
 	Ranker       Ranker
 	Renderer     Renderer
 	RendererAuto bool
+	// RendererTimeout is the worst-case wall time a single renderer call
+	// can take. Used to size the Redis stampede-lock TTL and wait budget
+	// on the render path so a slow headless fetch doesn't lose the lock
+	// mid-call or cause waiters to give up too early. Zero means the
+	// pipeline falls back to Options.Timeout.
+	RendererTimeout time.Duration
+	// EgressValidate, when non-nil, is consulted before a URL is handed
+	// to the Renderer. Returning a non-nil error marks the result
+	// unsupported with "egress_reject" and skips the render call. This
+	// closes the SSRF hole on the render path, which would otherwise
+	// bypass the fetcher's dial-time validation.
+	EgressValidate func(ctx context.Context, rawURL string) error
 }
 
 // Search runs the full search pipeline: hit SearXNG, parallel fetch,
@@ -182,11 +194,15 @@ func (p *Pipeline) process(ctx context.Context, o Options, seed []model.SearchRe
 	wg.Wait()
 
 	results = dedupeByContentSHA(results)
-	results = dedupeNearDuplicates(results)
-
+	// Rank first, then near-dup collapse. The cluster-winner tiebreak
+	// in dedupeNearDuplicates uses SearchResult.Score, which is only
+	// meaningful after the ranker has run — otherwise every winner is
+	// picked by MainText length and input order, which can drop the
+	// more relevant duplicate.
 	if p.Ranker != nil && query != "" {
 		results = p.Ranker.Score(query, results)
 	}
+	results = dedupeNearDuplicates(results)
 	if o.MaxResults > 0 && len(results) > o.MaxResults {
 		results = results[:o.MaxResults]
 	}
@@ -354,6 +370,16 @@ func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.Sear
 // extracts content, and writes the result to the supplied cache key.
 // Used for explicit render=true requests.
 func (p *Pipeline) renderAndExtract(ctx context.Context, o Options, r *model.SearchResult, key string, cacheBypass bool) ([]byte, error) {
+	// The fetcher's DialControl is not on this path — validate the URL
+	// against the egress policy before handing it to the renderer so
+	// render=true can't be used to reach RFC1918/link-local targets.
+	if p.EgressValidate != nil {
+		if err := p.EgressValidate(ctx, r.URL); err != nil {
+			r.Unsupported = "egress_reject"
+			obs.RendererOutcome.WithLabelValues("skipped").Inc()
+			return nil, err
+		}
+	}
 	start := time.Now()
 	raw, err := p.Renderer.Render(ctx, r.URL)
 	if err != nil {
@@ -382,6 +408,13 @@ func (p *Pipeline) renderAndExtract(ctx context.Context, o Options, r *model.Sea
 		return nil, mErr
 	}
 	_ = o // reserved for future per-request renderer knobs
+	// Never cache a rendered artifact that still flags js_required:
+	// doing so would make subsequent explicit-render requests a cache
+	// hit on a useless placeholder until TTL expiry, defeating the
+	// entire point of the render path.
+	if c.UnsupportedReason == extractor.ReasonJSRequired {
+		return blob, nil
+	}
 	if !cacheBypass && p.Cache != nil {
 		if sErr := p.Cache.Set(ctx, key, blob); sErr == nil {
 			obs.CacheEvents.WithLabelValues("fa", "write").Inc()
@@ -422,24 +455,33 @@ func applyRaw(r *model.SearchResult, raw []byte) error {
 	return nil
 }
 
-// lockTTL derives the Redis-lock TTL from the fetch timeout so the lock
-// is guaranteed to outlive the work it guards, with a small cushion for
-// extraction and serialisation.
+// lockTTL derives the Redis-lock TTL from the worst-case work time so
+// the lock is guaranteed to outlive the critical section, with a small
+// cushion for extraction and serialisation. On the render path the
+// worst case is the renderer's own timeout, not the fetch timeout.
 func (p *Pipeline) lockTTL(o Options) time.Duration {
-	base := o.Timeout
-	if base <= 0 {
-		base = 10 * time.Second
-	}
+	base := p.criticalBudget(o)
 	return base + 5*time.Second
 }
 
 // lockWait caps how long a second caller blocks before giving up and
-// running the fetch without the lock. We want contention to degrade
+// running the work without the lock. We want contention to degrade
 // into extra work, never into error responses.
 func (p *Pipeline) lockWait(o Options) time.Duration {
+	return p.criticalBudget(o)
+}
+
+// criticalBudget returns the worst-case wall time for the work the
+// stampede lock is guarding, picking the larger of the caller's fetch
+// timeout and the configured renderer timeout when the renderer is in
+// play. Callers that set neither fall back to 10s.
+func (p *Pipeline) criticalBudget(o Options) time.Duration {
 	base := o.Timeout
 	if base <= 0 {
 		base = 10 * time.Second
+	}
+	if o.Render && p.Renderer != nil && p.RendererTimeout > base {
+		base = p.RendererTimeout
 	}
 	return base
 }

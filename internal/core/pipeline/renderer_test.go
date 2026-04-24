@@ -163,3 +163,43 @@ func TestPipeline_RenderExplicit_SearchFlow(t *testing.T) {
 		t.Fatalf("search+render path broken: %+v", out)
 	}
 }
+
+func TestPipeline_RenderExplicit_EgressRejected(t *testing.T) {
+rend := &stubRenderer{body: []byte("RENDERED oops")}
+blocked := errors.New("blocked")
+p := &Pipeline{
+Fetcher:        stubFetcher{resp: map[string]fetcher.Result{}},
+Extractor:      jsAwareExtractor{},
+Cache:          cache.New(nil, 0),
+Renderer:       rend,
+EgressValidate: func(_ context.Context, _ string) error { return blocked },
+}
+out := p.Parse(context.Background(), Options{URLs: []string{"http://127.0.0.1/"}, Render: true})
+if len(out) != 1 || out[0].Unsupported != "egress_reject" {
+t.Fatalf("expected egress_reject; got %+v", out)
+}
+if rend.hits != 0 {
+t.Fatalf("renderer must not be invoked when egress rejects; hits=%d", rend.hits)
+}
+}
+
+func TestPipeline_Render_JSRequiredResult_NotCached(t *testing.T) {
+// Renderer returns a body that the extractor ALSO marks as
+// js_required. The rendered artifact must not be cached, or
+// subsequent explicit renders would be served a useless placeholder.
+rend := &stubRenderer{body: []byte("JS-SHIM still")}
+p := &Pipeline{
+Fetcher:   stubFetcher{resp: map[string]fetcher.Result{}},
+Extractor: jsAwareExtractor{},
+Cache:     cache.New(nil, 0),
+Renderer:  rend,
+}
+_ = p.Parse(context.Background(), Options{URLs: []string{"https://spa.example/js"}, Render: true})
+if rend.hits != 1 {
+t.Fatalf("first render should hit once; got %d", rend.hits)
+}
+_ = p.Parse(context.Background(), Options{URLs: []string{"https://spa.example/js"}, Render: true})
+if rend.hits != 2 {
+t.Fatalf("js_required rendered blob must not be cached; expected hits=2 got %d", rend.hits)
+}
+}
