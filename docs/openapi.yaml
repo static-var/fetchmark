@@ -68,7 +68,7 @@ components:
         engines:        { type: array, items: { type: string } }
         from_cache:     { type: boolean }
         fetch_ms:       { type: integer }
-        status:         { type: integer, description: "HTTP status returned by upstream." }
+        status:         { type: integer, description: "(Reserved — not currently populated.) HTTP status returned by upstream." }
         score:          { type: number, format: float }
         content:        { $ref: "#/components/schemas/Content" }
         unsupported_reason: { type: string, description: "Reason if parsing could not complete: non_html, js_required, robots_disallowed, egress_blocked, fetch_failed, extract_failed." }

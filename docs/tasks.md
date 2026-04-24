@@ -32,9 +32,22 @@ _(none — v1 scope landed)_
 
 ## Queued
 
+- **Singleflight wiring in the pipeline cold path.** `Cache.Do` is
+  exported and tested but not used by `pipeline.process`. Concurrent
+  requests for the same uncached URL currently all hit origin. Needs
+  a restructure of the per-URL fetch/extract/store path onto a worker
+  pool keyed by `cache.ArtifactKey`.
+- **True shared-state Redis rate limiter** (Lua token bucket). Today
+  the Redis leg is a fixed-window INCR tied to `burst`, which
+  cross-instance behaves as ~`burst` rps, not `ratePerSec` rps. Local
+  token bucket still enforces `ratePerSec` per replica — good enough
+  for v1 but worth upgrading.
 - Per-package docs under `docs/dev/staticvar/fetchmark/*.md` (only the
   index exists today).
 - README quickstart with concrete `docker compose up` snippet.
+- Regression tests for: exhausted-retry terminal error path,
+  `/v1/parse` admin-only override (server_test currently only covers
+  search), ratelimit Redis-backed allow/deny semantics.
 
 ## Deferred (v2)
 

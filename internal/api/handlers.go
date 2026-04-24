@@ -139,6 +139,15 @@ func parseHandler(d Deps) http.HandlerFunc {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "urls required"})
 			return
 		}
+		if cap := d.Config.ResultsCap; cap > 0 && len(req.URLs) > cap {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error":       "too_many_urls",
+				"limit":       cap,
+				"urls_given":  len(req.URLs),
+				"description": "request cap is FM_RESULTS_CAP",
+			})
+			return
+		}
 		if d.Pipeline == nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "pipeline_not_ready"})
 			return

@@ -10,6 +10,8 @@ package middleware
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"sync"
@@ -98,12 +100,18 @@ func (k *keyLimiter) local(key string) *rate.Limiter {
 // redisAllow increments a per-second counter for the key and denies the
 // request when the counter exceeds the burst capacity. We only keep a
 // 1-second TTL, which caps the limiter's memory footprint in Redis.
+//
+// The Redis key embeds a SHA-256 hash of the API key, not the plaintext
+// secret, so operational surfaces (MONITOR, RDB dumps, backups) never
+// see raw credentials.
 func (k *keyLimiter) redisAllow(ctx context.Context, key string) (bool, error) {
 	limit := int64(k.burst)
 	if limit < 1 {
 		limit = 1
 	}
-	bucket := fmt.Sprintf("fm:rl:%s:%d", key, time.Now().Unix())
+	sum := sha256.Sum256([]byte(key))
+	hashed := hex.EncodeToString(sum[:8])
+	bucket := fmt.Sprintf("fm:rl:%s:%d", hashed, time.Now().Unix())
 
 	c, err := k.rdb.Incr(ctx, bucket).Result()
 	if err != nil {

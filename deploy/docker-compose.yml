@@ -24,7 +24,9 @@ services:
         condition: service_started
 
   searxng:
-    image: searxng/searxng:latest
+    # Pinned for reproducible builds. Refresh on SearXNG release bumps;
+    # `latest` is deliberately avoided. See docs/tasks.md for cadence.
+    image: searxng/searxng:2026.4.24-a7ac696b4
     restart: unless-stopped
     environment:
       SEARXNG_BASE_URL: "http://localhost:8080/"

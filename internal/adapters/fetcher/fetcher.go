@@ -140,18 +140,47 @@ func New(o Options) (*Fetcher, error) {
 	}, nil
 }
 
-// FetchMany runs all requests in parallel, respecting global and
-// per-host concurrency caps. Ordering of the returned slice matches reqs.
+// FetchMany runs requests through a fixed-size worker pool sized by
+// Budgets.GlobalConcurrency. Ordering of the returned slice matches reqs.
+// Unlike a goroutine-per-URL approach this bounds memory and scheduler
+// pressure even when the caller asks for a large batch.
 func (f *Fetcher) FetchMany(ctx context.Context, reqs []Request) []Result {
 	out := make([]Result, len(reqs))
-	var wg sync.WaitGroup
-	for i, r := range reqs {
-		wg.Add(1)
-		go func(i int, r Request) {
-			defer wg.Done()
-			out[i] = f.Fetch(ctx, r)
-		}(i, r)
+	if len(reqs) == 0 {
+		return out
 	}
+	workers := cap(f.globalSem)
+	if workers <= 0 {
+		workers = 8
+	}
+	if workers > len(reqs) {
+		workers = len(reqs)
+	}
+	type job struct {
+		i int
+		r Request
+	}
+	jobs := make(chan job)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				out[j.i] = f.Fetch(ctx, j.r)
+			}
+		}()
+	}
+	for i, r := range reqs {
+		select {
+		case <-ctx.Done():
+			close(jobs)
+			wg.Wait()
+			return out
+		case jobs <- job{i: i, r: r}:
+		}
+	}
+	close(jobs)
 	wg.Wait()
 	return out
 }
@@ -235,6 +264,8 @@ func (f *Fetcher) Fetch(ctx context.Context, r Request) Result {
 
 func (f *Fetcher) doWithRetry(ctx context.Context, client *http.Client, rawURL, ua string) ([]byte, int, string, string, error) {
 	var lastErr error
+	var lastStatus int
+	var lastCtype string
 	retries := f.budgets.Retries
 	if retries < 0 {
 		retries = 0
@@ -246,7 +277,7 @@ func (f *Fetcher) doWithRetry(ctx context.Context, client *http.Client, rawURL, 
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
-				return nil, 0, "", "", ctx.Err()
+				return nil, lastStatus, lastCtype, "", ctx.Err()
 			}
 		}
 		body, status, ctype, reason, err := f.doOnce(ctx, client, rawURL, ua)
@@ -261,8 +292,16 @@ func (f *Fetcher) doWithRetry(ctx context.Context, client *http.Client, rawURL, 
 			return body, status, ctype, "", nil
 		}
 		lastErr = err
+		lastStatus = status
+		lastCtype = ctype
 	}
-	return nil, 0, "", "", lastErr
+	if lastErr == nil && lastStatus != 0 {
+		// Retries exhausted on 5xx/429 but no transport error. Surface as
+		// a terminal error so the pipeline labels it fetch_failed rather
+		// than silently falling through to a non-2xx "success".
+		lastErr = fmt.Errorf("upstream returned %d after %d retries", lastStatus, retries)
+	}
+	return nil, lastStatus, lastCtype, "", lastErr
 }
 
 func (f *Fetcher) doOnce(ctx context.Context, client *http.Client, rawURL, ua string) ([]byte, int, string, string, error) {

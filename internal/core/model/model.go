@@ -36,7 +36,7 @@ type Content struct {
 	Description       string     `json:"description,omitempty"`
 	Language          string     `json:"language,omitempty"`
 	PublishedAt       *time.Time `json:"published_at,omitempty"`
-	MainText          string     `json:"text,omitempty"`
+	MainText          string     `json:"main_text,omitempty"`
 	Markdown          string     `json:"markdown,omitempty"`
 	CleanedHTML       string     `json:"cleaned_html,omitempty"`
 	UnsupportedReason string     `json:"unsupported_reason,omitempty"`

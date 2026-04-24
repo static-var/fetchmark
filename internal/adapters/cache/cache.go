@@ -54,7 +54,8 @@ type Cache struct {
 	mu  sync.RWMutex
 	mem map[string]memEntry
 
-	sf singleflight.Group
+	stop chan struct{}
+	sf   singleflight.Group
 }
 
 type memEntry struct {
@@ -63,11 +64,57 @@ type memEntry struct {
 }
 
 // New constructs a Cache. If rdb is nil, an in-memory fallback is used.
+// The in-memory map is periodically swept of expired entries so that
+// long-running processes without Redis do not leak memory.
 func New(rdb *redis.Client, ttl time.Duration) *Cache {
 	if ttl <= 0 {
 		ttl = time.Hour
 	}
-	return &Cache{rdb: rdb, ttl: ttl, mem: map[string]memEntry{}}
+	c := &Cache{rdb: rdb, ttl: ttl, mem: map[string]memEntry{}}
+	if rdb == nil {
+		c.stop = make(chan struct{})
+		go c.sweeper()
+	}
+	return c
+}
+
+// Close releases the background sweeper (in-memory mode only).
+func (c *Cache) Close() {
+	if c.stop != nil {
+		close(c.stop)
+		c.stop = nil
+	}
+}
+
+func (c *Cache) sweeper() {
+	interval := c.ttl
+	if interval > 5*time.Minute {
+		interval = 5 * time.Minute
+	}
+	if interval < 30*time.Second {
+		interval = 30 * time.Second
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-c.stop:
+			return
+		case <-t.C:
+			c.sweepExpired()
+		}
+	}
+}
+
+func (c *Cache) sweepExpired() {
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k, e := range c.mem {
+		if now.After(e.expires) {
+			delete(c.mem, k)
+		}
+	}
 }
 
 // CanonicalURL normalises a URL so two equivalent URLs produce the same
@@ -147,7 +194,9 @@ func sha(s string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// Get returns the cached value for key, or nil if absent.
+// Get returns the cached value for key, or nil if absent. Expired
+// in-memory entries are deleted lazily on read as a belt-and-braces
+// safeguard beside the background sweeper.
 func (c *Cache) Get(ctx context.Context, key string) ([]byte, error) {
 	if c.rdb != nil {
 		v, err := c.rdb.Get(ctx, key).Bytes()
@@ -157,9 +206,18 @@ func (c *Cache) Get(ctx context.Context, key string) ([]byte, error) {
 		return v, err
 	}
 	c.mu.RLock()
-	defer c.mu.RUnlock()
 	e, ok := c.mem[key]
-	if !ok || time.Now().After(e.expires) {
+	expired := ok && time.Now().After(e.expires)
+	c.mu.RUnlock()
+	if !ok {
+		return nil, nil
+	}
+	if expired {
+		c.mu.Lock()
+		if cur, still := c.mem[key]; still && time.Now().After(cur.expires) {
+			delete(c.mem, key)
+		}
+		c.mu.Unlock()
 		return nil, nil
 	}
 	return e.value, nil
