@@ -17,6 +17,14 @@ services:
       FM_DASHBOARD_PASSWORD: "${FM_DASHBOARD_PASSWORD:-}"
       FM_RESPECT_ROBOTS: "true"
       FM_LOG_LEVEL: "info"
+      # Renderer is opt-in. Point FM_RENDERER_URL at the chromium
+      # service below (enabled via the `render` profile) or leave
+      # unset to disable. FM_RENDERER_AUTO turns on automatic retry
+      # whenever the extractor flags a page as js_required.
+      FM_RENDERER_URL: "${FM_RENDERER_URL:-}"
+      FM_RENDERER_AUTO: "${FM_RENDERER_AUTO:-false}"
+      FM_RENDERER_TIMEOUT: "${FM_RENDERER_TIMEOUT:-20s}"
+      FM_RENDERER_TOKEN: "${FM_RENDERER_TOKEN:-}"
     depends_on:
       redis:
         condition: service_healthy
@@ -46,6 +54,23 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # Headless renderer for JS-heavy pages. Opt-in via the `render`
+  # compose profile:
+  #     docker compose --profile render up -d
+  # and set FM_RENDERER_URL=http://chromium:3000/content on fetchmark.
+  # The image is pinned but intentionally documented as movable — bump
+  # when upstream ships a security release.
+  chromium:
+    image: ghcr.io/browserless/chromium:latest
+    profiles: ["render"]
+    restart: unless-stopped
+    environment:
+      CONCURRENT: "4"
+      TIMEOUT: "30000"
+      TOKEN: "${FM_RENDERER_TOKEN:-}"
+    expose:
+      - "3000"
 
 volumes:
   redis-data:

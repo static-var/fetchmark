@@ -16,6 +16,7 @@ import (
 	"github.com/staticvar/fetchmark/internal/adapters/egress"
 	"github.com/staticvar/fetchmark/internal/adapters/extractor"
 	"github.com/staticvar/fetchmark/internal/adapters/fetcher"
+	"github.com/staticvar/fetchmark/internal/adapters/renderer"
 	"github.com/staticvar/fetchmark/internal/adapters/robots"
 	"github.com/staticvar/fetchmark/internal/adapters/searxng"
 	"github.com/staticvar/fetchmark/internal/api"
@@ -93,6 +94,24 @@ func run() error {
 		Extractor: extractor.New(true),
 		Cache:     c,
 		Ranker:    rank.New(),
+	}
+
+	// Optional headless renderer. A dedicated HTTP client is used so
+	// the renderer's timeout and body budgets are isolated from the
+	// outbound user-URL fetch path.
+	if cfg.RendererURL != "" {
+		rend, rerr := renderer.NewHTTP(renderer.Options{
+			Endpoint: cfg.RendererURL,
+			Timeout:  cfg.RendererTimeout,
+			MaxBody:  cfg.RendererMaxBody,
+			Token:    cfg.RendererToken,
+		})
+		if rerr != nil {
+			return rerr
+		}
+		pipe.Renderer = rend
+		pipe.RendererAuto = cfg.RendererAuto
+		log.Info("headless renderer enabled", "endpoint", cfg.RendererURL, "auto", cfg.RendererAuto)
 	}
 
 	handler := api.NewRouter(api.Deps{

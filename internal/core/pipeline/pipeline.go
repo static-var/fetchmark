@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/staticvar/fetchmark/internal/adapters/cache"
+	"github.com/staticvar/fetchmark/internal/adapters/extractor"
 	"github.com/staticvar/fetchmark/internal/adapters/fetcher"
 	"github.com/staticvar/fetchmark/internal/core/model"
 	"github.com/staticvar/fetchmark/internal/core/search"
@@ -34,6 +35,14 @@ type Extractor interface {
 // Ranker scores and orders results.
 type Ranker interface {
 	Score(query string, results []model.SearchResult) []model.SearchResult
+}
+
+// Renderer turns a URL into post-JS HTML. The pipeline calls it when
+// the first-pass extractor flags a page as js_required, and only if
+// Options.Render is true or the pipeline was configured with
+// RendererAuto. A nil Renderer means the feature is disabled.
+type Renderer interface {
+	Render(ctx context.Context, url string) ([]byte, error)
 }
 
 // Cache is the subset of cache.Cache the pipeline uses. The three
@@ -59,15 +68,22 @@ type Options struct {
 	Timeout       time.Duration
 	Formats       []string
 	AdminRequest  bool
+	// Render forces the headless renderer to handle this call, bypassing
+	// the first-pass plain fetch only when the extractor flags it as
+	// js_required. It is a hint; an absent Renderer or a disabled
+	// RendererAuto still results in a plain fetch.
+	Render bool
 }
 
 // Pipeline wires search, fetch, extract, cache, rank.
 type Pipeline struct {
-	Searcher  search.Searcher
-	Fetcher   Fetcher
-	Extractor Extractor
-	Cache     Cache
-	Ranker    Ranker
+	Searcher     search.Searcher
+	Fetcher      Fetcher
+	Extractor    Extractor
+	Cache        Cache
+	Ranker       Ranker
+	Renderer     Renderer
+	RendererAuto bool
 }
 
 // Search runs the full search pipeline: hit SearXNG, parallel fetch,
@@ -125,6 +141,7 @@ func (p *Pipeline) process(ctx context.Context, o Options, seed []model.SearchRe
 	}
 
 	cacheBypass := o.ProxyURL != ""
+	renderMode := o.Render && p.Renderer != nil
 
 	// Cold path: for each result in need of extraction, run a bounded
 	// goroutine that does get-recheck → local singleflight → Redis lock
@@ -136,9 +153,15 @@ func (p *Pipeline) process(ctx context.Context, o Options, seed []model.SearchRe
 		i := i
 		r := &results[i]
 		// Try cache first synchronously — a hit avoids spawning a worker
-		// and keeps the common path allocation-free.
+		// and keeps the common path allocation-free. Render requests
+		// consult the rendered key space so a plain-fetched
+		// js_required placeholder never shadows a later render.
 		if !cacheBypass && p.Cache != nil {
-			if raw, _ := p.Cache.Get(ctx, cache.ArtifactKey(r.URL)); raw != nil {
+			primaryKey := cache.ArtifactKey(r.URL)
+			if renderMode {
+				primaryKey = cache.RenderedArtifactKey(r.URL)
+			}
+			if raw, _ := p.Cache.Get(ctx, primaryKey); raw != nil {
 				var c model.Content
 				if err := json.Unmarshal(raw, &c); err == nil {
 					applyContent(r, &c)
@@ -193,7 +216,15 @@ func applyContent(r *model.SearchResult, c *model.Content) {
 // on entry to avoid redundant fetches after another caller populated
 // it while this caller was queued.
 func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.SearchResult, cacheBypass bool) {
+	// Render mode picks a separate cache key space so a plain-fetched
+	// js_required placeholder never shadows a later render=true call,
+	// and a rendered blob never masks the cheap path for callers who
+	// did not ask for it.
+	renderMode := o.Render && p.Renderer != nil
 	key := cache.ArtifactKey(r.URL)
+	if renderMode {
+		key = cache.RenderedArtifactKey(r.URL)
+	}
 
 	// doFetch is the critical section: a single fetch+extract that
 	// ultimately produces a JSON-serialised Content blob in the cache.
@@ -205,6 +236,15 @@ func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.Sear
 				return raw, nil
 			}
 		}
+
+		// Explicit render: skip the plain fetch entirely and go
+		// straight to the headless service. The extractor still runs
+		// on the rendered HTML so the output shape matches the plain
+		// path (Content with markdown/metadata/etc.).
+		if renderMode {
+			return p.renderAndExtract(ctx, o, r, key, cacheBypass)
+		}
+
 		req := fetcher.Request{
 			URL:           r.URL,
 			ProxyURL:      o.ProxyURL,
@@ -253,6 +293,19 @@ func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.Sear
 				obs.CacheEvents.WithLabelValues("fa", "write").Inc()
 			}
 		}
+
+		// Automatic render upgrade: when the first-pass extractor
+		// flagged js_required and the operator has opted into auto
+		// rendering, try the headless service. The plain blob is kept
+		// under the plain key so future non-render requests hit cache;
+		// the rendered blob is stored under a separate key so it does
+		// not clobber the cheap path.
+		if p.Renderer != nil && p.RendererAuto &&
+			c.UnsupportedReason == extractor.ReasonJSRequired {
+			if _, rerr := p.tryAutoRender(ctx, o, r, cacheBypass); rerr == nil {
+				// r already updated in place by tryAutoRender.
+			}
+		}
 		return blob, nil
 	}
 
@@ -295,6 +348,67 @@ func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.Sear
 		}
 		return raw, nil
 	})
+}
+
+// renderAndExtract runs the renderer as the primary source of HTML,
+// extracts content, and writes the result to the supplied cache key.
+// Used for explicit render=true requests.
+func (p *Pipeline) renderAndExtract(ctx context.Context, o Options, r *model.SearchResult, key string, cacheBypass bool) ([]byte, error) {
+	start := time.Now()
+	raw, err := p.Renderer.Render(ctx, r.URL)
+	if err != nil {
+		r.Unsupported = "render_failed"
+		obs.RendererOutcome.WithLabelValues("error").Inc()
+		return nil, err
+	}
+	obs.RendererOutcome.WithLabelValues("ok").Inc()
+	obs.RendererDuration.Observe(time.Since(start).Seconds())
+	r.FetchMS = int64(time.Since(start) / time.Millisecond)
+
+	c, err := p.Extractor.Extract(raw, r.URL)
+	if err != nil || c == nil {
+		r.Unsupported = "extract_failed"
+		obs.ExtractOutcome.WithLabelValues("error").Inc()
+		return nil, err
+	}
+	if c.UnsupportedReason != "" {
+		obs.ExtractOutcome.WithLabelValues(c.UnsupportedReason).Inc()
+	} else {
+		obs.ExtractOutcome.WithLabelValues("ok").Inc()
+	}
+	blob, mErr := json.Marshal(c)
+	applyContent(r, c)
+	if mErr != nil {
+		return nil, mErr
+	}
+	_ = o // reserved for future per-request renderer knobs
+	if !cacheBypass && p.Cache != nil {
+		if sErr := p.Cache.Set(ctx, key, blob); sErr == nil {
+			obs.CacheEvents.WithLabelValues("fa", "write").Inc()
+		}
+	}
+	return blob, nil
+}
+
+// tryAutoRender upgrades a js_required plain result by running the
+// headless renderer and replacing r's content when the second pass
+// produces a real extraction. The rendered blob is cached under the
+// rendered key; the plain key is left untouched so cheap paths stay
+// cheap.
+func (p *Pipeline) tryAutoRender(ctx context.Context, o Options, r *model.SearchResult, cacheBypass bool) ([]byte, error) {
+	renderedKey := cache.RenderedArtifactKey(r.URL)
+	if !cacheBypass && p.Cache != nil {
+		if raw, _ := p.Cache.Get(ctx, renderedKey); raw != nil {
+			var c model.Content
+			if err := json.Unmarshal(raw, &c); err == nil && c.UnsupportedReason != extractor.ReasonJSRequired {
+				applyContent(r, &c)
+				r.FromCache = true
+				obs.CacheEvents.WithLabelValues("fa", "hit").Inc()
+				return raw, nil
+			}
+		}
+	}
+	return p.renderAndExtract(ctx, o, r, renderedKey, cacheBypass)
 }
 
 // applyRaw decodes a cached artifact blob onto r. It is the symmetric

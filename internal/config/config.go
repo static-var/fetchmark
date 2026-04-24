@@ -52,6 +52,16 @@ type Config struct {
 
 	DashboardUser     string `env:"FM_DASHBOARD_USER"`
 	DashboardPassword string `env:"FM_DASHBOARD_PASSWORD"`
+
+	// Headless renderer integration. When RendererURL is empty the
+	// feature is disabled and render=true requests degrade to the plain
+	// fetch path. RendererAuto toggles automatic retry when the
+	// extractor flags a page as js_required.
+	RendererURL     string        `env:"FM_RENDERER_URL"`
+	RendererAuto    bool          `env:"FM_RENDERER_AUTO"     envDefault:"false"`
+	RendererTimeout time.Duration `env:"FM_RENDERER_TIMEOUT"  envDefault:"20s"`
+	RendererMaxBody int64         `env:"FM_RENDERER_MAX_BODY" envDefault:"10485760"` // 10 MiB
+	RendererToken   string        `env:"FM_RENDERER_TOKEN"`
 }
 
 // Load reads configuration from the environment, applies defaults,

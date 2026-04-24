@@ -183,9 +183,17 @@ func CanonicalURL(raw string) (string, error) {
 	return u.String(), nil
 }
 
-// ArtifactKey returns the Redis key for a fetch artifact.
+// ArtifactKey returns the Redis key for a fetch artifact (plain fetch).
 func ArtifactKey(canonicalURL string) string {
 	return fmt.Sprintf("fa:v%s:%s", ExtractorVersion, sha(canonicalURL))
+}
+
+// RenderedArtifactKey returns the Redis key for a fetch artifact
+// produced via the headless renderer. A separate key space prevents a
+// cached js_required placeholder from shadowing a later render=true
+// call (and vice versa — a rendered blob never masks the cheap path).
+func RenderedArtifactKey(canonicalURL string) string {
+	return fmt.Sprintf("fa:v%s:%s:r", ExtractorVersion, sha(canonicalURL))
 }
 
 // FormatKey returns the Redis key for a rendered-format payload.

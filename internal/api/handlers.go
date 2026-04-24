@@ -20,6 +20,7 @@ type searchRequest struct {
 	TimeoutMS     int      `json:"timeout_ms,omitempty"`
 	RespectRobots *bool    `json:"respect_robots,omitempty"`
 	ProxyURL      string   `json:"proxy_url,omitempty"`
+	Render        *bool    `json:"render,omitempty"`
 }
 
 // parseRequest is the JSON body for POST /v1/parse.
@@ -30,6 +31,7 @@ type parseRequest struct {
 	TimeoutMS     int      `json:"timeout_ms,omitempty"`
 	RespectRobots *bool    `json:"respect_robots,omitempty"`
 	ProxyURL      string   `json:"proxy_url,omitempty"`
+	Render        *bool    `json:"render,omitempty"`
 }
 
 // errBadRequest is used by decodeJSON to signal client-side failures.
@@ -47,7 +49,7 @@ func decodeJSON(r *http.Request, v any) error {
 
 // buildOptions maps a request's common options onto pipeline.Options and
 // enforces admin-only gates on proxy_url and respect_robots=false.
-func buildOptions(r *http.Request, defaultRobots bool, proxy, ua string, respect *bool, timeoutMS int, maxResults int, formats, engines []string, query string, urls []string) (pipeline.Options, error) {
+func buildOptions(r *http.Request, defaultRobots bool, proxy, ua string, respect *bool, timeoutMS int, maxResults int, formats, engines []string, query string, urls []string, render *bool) (pipeline.Options, error) {
 	p := middleware.PrincipalFrom(r.Context())
 	opts := pipeline.Options{
 		Query:         query,
@@ -74,6 +76,9 @@ func buildOptions(r *http.Request, defaultRobots bool, proxy, ua string, respect
 			return opts, errors.New("forbidden: proxy_url requires admin key")
 		}
 		opts.ProxyURL = proxy
+	}
+	if render != nil {
+		opts.Render = *render
 	}
 	return opts, nil
 }
@@ -102,7 +107,7 @@ func searchHandler(d Deps) http.HandlerFunc {
 			max = d.Config.ResultsCap
 		}
 		opts, err := buildOptions(r, d.Config.RespectRobots, req.ProxyURL, "", req.RespectRobots,
-			req.TimeoutMS, max, req.Formats, req.Engines, req.Query, nil)
+			req.TimeoutMS, max, req.Formats, req.Engines, req.Query, nil, req.Render)
 		if err != nil {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return
@@ -153,7 +158,7 @@ func parseHandler(d Deps) http.HandlerFunc {
 			return
 		}
 		opts, err := buildOptions(r, d.Config.RespectRobots, req.ProxyURL, "", req.RespectRobots,
-			req.TimeoutMS, 0, req.Formats, nil, req.Query, req.URLs)
+			req.TimeoutMS, 0, req.Formats, nil, req.Query, req.URLs, req.Render)
 		if err != nil {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return

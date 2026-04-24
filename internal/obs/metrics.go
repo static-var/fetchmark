@@ -109,3 +109,21 @@ var SearxngInstanceUp = promauto.NewGaugeVec(
 	},
 	[]string{"instance"},
 )
+
+// RendererOutcome counts headless-render invocations by outcome.
+var RendererOutcome = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "fetchmark_renderer_outcome_total",
+		Help: "Headless renderer invocations.",
+	},
+	[]string{"outcome"}, // ok, error, disabled, skipped
+)
+
+// RendererDuration records renderer latency for successful calls.
+var RendererDuration = promauto.NewHistogram(
+	prometheus.HistogramOpts{
+		Name:    "fetchmark_renderer_duration_seconds",
+		Help:    "Headless renderer call latency (successful only).",
+		Buckets: []float64{0.25, 0.5, 1, 2, 4, 8, 15, 30, 60},
+	},
+)
