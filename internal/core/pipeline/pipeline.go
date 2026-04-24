@@ -184,6 +184,7 @@ func (p *Pipeline) process(ctx context.Context, o Options, seed []model.SearchRe
 	}
 
 	results = dedupeByContentSHA(results)
+	results = dedupeNearDuplicates(results)
 
 	if p.Ranker != nil && query != "" {
 		results = p.Ranker.Score(query, results)
