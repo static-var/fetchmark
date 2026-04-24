@@ -1,0 +1,150 @@
+// Package searxng implements the Searcher interface against a SearXNG
+// instance's JSON API.
+//
+// SearXNG's /search endpoint returns results ordered by engine priority,
+// not by relevance, and carries no per-result score field. Re-ranking
+// therefore happens in internal/core/rank, not here.
+package searxng
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/staticvar/fetchmark/internal/core/search"
+)
+
+// Client is a thin typed wrapper around a SearXNG instance.
+type Client struct {
+	base *url.URL
+	http *http.Client
+}
+
+// New constructs a Client. The provided HTTP client is used as-is, which
+// lets callers install their own egress policy, proxy settings, and
+// metrics middleware. If httpc is nil, a client with a 10s timeout is
+// used.
+func New(baseURL string, httpc *http.Client) (*Client, error) {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("searxng: parse base url: %w", err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return nil, errors.New("searxng: base url must include scheme and host")
+	}
+	if httpc == nil {
+		httpc = &http.Client{Timeout: 10 * time.Second}
+	}
+	return &Client{base: u, http: httpc}, nil
+}
+
+// response mirrors the subset of SearXNG's JSON we consume. The schema
+// includes more fields (infoboxes, suggestions, answers) — deliberately
+// ignored here to keep the contract small.
+type response struct {
+	Query             string      `json:"query"`
+	NumberOfResults   int         `json:"number_of_results"`
+	Results           []apiResult `json:"results"`
+	UnresponsiveEngines [][]any   `json:"unresponsive_engines"`
+}
+
+type apiResult struct {
+	URL      string   `json:"url"`
+	Title    string   `json:"title"`
+	Content  string   `json:"content"`
+	Engine   string   `json:"engine"`
+	Engines  []string `json:"engines"`
+	Category string   `json:"category"`
+}
+
+// Search runs a SearXNG query and returns hits in the order SearXNG
+// provided them. Ordering is not relevance-ranked.
+func (c *Client) Search(ctx context.Context, q search.Query) ([]search.Hit, error) {
+	if strings.TrimSpace(q.Q) == "" {
+		return nil, errors.New("searxng: empty query")
+	}
+
+	u := *c.base
+	u.Path = strings.TrimRight(u.Path, "/") + "/search"
+
+	vals := url.Values{}
+	vals.Set("q", q.Q)
+	vals.Set("format", "json")
+	if len(q.Engines) > 0 {
+		vals.Set("engines", strings.Join(q.Engines, ","))
+	}
+	if len(q.Categories) > 0 {
+		vals.Set("categories", strings.Join(q.Categories, ","))
+	}
+	if q.Language != "" {
+		vals.Set("language", q.Language)
+	}
+	if q.MaxResults > 0 {
+		// SearXNG paginates via pageno; request only page 1 and rely on
+		// the server's default page size. Consumers downstream trim to
+		// MaxResults after dedupe.
+		vals.Set("pageno", strconv.Itoa(1))
+	}
+	u.RawQuery = vals.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("searxng: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("searxng: status %d", resp.StatusCode)
+	}
+
+	var body response
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, fmt.Errorf("searxng: decode: %w", err)
+	}
+
+	out := make([]search.Hit, 0, len(body.Results))
+	for _, r := range body.Results {
+		engines := r.Engines
+		if len(engines) == 0 && r.Engine != "" {
+			engines = []string{r.Engine}
+		}
+		out = append(out, search.Hit{
+			URL:     r.URL,
+			Title:   r.Title,
+			Snippet: r.Content,
+			Engines: engines,
+		})
+	}
+	return out, nil
+}
+
+// Ping performs a lightweight GET against SearXNG's root to verify
+// reachability. It does not hit the /search endpoint to avoid loading
+// external engines on every readiness probe.
+func (c *Client) Ping(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base.String(), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("searxng: ping: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 500 {
+		return fmt.Errorf("searxng: ping status %d", resp.StatusCode)
+	}
+	return nil
+}
