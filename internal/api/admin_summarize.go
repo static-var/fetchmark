@@ -12,18 +12,20 @@ import (
 )
 
 // adminProviderBody is the wire shape for PUT /admin/summarize/providers.
-// Keys absent from the JSON leave existing values intact (merge-on-write
-// semantics so admins can tweak Model without re-typing the API key).
+// Optional fields are pointers so omission is distinguishable from an
+// explicit zero: omitting `max_tokens` preserves the prior value;
+// sending `"max_tokens": 0` clears it. Required identity fields
+// (Name/Kind/BaseURL/Model) are plain strings.
 type adminProviderBody struct {
-	Name        string              `json:"name"`
-	Kind        string              `json:"kind,omitempty"`
-	BaseURL     string              `json:"base_url,omitempty"`
-	APIKey      string              `json:"api_key,omitempty"`
-	Model       string              `json:"model,omitempty"`
-	TimeoutMS   int                 `json:"timeout_ms,omitempty"`
-	MaxTokens   int                 `json:"max_tokens,omitempty"`
-	Temperature float64             `json:"temperature,omitempty"`
-	Thinking    *adminThinkingBody  `json:"thinking,omitempty"`
+	Name        string             `json:"name"`
+	Kind        string             `json:"kind,omitempty"`
+	BaseURL     string             `json:"base_url,omitempty"`
+	APIKey      string             `json:"api_key,omitempty"`
+	Model       string             `json:"model,omitempty"`
+	TimeoutMS   *int               `json:"timeout_ms,omitempty"`
+	MaxTokens   *int               `json:"max_tokens,omitempty"`
+	Temperature *float64           `json:"temperature,omitempty"`
+	Thinking    *adminThinkingBody `json:"thinking,omitempty"`
 }
 
 type adminThinkingBody struct {
@@ -53,7 +55,7 @@ func adminSummarizeProviderPut(d Deps) http.HandlerFunc {
 			return
 		}
 		var body adminProviderBody
-		dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20))
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&body); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_request", "detail": err.Error()})
@@ -64,15 +66,33 @@ func adminSummarizeProviderPut(d Deps) http.HandlerFunc {
 			return
 		}
 
+		// Look up the existing config so omitted numeric fields keep
+		// their prior values. Registry.Config returns a redacted copy,
+		// but we only need the non-secret fields here — APIKey is
+		// preserved separately inside MergeWithExisting.
+		prior, _ := d.Summarizers.Config(body.Name)
+
 		overlay := summarizer.ProviderConfig{
-			Name:        body.Name,
-			Kind:        summarizer.Kind(body.Kind),
-			BaseURL:     body.BaseURL,
-			APIKey:      body.APIKey,
-			Model:       body.Model,
-			Timeout:     time.Duration(body.TimeoutMS) * time.Millisecond,
-			MaxTokens:   body.MaxTokens,
-			Temperature: body.Temperature,
+			Name:    body.Name,
+			Kind:    summarizer.Kind(body.Kind),
+			BaseURL: body.BaseURL,
+			APIKey:  body.APIKey,
+			Model:   body.Model,
+		}
+		if body.TimeoutMS != nil {
+			overlay.Timeout = time.Duration(*body.TimeoutMS) * time.Millisecond
+		} else {
+			overlay.Timeout = prior.Timeout
+		}
+		if body.MaxTokens != nil {
+			overlay.MaxTokens = *body.MaxTokens
+		} else {
+			overlay.MaxTokens = prior.MaxTokens
+		}
+		if body.Temperature != nil {
+			overlay.Temperature = *body.Temperature
+		} else {
+			overlay.Temperature = prior.Temperature
 		}
 		if body.Thinking != nil {
 			overlay.Thinking = summarizer.Thinking{
@@ -80,6 +100,8 @@ func adminSummarizeProviderPut(d Deps) http.HandlerFunc {
 				BudgetTokens: body.Thinking.BudgetTokens,
 				Effort:       body.Thinking.Effort,
 			}
+		} else {
+			overlay.Thinking = prior.Thinking
 		}
 		merged, err := d.Summarizers.MergeWithExisting(overlay)
 		if err != nil {
@@ -121,7 +143,7 @@ func adminSummarizeDefaultPut(d Deps) http.HandlerFunc {
 		var body struct {
 			Name string `json:"name"`
 		}
-		if err := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20)).Decode(&body); err != nil {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_request"})
 			return
 		}

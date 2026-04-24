@@ -115,6 +115,7 @@ func summarizeHandler(d Deps) http.HandlerFunc {
 		if len(body) > summarizeMaxBodyChars {
 			body = body[:summarizeMaxBodyChars]
 		}
+		body = sanitizeForPageBlock(body)
 		userPrompt := buildSummarizePrompt(req, body)
 
 		providerReq := summarizer.Request{
@@ -179,6 +180,34 @@ func summarizeHandler(d Deps) http.HandlerFunc {
 }
 
 const summarizeMaxBodyChars = 60_000 // ~12-15k tokens for most tokenizers
+
+// sanitizeForPageBlock neutralises any sequence that could close the
+// <page> delimiter early. A single pass replacing "</page" is enough
+// because we control the outer template; case-folding covers the
+// attacker-ish variants too.
+func sanitizeForPageBlock(s string) string {
+	if s == "" {
+		return s
+	}
+	// Replace both cases without allocating multiple times by doing a
+	// case-insensitive scan. strings.ReplaceAll on a lowered copy would
+	// lose the original casing of surrounding text, so we walk bytes.
+	var b strings.Builder
+	b.Grow(len(s))
+	target := []byte("</page")
+	lower := strings.ToLower(s)
+	i := 0
+	for i < len(s) {
+		if i+len(target) <= len(s) && lower[i:i+len(target)] == string(target) {
+			b.WriteString("<\u200bpage") // zero-width space breaks the tag
+			i += len(target)
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
 
 type summarizeError struct {
 	status  int
