@@ -25,14 +25,19 @@ type SearchResult struct {
 	Metadata    map[string]string `json:"metadata,omitempty"`
 }
 
-// Content is the structured extraction output: headline, body text, and
-// auxiliary assets.
+// Content is the structured extraction output: metadata, main text, and
+// derived renditions (cleaned HTML and Markdown). Fields are optional
+// because extraction is best-effort.
 type Content struct {
-	Title       string     `json:"title,omitempty"`
-	Byline      string     `json:"byline,omitempty"`
-	Text        string     `json:"text,omitempty"`
-	Links       []string   `json:"links,omitempty"`
-	Images      []string   `json:"images,omitempty"`
-	PublishedAt *time.Time `json:"published_at,omitempty"`
-	Language    string     `json:"language,omitempty"`
+	URL               string     `json:"url,omitempty"`
+	Title             string     `json:"title,omitempty"`
+	Author            string     `json:"author,omitempty"`
+	SiteName          string     `json:"site_name,omitempty"`
+	Description       string     `json:"description,omitempty"`
+	Language          string     `json:"language,omitempty"`
+	PublishedAt       *time.Time `json:"published_at,omitempty"`
+	MainText          string     `json:"text,omitempty"`
+	Markdown          string     `json:"markdown,omitempty"`
+	CleanedHTML       string     `json:"cleaned_html,omitempty"`
+	UnsupportedReason string     `json:"unsupported_reason,omitempty"`
 }
