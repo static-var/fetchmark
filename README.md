@@ -116,6 +116,7 @@ dashboard access) require a key listed in `FM_ADMIN_API_KEYS`.
 | Markdown / JSON / cleaned-HTML output   |   ✅   |
 | BM25 re-ranking with engine diversity   |   ✅   |
 | Exact-SHA + Jaccard near-dup dedupe     |   ✅   |
+| CJK-aware shingling for near-dup        |   ✅   |
 | Two-layer cache (Redis + in-memory)     |   ✅   |
 | Cross-instance stampede lock            |   ✅   |
 | Per-key rate limiting                   |   ✅   |
@@ -250,12 +251,11 @@ repository.
 
 ## Roadmap
 
-Live backlog: [`docs/tasks.md`](docs/tasks.md). Highlights currently on deck:
+Live backlog: [`docs/tasks.md`](docs/tasks.md). Open items:
 
-- `/v1/summarize` LLM wiring
-- SSE streaming of search results
-- Per-package deep docs
-- SimHash/MinHash dedupe (replacing the Jaccard pairwise pass at scale)
+- `/v1/summarize` LLM wiring (declined pending a concrete user need)
+- SSE streaming of search results (deferred pending demand)
+- SimHash/MinHash dedupe (declined while result cap stays ≤ 50)
 
 ---
 

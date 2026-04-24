@@ -55,24 +55,36 @@ _(none)_
   - Ranker now runs before near-dup collapse.
 - MIT license + user-facing README.
 
-## Queued
+## Done (v2 R2)
 
-- Per-package docs under `docs/dev/staticvar/fetchmark/*.md` (only the
-  index exists today).
-- Regression tests for: exhausted-retry terminal error path,
-  `/v1/parse` admin-only override (server_test currently only covers
-  search), ratelimit Redis-backed allow/deny semantics.
-- Configurable SearXNG cooldown (currently hard-coded to 30s).
-- Second Redis lock on the rendered key in the auto-render path
-  (today: at worst 2 concurrent auto-upgraders render the page twice;
-  acceptable but suboptimal under high contention).
+- Q-a — Minimal per-package docs under `docs/dev/staticvar/fetchmark/`
+  (api, dashboard, searxng, fetcher, egress, extractor, robots, cache,
+  pipeline, rank, obs). Focus on invariants, not API reference.
+- Q-b — Regression tests: fetcher exhausted-retry terminal error,
+  `/v1/parse` admin-override table (non-admin proxy/robots → 403,
+  admin → 200 + option propagation), Redis-backed ratelimit allow/deny
+  + cross-key isolation. [`4d8fb8c`]
+- Q-c — Configurable SearXNG cooldown via `FM_SEARXNG_COOLDOWN`
+  (default 30s, `validate()` rejects ≤0). `NewMultiWithCooldown`
+  constructor; non-positive runtime values clamp to default.
+  [`89246fb`]
+- Q-d — Second Redis stampede lock on `RenderedArtifactKey` in
+  auto-render. TTL sized off a `Render=true` options clone because
+  auto-render fires with `Render=false`. Post-lock re-apply clears
+  `Title`/`Unsupported` so peer-populated rendered blobs propagate
+  over js-required placeholders. [`2aec73c`]
+- D-d — CJK-aware near-duplicate shingling: char bi-grams when the
+  body is ≥30% CJK by non-whitespace/non-punct rune count, word
+  3-grams otherwise. Uses `unicode.Is(Han|Hiragana|Katakana|Hangul)`.
+  [`e6a2138`]
 
-## Deferred (v2 R2+)
+## Declined / deferred with rationale
 
-- SimHash / MinHash near-duplicate (replaces the pairwise Jaccard
-  pass when batch sizes grow beyond ~50).
-- SSE streaming of results.
-- LLM wiring for `/v1/summarize`.
-- CJK-aware shingling (current `strings.Fields` splitter degrades on
-  Chinese/Japanese/Korean bodies; use character n-grams when the
-  detected language lacks whitespace word boundaries).
+- Declined: keep Jaccard near-duplicate dedupe while FM_RESULTS_CAP <= 50;
+  revisit SimHash/MinHash only if the cap rises or profiling shows dedupe
+  latency matters.
+- Deferred pending user demand: SSE streaming of search results;
+  synchronous /v1/search remains the supported contract.
+- Declined: keep /v1/summarize as a documented 501 stub until a concrete
+  user requirement justifies choosing and operating an LLM provider
+  abstraction.
