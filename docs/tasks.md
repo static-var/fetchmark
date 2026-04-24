@@ -5,7 +5,7 @@ dependencies; this file mirrors it for humans.
 
 ## In progress
 
-_(none — v1 scope landed)_
+_(none)_
 
 ## Done (v1)
 
@@ -29,31 +29,50 @@ _(none — v1 scope landed)_
 - P9 — `/v1/summarize` stub (501) + OpenAPI spec.
 - P10 — `docs/` mirror scaffolded.
 - P11 — GHCR multi-arch release workflow.
+- Review round 1 — GPT-5.4 security/perf fixes (`7f78d2a`): egress
+  hop-by-hop revalidation, Accept-Encoding MIME sniff, token-bucket
+  sweep, `crypto/rand` sampling, ctx-propagation through pipeline.
+
+## Done (v2 R1)
+
+- Q1 — Headless renderer adapter + pipeline render branch
+  (explicit `render=true` and auto-upgrade on `js_required`).
+  Separate cache key space so plain and rendered artifacts never
+  shadow each other. [`f41eaee`]
+- Q2 — Jaccard near-duplicate dedupe (3-gram word shingles, τ=0.85),
+  run after the ranker so cluster winners use real BM25 scores.
+  [`485307b`]
+- Q3 — Multi-SearXNG failover with round-robin scheduling and 30s
+  cooldown per instance; `fetchmark_searxng_instance_up` gauge.
+  [`6497220`]
+- Q4 — Cross-instance Redis stampede lock (CAS release via Lua) +
+  per-URL cold-path rewrite that coalesces both intra-process
+  (singleflight) and inter-process callers. [`c81f1fe`]
+- Review round 2 — GPT-5.4 follow-up fixes (`7bb0f56`):
+  - SSRF egress policy applied before renderer call.
+  - Stampede-lock TTL/wait sized off `max(fetch, renderer)` timeout.
+  - Rendered `js_required` artifacts no longer cached.
+  - Ranker now runs before near-dup collapse.
+- MIT license + user-facing README.
 
 ## Queued
 
-- **Singleflight wiring in the pipeline cold path.** `Cache.Do` is
-  exported and tested but not used by `pipeline.process`. Concurrent
-  requests for the same uncached URL currently all hit origin. Needs
-  a restructure of the per-URL fetch/extract/store path onto a worker
-  pool keyed by `cache.ArtifactKey`.
-- **True shared-state Redis rate limiter** (Lua token bucket). Today
-  the Redis leg is a fixed-window INCR tied to `burst`, which
-  cross-instance behaves as ~`burst` rps, not `ratePerSec` rps. Local
-  token bucket still enforces `ratePerSec` per replica — good enough
-  for v1 but worth upgrading.
 - Per-package docs under `docs/dev/staticvar/fetchmark/*.md` (only the
   index exists today).
-- README quickstart with concrete `docker compose up` snippet.
 - Regression tests for: exhausted-retry terminal error path,
   `/v1/parse` admin-only override (server_test currently only covers
   search), ratelimit Redis-backed allow/deny semantics.
+- Configurable SearXNG cooldown (currently hard-coded to 30s).
+- Second Redis lock on the rendered key in the auto-render path
+  (today: at worst 2 concurrent auto-upgraders render the page twice;
+  acceptable but suboptimal under high contention).
 
-## Deferred (v2)
+## Deferred (v2 R2+)
 
-- Headless rendering for JS-heavy pages
-- Simhash/minhash near-duplicate
-- Multi-SearXNG failover
-- Cross-instance Redis stampede lock
-- SSE streaming of results
-- LLM wiring for `/v1/summarize`
+- SimHash / MinHash near-duplicate (replaces the pairwise Jaccard
+  pass when batch sizes grow beyond ~50).
+- SSE streaming of results.
+- LLM wiring for `/v1/summarize`.
+- CJK-aware shingling (current `strings.Fields` splitter degrades on
+  Chinese/Japanese/Korean bodies; use character n-grams when the
+  detected language lacks whitespace word boundaries).
