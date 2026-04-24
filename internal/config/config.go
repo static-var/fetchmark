@@ -1,0 +1,102 @@
+package config
+
+import (
+	"errors"
+	"strings"
+	"time"
+
+	"github.com/caarlos0/env/v11"
+)
+
+// Config captures the full runtime configuration for Fetchmark.
+// All values are sourced from environment variables to keep the
+// deployment story 12-factor friendly.
+type Config struct {
+	ListenAddr string `env:"FM_LISTEN_ADDR"    envDefault:":8080"`
+	LogLevel   string `env:"FM_LOG_LEVEL"      envDefault:"info"`
+
+	APIKeys      []string `env:"FM_API_KEYS"       envSeparator:","`
+	AdminAPIKeys []string `env:"FM_ADMIN_API_KEYS" envSeparator:","`
+
+	SearxngURL string `env:"FM_SEARXNG_URL" envDefault:"http://searxng:8080"`
+	RedisURL   string `env:"FM_REDIS_URL"   envDefault:"redis://redis:6379/0"`
+
+	FetchConcurrency     int           `env:"FM_FETCH_CONCURRENCY"      envDefault:"10"`
+	PerHostConcurrency   int           `env:"FM_PER_HOST_CONCURRENCY"   envDefault:"2"`
+	FetchTimeout         time.Duration `env:"FM_FETCH_TIMEOUT"          envDefault:"8s"`
+	HeaderTimeout        time.Duration `env:"FM_HEADER_TIMEOUT"         envDefault:"5s"`
+	FetchRetries         int           `env:"FM_FETCH_RETRIES"          envDefault:"2"`
+	MaxBodyBytes         int64         `env:"FM_MAX_BODY_BYTES"         envDefault:"5242880"`  // 5 MiB
+	MaxDecompressedBytes int64         `env:"FM_MAX_DECOMPRESSED_BYTES" envDefault:"20971520"` // 20 MiB
+	MaxRedirects         int           `env:"FM_MAX_REDIRECTS"          envDefault:"5"`
+	AllowedMIME          []string      `env:"FM_ALLOWED_MIME"           envDefault:"text/html,application/xhtml+xml" envSeparator:","`
+
+	ProxyURL       string   `env:"FM_PROXY_URL"`
+	RespectRobots  bool     `env:"FM_RESPECT_ROBOTS"  envDefault:"true"`
+	UserAgent      string   `env:"FM_USER_AGENT"      envDefault:"Fetchmark/0.1 (+https://github.com/staticvar/fetchmark)"`
+	UserAgentsPool []string `env:"FM_USER_AGENTS"     envSeparator:","`
+	Contact        string   `env:"FM_CONTACT"`
+
+	HostAllowlist []string `env:"FM_HOST_ALLOWLIST" envSeparator:","`
+	HostDenylist  []string `env:"FM_HOST_DENYLIST"  envSeparator:","`
+
+	CacheTTL   time.Duration `env:"FM_CACHE_TTL"    envDefault:"1h"`
+	MaxResults int           `env:"FM_MAX_RESULTS"  envDefault:"10"`
+	ResultsCap int           `env:"FM_RESULTS_CAP"  envDefault:"50"`
+
+	DashboardUser     string `env:"FM_DASHBOARD_USER"`
+	DashboardPassword string `env:"FM_DASHBOARD_PASSWORD"`
+}
+
+// Load reads configuration from the environment, applies defaults,
+// trims whitespace around list entries and validates the result.
+func Load() (Config, error) {
+	var c Config
+	if err := env.Parse(&c); err != nil {
+		return Config{}, err
+	}
+	c.APIKeys = cleanList(c.APIKeys)
+	c.AdminAPIKeys = cleanList(c.AdminAPIKeys)
+	c.AllowedMIME = cleanList(c.AllowedMIME)
+	c.UserAgentsPool = cleanList(c.UserAgentsPool)
+	c.HostAllowlist = cleanList(c.HostAllowlist)
+	c.HostDenylist = cleanList(c.HostDenylist)
+	if err := c.validate(); err != nil {
+		return Config{}, err
+	}
+	return c, nil
+}
+
+func (c Config) validate() error {
+	if c.FetchConcurrency <= 0 {
+		return errors.New("FM_FETCH_CONCURRENCY must be > 0")
+	}
+	if c.PerHostConcurrency <= 0 {
+		return errors.New("FM_PER_HOST_CONCURRENCY must be > 0")
+	}
+	if c.MaxBodyBytes <= 0 || c.MaxDecompressedBytes <= 0 {
+		return errors.New("body byte budgets must be > 0")
+	}
+	if c.MaxResults <= 0 || c.ResultsCap <= 0 || c.MaxResults > c.ResultsCap {
+		return errors.New("FM_MAX_RESULTS must be >0 and <= FM_RESULTS_CAP")
+	}
+	return nil
+}
+
+// DashboardEnabled reports whether the ops dashboard should be mounted.
+// Disabled-by-default keeps unauthenticated exposure impossible when the
+// operator forgets to set credentials.
+func (c Config) DashboardEnabled() bool {
+	return c.DashboardUser != "" && c.DashboardPassword != ""
+}
+
+func cleanList(in []string) []string {
+	out := in[:0]
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}

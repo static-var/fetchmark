@@ -1,0 +1,30 @@
+services:
+  fetchmark:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: fetchmark:dev
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      FM_LISTEN_ADDR: ":8080"
+      FM_SEARXNG_URL: "${FM_SEARXNG_URL:?set FM_SEARXNG_URL in .env}"
+      FM_REDIS_URL: "redis://redis:6379/0"
+      FM_API_KEYS: "${FM_API_KEYS:-dev-key}"
+      FM_ADMIN_API_KEYS: "${FM_ADMIN_API_KEYS:-dev-admin}"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
