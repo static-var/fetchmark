@@ -166,7 +166,129 @@ paths:
 
   /v1/summarize:
     post:
-      summary: (v1 stub) Returns 501 with the v2 request/response schema.
+      summary: Summarize a single URL using an LLM provider (OpenAI- or Anthropic-compatible).
+      description: |
+        Parses the URL through the normal extraction pipeline, then asks
+        the configured LLM to summarize the extracted text. The source
+        page is wrapped in `<page>…</page>` delimiters and the model is
+        instructed to treat it as untrusted. Raw reasoning/thinking text
+        is never returned — only token counts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url:          { type: string, format: uri }
+                format:       { type: string, enum: [markdown, plain, bullets], default: markdown }
+                instructions: { type: string }
+                provider:     { type: string, description: "Provider name (not kind). Defaults to the configured default." }
+                model:        { type: string }
+                max_tokens:   { type: integer }
+                temperature:  { type: number }
+                timeout_ms:   { type: integer }
+                render:       { type: boolean }
+                thinking:
+                  type: object
+                  properties:
+                    enabled:       { type: boolean }
+                    budget_tokens: { type: integer, description: "Anthropic only, >= 1024 when set" }
+                    effort:        { type: string, enum: [low, medium, high], description: "OpenAI reasoning_effort" }
       responses:
-        "501":
-          description: not_implemented — schema returned in the body.
+        "200":
+          description: summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  summary:  { type: string }
+                  provider: { type: string }
+                  model:    { type: string }
+                  url:      { type: string }
+                  title:    { type: string }
+                  usage:
+                    type: object
+                    properties:
+                      prompt_tokens:     { type: integer }
+                      completion_tokens: { type: integer }
+                      reasoning_tokens:  { type: integer }
+                      total_tokens:      { type: integer }
+        "400": { description: bad_request }
+        "401": { description: missing_or_invalid_api_key }
+        "422": { description: unsupported_or_empty_content }
+        "429": { description: provider_rate_limited }
+        "502": { description: provider_auth_or_upstream_error }
+        "503": { description: summarize_not_configured }
+        "504": { description: provider_timeout }
+
+  /admin/summarize/config:
+    get:
+      summary: (admin) Snapshot of configured providers. API keys are never returned.
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  default:   { type: string }
+                  providers: { type: array, items: { type: object } }
+        "401": { description: missing_or_invalid_admin_key }
+
+  /admin/summarize/providers:
+    put:
+      summary: (admin) Upsert a single provider. Omitted fields preserve prior values.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:        { type: string }
+                kind:        { type: string, enum: [openai, anthropic] }
+                base_url:    { type: string }
+                api_key:     { type: string, description: "Write-only. Never returned." }
+                model:       { type: string }
+                timeout_ms:  { type: integer }
+                max_tokens:  { type: integer }
+                temperature: { type: number }
+                thinking:    { type: object }
+      responses:
+        "200": { description: updated }
+        "400": { description: invalid_config }
+        "401": { description: missing_or_invalid_admin_key }
+
+  /admin/summarize/providers/{name}:
+    delete:
+      summary: (admin) Remove a provider by name.
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: deleted }
+        "401": { description: missing_or_invalid_admin_key }
+
+  /admin/summarize/default:
+    put:
+      summary: (admin) Set the default provider by name.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        "200": { description: ok }
+        "400": { description: unknown_provider }
+        "401": { description: missing_or_invalid_admin_key }

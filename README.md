@@ -67,7 +67,7 @@ A successful response contains `results[]` with `title`, `markdown`,
 | ------ | ----------------- | ---------------------------------------------------- |
 | POST   | `/v1/search`      | SearXNG query → parallel fetch → extract → BM25 rank |
 | POST   | `/v1/parse`       | Fetch + extract arbitrary URLs; ranks if `query` set |
-| POST   | `/v1/summarize`   | Reserved for LLM summarisation (returns 501 today)   |
+| POST   | `/v1/summarize`   | Parse + LLM summary (OpenAI-/Anthropic-compatible)   |
 | GET    | `/healthz`        | Liveness probe                                       |
 | GET    | `/readyz`         | Deep-check: SearXNG + Redis reachable                |
 | GET    | `/metrics`        | Prometheus exposition                                |
@@ -253,9 +253,47 @@ repository.
 
 Live backlog: [`docs/tasks.md`](docs/tasks.md). Open items:
 
-- `/v1/summarize` LLM wiring (declined pending a concrete user need)
 - SSE streaming of search results (deferred pending demand)
 - SimHash/MinHash dedupe (declined while result cap stays ≤ 50)
+- Cross-instance summarizer config replication via Redis pub/sub (deferred;
+  env vars remain authoritative, per-instance admin overrides are in-process)
+
+### Summarize — configuration
+
+The `/v1/summarize` endpoint accepts a `url` and calls the configured LLM
+through either the OpenAI or Anthropic wire format. Any proxy that speaks
+the OpenAI Chat Completions shape works (SubSandwich, Groq, Together,
+Azure OpenAI, etc.). Configure via env:
+
+```bash
+# Required to enable the endpoint (at least one provider):
+FM_SUMMARIZE_OPENAI_BASE_URL=http://localhost:4141/v1/
+FM_SUMMARIZE_OPENAI_API_KEY=placeholder       # sent literally; use your key otherwise
+FM_SUMMARIZE_OPENAI_MODEL=glm-5.1
+FM_SUMMARIZE_OPENAI_TIMEOUT=60s
+FM_SUMMARIZE_OPENAI_MAX_TOKENS=1024
+FM_SUMMARIZE_OPENAI_THINKING=false            # set true + THINK_EFFORT for o-series
+FM_SUMMARIZE_OPENAI_THINK_EFFORT=medium       # low|medium|high
+
+FM_SUMMARIZE_ANTHROPIC_BASE_URL=https://api.anthropic.com/
+FM_SUMMARIZE_ANTHROPIC_API_KEY=sk-ant-...
+FM_SUMMARIZE_ANTHROPIC_MODEL=claude-3-5-sonnet-latest
+FM_SUMMARIZE_ANTHROPIC_MAX_TOKENS=1024
+FM_SUMMARIZE_ANTHROPIC_THINKING=false
+FM_SUMMARIZE_ANTHROPIC_THINK_BUDGET=2048      # >= 1024 required by Anthropic
+
+FM_SUMMARIZE_DEFAULT_PROVIDER=openai          # "openai" or "anthropic"
+```
+
+Per-request overrides (`provider`, `model`, `max_tokens`, `temperature`,
+`thinking`, `timeout_ms`) are supported on the POST body. Admins can also
+upsert providers at runtime via `/admin/summarize/providers` (see the
+OpenAPI spec); those overrides live in-process and revert to env on
+restart.
+
+**Docker compose + SubSandwich:** when running Fetchmark in the compose
+stack and SubSandwich on the host, point the base URL at
+`http://host.docker.internal:4141/v1/`.
 
 ---
 

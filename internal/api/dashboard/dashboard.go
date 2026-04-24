@@ -34,6 +34,27 @@ type Deps struct {
 	SearxngURL string
 	RedisURL   string
 	Version    string
+
+	// Summarizers, when set, feeds the Summarize providers partial.
+	// The dashboard asks for a redacted snapshot so raw API keys
+	// never enter the html/template pipeline.
+	Summarizers SummarizerView
+}
+
+// SummarizerView is the narrow read-only port the dashboard needs. It
+// lets us avoid importing the summarizer package here (which would
+// create a cycle once the registry is wired elsewhere).
+type SummarizerView interface {
+	Snapshot() (providers []SummarizerProvider, defaultName string)
+}
+
+// SummarizerProvider is a UI-safe view of a configured provider. No
+// API keys; BaseURL is considered operational metadata.
+type SummarizerProvider struct {
+	Name    string
+	Kind    string
+	BaseURL string
+	Model   string
 }
 
 // Mount attaches the dashboard to the provided chi-compatible mux. User
@@ -61,6 +82,37 @@ func Mount(mux interface {
 	mux.Handle("/dashboard/partials/engines", auth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		renderEngines(w, d)
 	})))
+	mux.Handle("/dashboard/partials/summarize", auth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		renderSummarize(w, d)
+	})))
+}
+
+func renderSummarize(w http.ResponseWriter, d Deps) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if d.Summarizers == nil {
+		fmt.Fprint(w, `<p class="k">summarize disabled — set FM_SUMMARIZE_*_MODEL env vars or use the admin API</p>`)
+		return
+	}
+	provs, def := d.Summarizers.Snapshot()
+	if len(provs) == 0 {
+		fmt.Fprint(w, `<p class="k">no providers configured yet</p>`)
+		return
+	}
+	fmt.Fprint(w, `<table><thead><tr><th>name</th><th>kind</th><th>model</th><th>base url</th><th>default</th></tr></thead><tbody>`)
+	for _, p := range provs {
+		star := ""
+		if p.Name == def {
+			star = `<span class="ok">★</span>`
+		}
+		fmt.Fprintf(w, `<tr><td>%s</td><td>%s</td><td>%s</td><td><code>%s</code></td><td>%s</td></tr>`,
+			template.HTMLEscapeString(p.Name),
+			template.HTMLEscapeString(p.Kind),
+			template.HTMLEscapeString(p.Model),
+			template.HTMLEscapeString(p.BaseURL),
+			star)
+	}
+	fmt.Fprint(w, `</tbody></table>`)
+	fmt.Fprint(w, `<p class="k">config is env-authoritative; the admin API persists overrides in-process only (restart restores env defaults)</p>`)
 }
 
 func basicAuth(wantUser, wantPass string) func(http.Handler) http.Handler {
@@ -113,6 +165,9 @@ var indexTmpl = template.Must(template.New("index").Parse(`<!doctype html>
 
   <h2>SearXNG engine health</h2>
   <div id="engines" hx-get="/dashboard/partials/engines" hx-trigger="load, every 10s">loading…</div>
+
+  <h2>Summarize providers</h2>
+  <div id="summarize" hx-get="/dashboard/partials/summarize" hx-trigger="load, every 15s">loading…</div>
 
   <h2>Scrape window</h2>
   <div class="k">Counters are cumulative since process start; divide deltas across two polls to derive a rate.</div>

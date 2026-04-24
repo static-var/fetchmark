@@ -83,13 +83,41 @@ func NewRouter(d Deps) http.Handler {
 	}
 
 	dashboard.Mount(r, d.Config.DashboardUser, d.Config.DashboardPassword, dashboard.Deps{
-		Gatherer:   prometheus.DefaultGatherer,
-		SearxngURL: d.Config.SearxngURL,
-		RedisURL:   redactRedis(d.Config.RedisURL),
-		Version:    "0.1",
+		Gatherer:    prometheus.DefaultGatherer,
+		SearxngURL:  d.Config.SearxngURL,
+		RedisURL:    redactRedis(d.Config.RedisURL),
+		Version:     "0.1",
+		Summarizers: summarizerDashboardView(d.Summarizers),
 	})
 
 	return r
+}
+
+// summarizerDashboardView adapts *summarizer.Registry to the narrow
+// dashboard.SummarizerView interface without leaking API keys. We do
+// the type-level wiring here (not in dashboard/) so the dashboard
+// package stays free of the summarizer import.
+func summarizerDashboardView(reg *summarizer.Registry) dashboard.SummarizerView {
+	if reg == nil {
+		return nil
+	}
+	return summarizerAdapter{reg: reg}
+}
+
+type summarizerAdapter struct{ reg *summarizer.Registry }
+
+func (s summarizerAdapter) Snapshot() (out []dashboard.SummarizerProvider, def string) {
+	cfgs, d := s.reg.Snapshot()
+	out = make([]dashboard.SummarizerProvider, 0, len(cfgs))
+	for _, c := range cfgs {
+		out = append(out, dashboard.SummarizerProvider{
+			Name:    c.Name,
+			Kind:    string(c.Kind),
+			BaseURL: c.BaseURL,
+			Model:   c.Model,
+		})
+	}
+	return out, d
 }
 
 // redactRedis removes user:pass from a redis URL before it reaches the

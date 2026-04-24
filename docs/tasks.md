@@ -78,6 +78,30 @@ _(none)_
   3-grams otherwise. Uses `unicode.Is(Han|Hiragana|Katakana|Hangul)`.
   [`e6a2138`]
 
+## v2-R3 — shipped
+
+- R3-a — Summarizer Provider port with OpenAI (Chat Completions) and
+  Anthropic (Messages) adapters using the official SDKs. Normalised
+  Usage (prompt/completion/reasoning/total) and classified errors
+  (auth/rate_limit/upstream/timeout/bad_request/network/cancelled) so
+  the handler can map cleanly to HTTP statuses. Raw reasoning/thinking
+  text is intentionally dropped — only token counts surface. [`f6ac633`]
+- R3-b — Env-authoritative config with per-provider profiles
+  (`FM_SUMMARIZE_{OPENAI,ANTHROPIC}_*`). [`9977399`]
+- R3-c — Prometheus metrics:
+  `fetchmark_summarize_outcome_total{provider,outcome}`,
+  `fetchmark_summarize_duration_seconds{provider}`,
+  `fetchmark_summarize_tokens_total{provider,class}`. [`cbb15a7`]
+- R3-d — `/v1/summarize` wired: parses URL through the pipeline,
+  validates non-empty content, delimits the page with `<page>…</page>`
+  and instructs the model to treat it as untrusted. Admin JSON API at
+  `/admin/summarize/{config,providers,providers/{name},default}` with
+  merge-on-write semantics so operators don't retype API keys to tweak
+  a model. Dashboard partial lists configured providers. [`b914670`]
+- R3-e — Summarizer registry bootstrapped from env in main; a
+  dedicated http.Client is used so the LLM path sidesteps the Fetcher's
+  SSRF egress policy (trusted upstream). [`aab401a`]
+
 ## Declined / deferred with rationale
 
 - Declined: keep Jaccard near-duplicate dedupe while FM_RESULTS_CAP <= 50;
@@ -85,6 +109,7 @@ _(none)_
   latency matters.
 - Deferred pending user demand: SSE streaming of search results;
   synchronous /v1/search remains the supported contract.
-- Declined: keep /v1/summarize as a documented 501 stub until a concrete
-  user requirement justifies choosing and operating an LLM provider
-  abstraction.
+- Deferred: cross-instance summarizer config replication via Redis
+  pub/sub. Env vars remain authoritative; admin overrides are
+  in-process and revert on restart. Operators running multiple
+  replicas should promote permanent changes to env and redeploy.
