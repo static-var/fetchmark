@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/staticvar/fetchmark/internal/api/dashboard"
 	"github.com/staticvar/fetchmark/internal/api/middleware"
 	"github.com/staticvar/fetchmark/internal/config"
 	"github.com/staticvar/fetchmark/internal/core/model"
@@ -59,7 +62,29 @@ func NewRouter(d Deps) http.Handler {
 		r.Post("/summarize", summarizeHandler(d))
 	})
 
+	dashboard.Mount(r, d.Config.DashboardUser, d.Config.DashboardPassword, dashboard.Deps{
+		Gatherer:   prometheus.DefaultGatherer,
+		SearxngURL: d.Config.SearxngURL,
+		RedisURL:   redactRedis(d.Config.RedisURL),
+		Version:    "0.1",
+	})
+
 	return r
+}
+
+// redactRedis removes user:pass from a redis URL before it reaches the
+// dashboard header so operators can screenshot the page without leaking
+// credentials.
+func redactRedis(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	if i := strings.Index(raw, "@"); i >= 0 {
+		if j := strings.Index(raw, "://"); j >= 0 && j+3 < i {
+			return raw[:j+3] + "…@" + raw[i+1:]
+		}
+	}
+	return raw
 }
 
 func healthz(w http.ResponseWriter, _ *http.Request) {
