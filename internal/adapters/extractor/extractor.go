@@ -96,9 +96,8 @@ func (e *Extractor) Extract(rawHTML []byte, pageURL string) (*model.Content, err
 		if err := html.Render(&buf, result.ContentNode); err == nil {
 			c.CleanedHTML = buf.String()
 		}
-		mdBytes, mdErr := htmltomarkdown.ConvertNode(result.ContentNode)
-		if mdErr == nil {
-			c.Markdown = strings.TrimSpace(string(mdBytes))
+		if md, ok := safeConvertMarkdown(result.ContentNode); ok {
+			c.Markdown = strings.TrimSpace(md)
 		}
 	}
 
@@ -107,6 +106,26 @@ func (e *Extractor) Extract(rawHTML []byte, pageURL string) (*model.Content, err
 	}
 
 	return c, nil
+}
+
+// safeConvertMarkdown wraps html-to-markdown/v2's ConvertNode in a
+// defer/recover because the upstream "collapse" pass has been observed
+// to panic with "index out of range" on some real-world pages
+// (see collapse/collapse.go:125). A panic on one page must not fail
+// the whole batch — we just return (_, false) and the caller falls
+// back to the cleaned HTML + plain text we already have.
+func safeConvertMarkdown(node *html.Node) (md string, ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			md = ""
+			ok = false
+		}
+	}()
+	b, err := htmltomarkdown.ConvertNode(node)
+	if err != nil {
+		return "", false
+	}
+	return string(b), true
 }
 
 // looksJSRequired implements the heuristic documented in the plan:

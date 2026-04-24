@@ -71,7 +71,7 @@ components:
         status:         { type: integer, description: "HTTP status returned by upstream." }
         score:          { type: number, format: float }
         content:        { $ref: "#/components/schemas/Content" }
-        unsupported:    { type: string, description: "Reason if parsing could not complete: non_html, js_required, robots_disallowed, egress_blocked, fetch_failed, extract_failed." }
+        unsupported_reason: { type: string, description: "Reason if parsing could not complete: non_html, js_required, robots_disallowed, egress_blocked, fetch_failed, extract_failed." }
 
     Content:
       type: object
