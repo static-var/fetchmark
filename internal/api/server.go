@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/staticvar/fetchmark/internal/api/middleware"
 	"github.com/staticvar/fetchmark/internal/config"
@@ -21,6 +22,8 @@ type Deps struct {
 	Log      *slog.Logger
 	Config   config.Config
 	Pipeline PipelineRunner
+	// Redis is optional; when set it backs cross-instance rate limiting.
+	Redis *redis.Client
 	// ReadyCheck reports whether hard dependencies (Redis, SearXNG) are
 	// reachable. Returning nil means ready; non-nil is rendered as the
 	// failure reason on /readyz.
@@ -50,6 +53,7 @@ func NewRouter(d Deps) http.Handler {
 
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(middleware.APIKey(d.Config.APIKeys, d.Config.AdminAPIKeys))
+		r.Use(middleware.RateLimiter(d.Config.RateLimitPerSec, d.Config.RateLimitBurst, d.Redis))
 		r.Post("/search", searchHandler(d))
 		r.Post("/parse", parseHandler(d))
 		r.Post("/summarize", summarizeHandler(d))

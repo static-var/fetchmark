@@ -44,6 +44,11 @@ type Config struct {
 	MaxResults int           `env:"FM_MAX_RESULTS"  envDefault:"10"`
 	ResultsCap int           `env:"FM_RESULTS_CAP"  envDefault:"50"`
 
+	// Per-API-key rate limits. Rate is requests per second sustained;
+	// Burst is the token bucket capacity. A Rate of 0 disables limiting.
+	RateLimitPerSec float64 `env:"FM_RATE_LIMIT_PER_SEC" envDefault:"5"`
+	RateLimitBurst  int     `env:"FM_RATE_LIMIT_BURST"   envDefault:"20"`
+
 	DashboardUser     string `env:"FM_DASHBOARD_USER"`
 	DashboardPassword string `env:"FM_DASHBOARD_PASSWORD"`
 }

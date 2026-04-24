@@ -99,6 +99,7 @@ func run() error {
 		Log:      log,
 		Config:   cfg,
 		Pipeline: pipe,
+		Redis:    rdb,
 		ReadyCheck: func() error {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
