@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/staticvar/fetchmark/internal/adapters/cache"
@@ -22,7 +23,7 @@ import (
 
 // Fetcher is the subset of fetcher.Fetcher the pipeline needs.
 type Fetcher interface {
-	FetchMany(ctx context.Context, reqs []fetcher.Request) []fetcher.Result
+	Fetch(ctx context.Context, r fetcher.Request) fetcher.Result
 }
 
 // Extractor turns raw HTML into a domain Content value.
@@ -35,10 +36,15 @@ type Ranker interface {
 	Score(query string, results []model.SearchResult) []model.SearchResult
 }
 
-// Cache is the subset of cache.Cache the pipeline uses.
+// Cache is the subset of cache.Cache the pipeline uses. The three
+// extra methods beyond Get/Set exist so the cold path can coalesce
+// concurrent callers both within a process (Do) and across processes
+// (WithLock).
 type Cache interface {
 	Get(ctx context.Context, key string) ([]byte, error)
 	Set(ctx context.Context, key string, val []byte) error
+	Do(key string, fn func() (any, error)) (any, error, bool)
+	WithLock(ctx context.Context, key string, opts cache.LockOptions, fn func(context.Context) ([]byte, error)) ([]byte, error)
 }
 
 // Options adjust a single pipeline call.
@@ -119,69 +125,38 @@ func (p *Pipeline) process(ctx context.Context, o Options, seed []model.SearchRe
 	}
 
 	cacheBypass := o.ProxyURL != ""
-	needIdx := []int{}
-	fetchReqs := []fetcher.Request{}
-	for i, r := range results {
+
+	// Cold path: for each result in need of extraction, run a bounded
+	// goroutine that does get-recheck → local singleflight → Redis lock
+	// → get-recheck → fetch → extract → cache.Set. The fetcher already
+	// enforces global and per-host concurrency internally, so we spawn
+	// one goroutine per URL without additional limiting here.
+	var wg sync.WaitGroup
+	for i := range results {
+		i := i
+		r := &results[i]
+		// Try cache first synchronously — a hit avoids spawning a worker
+		// and keeps the common path allocation-free.
 		if !cacheBypass && p.Cache != nil {
 			if raw, _ := p.Cache.Get(ctx, cache.ArtifactKey(r.URL)); raw != nil {
 				var c model.Content
 				if err := json.Unmarshal(raw, &c); err == nil {
-					applyContent(&results[i], &c)
-					results[i].FromCache = true
+					applyContent(r, &c)
+					r.FromCache = true
 					obs.CacheEvents.WithLabelValues("fa", "hit").Inc()
 					continue
 				}
 			}
 			obs.CacheEvents.WithLabelValues("fa", "miss").Inc()
 		}
-		needIdx = append(needIdx, i)
-		fetchReqs = append(fetchReqs, fetcher.Request{
-			URL:           r.URL,
-			ProxyURL:      o.ProxyURL,
-			UserAgent:     o.UserAgent,
-			RespectRobots: o.RespectRobots,
-			Timeout:       o.Timeout,
-		})
-	}
 
-	if len(fetchReqs) > 0 {
-		fetched := p.Fetcher.FetchMany(ctx, fetchReqs)
-		for i, fr := range fetched {
-			idx := needIdx[i]
-			results[idx].FetchMS = fr.FetchMS
-			if fr.Err != nil {
-				results[idx].Unsupported = "fetch_failed"
-				obs.FetchOutcome.WithLabelValues("error").Inc()
-				continue
-			}
-			if fr.Unsupported != "" {
-				results[idx].Unsupported = fr.Unsupported
-				obs.FetchOutcome.WithLabelValues(fr.Unsupported).Inc()
-				continue
-			}
-			obs.FetchOutcome.WithLabelValues("ok").Inc()
-			obs.FetchDuration.Observe(float64(fr.FetchMS) / 1000.0)
-			c, err := p.Extractor.Extract(fr.Body, results[idx].URL)
-			if err != nil || c == nil {
-				results[idx].Unsupported = "extract_failed"
-				obs.ExtractOutcome.WithLabelValues("error").Inc()
-				continue
-			}
-			if c.UnsupportedReason != "" {
-				obs.ExtractOutcome.WithLabelValues(c.UnsupportedReason).Inc()
-			} else {
-				obs.ExtractOutcome.WithLabelValues("ok").Inc()
-			}
-			applyContent(&results[idx], c)
-			if !cacheBypass && p.Cache != nil {
-				if blob, mErr := json.Marshal(c); mErr == nil {
-					if sErr := p.Cache.Set(ctx, cache.ArtifactKey(results[idx].URL), blob); sErr == nil {
-						obs.CacheEvents.WithLabelValues("fa", "write").Inc()
-					}
-				}
-			}
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p.fetchAndExtract(ctx, o, r, cacheBypass)
+		}()
 	}
+	wg.Wait()
 
 	results = dedupeByContentSHA(results)
 	results = dedupeNearDuplicates(results)
@@ -210,6 +185,152 @@ func applyContent(r *model.SearchResult, c *model.Content) {
 		r.Unsupported = c.UnsupportedReason
 	}
 }
+
+// fetchAndExtract populates r by fetching, extracting, and caching a
+// single URL. Concurrent callers of the same URL within a process are
+// coalesced via Cache.Do; across processes a Redis-backed WithLock
+// further suppresses duplicated work. Every path re-checks the cache
+// on entry to avoid redundant fetches after another caller populated
+// it while this caller was queued.
+func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.SearchResult, cacheBypass bool) {
+	key := cache.ArtifactKey(r.URL)
+
+	// doFetch is the critical section: a single fetch+extract that
+	// ultimately produces a JSON-serialised Content blob in the cache.
+	doFetch := func(ctx context.Context) ([]byte, error) {
+		// Re-check once more inside the lock — another worker/process
+		// may have populated the entry while we waited for the lock.
+		if !cacheBypass && p.Cache != nil {
+			if raw, _ := p.Cache.Get(ctx, key); raw != nil {
+				return raw, nil
+			}
+		}
+		req := fetcher.Request{
+			URL:           r.URL,
+			ProxyURL:      o.ProxyURL,
+			UserAgent:     o.UserAgent,
+			RespectRobots: o.RespectRobots,
+			Timeout:       o.Timeout,
+		}
+		fr := p.Fetcher.Fetch(ctx, req)
+		// Record fetch-side outcome on the result; Err + Unsupported
+		// cases short-circuit the rest of the pipeline for this URL.
+		if fr.Err != nil {
+			r.Unsupported = "fetch_failed"
+			r.FetchMS = fr.FetchMS
+			obs.FetchOutcome.WithLabelValues("error").Inc()
+			return nil, fr.Err
+		}
+		if fr.Unsupported != "" {
+			r.Unsupported = fr.Unsupported
+			r.FetchMS = fr.FetchMS
+			obs.FetchOutcome.WithLabelValues(fr.Unsupported).Inc()
+			return nil, nil
+		}
+		r.FetchMS = fr.FetchMS
+		obs.FetchOutcome.WithLabelValues("ok").Inc()
+		obs.FetchDuration.Observe(float64(fr.FetchMS) / 1000.0)
+
+		c, err := p.Extractor.Extract(fr.Body, r.URL)
+		if err != nil || c == nil {
+			r.Unsupported = "extract_failed"
+			obs.ExtractOutcome.WithLabelValues("error").Inc()
+			return nil, err
+		}
+		if c.UnsupportedReason != "" {
+			obs.ExtractOutcome.WithLabelValues(c.UnsupportedReason).Inc()
+		} else {
+			obs.ExtractOutcome.WithLabelValues("ok").Inc()
+		}
+		blob, mErr := json.Marshal(c)
+		if mErr != nil {
+			applyContent(r, c)
+			return nil, mErr
+		}
+		applyContent(r, c)
+		if !cacheBypass && p.Cache != nil {
+			if sErr := p.Cache.Set(ctx, key, blob); sErr == nil {
+				obs.CacheEvents.WithLabelValues("fa", "write").Inc()
+			}
+		}
+		return blob, nil
+	}
+
+	// Fast path: no cache configured (bypass or nil) just runs
+	// directly.
+	if cacheBypass || p.Cache == nil {
+		_, _ = doFetch(ctx)
+		return
+	}
+
+	// Local singleflight by key suppresses duplicate in-flight workers
+	// inside this process. Cross-instance suppression happens inside
+	// doFetch via WithLock.
+	_, _, _ = p.Cache.Do(key, func() (any, error) {
+		// Recheck cache once more — singleflight may have raced us.
+		if raw, _ := p.Cache.Get(ctx, key); raw != nil {
+			if err := applyRaw(r, raw); err == nil {
+				r.FromCache = true
+			}
+			return raw, nil
+		}
+		// Cross-process lock. LockTTL is generous relative to our
+		// fetch+extract budget so a slow fetcher doesn't lose the lock
+		// mid-request.
+		raw, err := p.Cache.WithLock(ctx, key, cache.LockOptions{
+			LockTTL:      p.lockTTL(o),
+			WaitMax:      p.lockWait(o),
+			PollInterval: 100 * time.Millisecond,
+		}, doFetch)
+		if err != nil {
+			return nil, err
+		}
+		// If another worker/process populated the cache while we
+		// waited, the lock path returned that blob without calling our
+		// fetcher — reflect it on r.
+		if r.Content == nil && raw != nil {
+			if err := applyRaw(r, raw); err == nil {
+				r.FromCache = true
+			}
+		}
+		return raw, nil
+	})
+}
+
+// applyRaw decodes a cached artifact blob onto r. It is the symmetric
+// counterpart of the Cache.Set call inside doFetch.
+func applyRaw(r *model.SearchResult, raw []byte) error {
+	var c model.Content
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return err
+	}
+	applyContent(r, &c)
+	return nil
+}
+
+// lockTTL derives the Redis-lock TTL from the fetch timeout so the lock
+// is guaranteed to outlive the work it guards, with a small cushion for
+// extraction and serialisation.
+func (p *Pipeline) lockTTL(o Options) time.Duration {
+	base := o.Timeout
+	if base <= 0 {
+		base = 10 * time.Second
+	}
+	return base + 5*time.Second
+}
+
+// lockWait caps how long a second caller blocks before giving up and
+// running the fetch without the lock. We want contention to degrade
+// into extra work, never into error responses.
+func (p *Pipeline) lockWait(o Options) time.Duration {
+	base := o.Timeout
+	if base <= 0 {
+		base = 10 * time.Second
+	}
+	return base
+}
+
+// removed duplicate applyContent below this point
 
 func dedupeByContentSHA(in []model.SearchResult) []model.SearchResult {
 	seen := map[string]struct{}{}

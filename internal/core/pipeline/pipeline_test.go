@@ -26,16 +26,12 @@ type stubFetcher struct {
 	resp map[string]fetcher.Result
 }
 
-func (f stubFetcher) FetchMany(_ context.Context, reqs []fetcher.Request) []fetcher.Result {
-	out := make([]fetcher.Result, len(reqs))
-	for i, r := range reqs {
-		if v, ok := f.resp[r.URL]; ok {
-			out[i] = v
-		} else {
-			out[i] = fetcher.Result{URL: r.URL, Err: errors.New("no stub")}
-		}
+func (f stubFetcher) Fetch(_ context.Context, r fetcher.Request) fetcher.Result {
+	if v, ok := f.resp[r.URL]; ok {
+		v.URL = r.URL
+		return v
 	}
-	return out
+	return fetcher.Result{URL: r.URL, Err: errors.New("no stub")}
 }
 
 type stubExtractor struct{}

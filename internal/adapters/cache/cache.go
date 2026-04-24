@@ -12,6 +12,7 @@ package cache
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -54,8 +55,9 @@ type Cache struct {
 	mu  sync.RWMutex
 	mem map[string]memEntry
 
-	stop chan struct{}
-	sf   singleflight.Group
+	stop      chan struct{}
+	closeOnce sync.Once
+	sf        singleflight.Group
 }
 
 type memEntry struct {
@@ -78,12 +80,14 @@ func New(rdb *redis.Client, ttl time.Duration) *Cache {
 	return c
 }
 
-// Close releases the background sweeper (in-memory mode only).
+// Close releases the background sweeper (in-memory mode only). It is
+// idempotent and safe to call from any goroutine.
 func (c *Cache) Close() {
-	if c.stop != nil {
-		close(c.stop)
-		c.stop = nil
-	}
+	c.closeOnce.Do(func() {
+		if c.stop != nil {
+			close(c.stop)
+		}
+	})
 }
 
 func (c *Cache) sweeper() {
@@ -239,4 +243,102 @@ func (c *Cache) Set(ctx context.Context, key string, val []byte) error {
 func (c *Cache) Do(key string, fn func() (any, error)) (any, error, bool) {
 	v, err, shared := c.sf.Do(key, fn)
 	return v, err, shared
+}
+
+// LockOptions tunes WithLock behaviour. Each duration is independent so
+// the lock TTL is never conflated with caller deadlines.
+type LockOptions struct {
+	// LockTTL is the expiry applied to the Redis lock key. Callers
+	// should size it as an upper bound on the critical section.
+	// Default: 10s.
+	LockTTL time.Duration
+	// WaitMax is the maximum time a caller waits to acquire the lock
+	// before falling through to run fn without the lock (best-effort
+	// stampede suppression rather than strict mutual exclusion).
+	// A zero value means: wait until ctx is done.
+	WaitMax time.Duration
+	// PollInterval is how often acquisition is retried. Default: 100ms.
+	PollInterval time.Duration
+}
+
+// releaseScript releases a Redis lock only if the token still matches
+// ours, guarding against accidentally releasing a lock that expired and
+// was re-acquired by another node.
+//
+//	KEYS[1] = lock key, ARGV[1] = token
+const releaseScript = `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`
+
+// WithLock acquires a cross-instance advisory lock on key, runs fn, and
+// releases the lock. Inside fn callers should re-check the cache — by
+// the time the lock is acquired another node may already have populated
+// it. When Redis is not configured this degrades to a direct fn call;
+// the local singleflight layer on top already coalesces concurrent
+// callers inside a single process.
+func (c *Cache) WithLock(ctx context.Context, key string, opts LockOptions, fn func(context.Context) ([]byte, error)) ([]byte, error) {
+	if fn == nil {
+		return nil, errors.New("cache: WithLock: fn is nil")
+	}
+	if c.rdb == nil {
+		return fn(ctx)
+	}
+	if opts.LockTTL <= 0 {
+		opts.LockTTL = 10 * time.Second
+	}
+	if opts.PollInterval <= 0 {
+		opts.PollInterval = 100 * time.Millisecond
+	}
+
+	// 128-bit token is comfortably beyond any realistic collision risk
+	// and preserves the CAS invariant even under aggressive lock churn.
+	var rawTok [16]byte
+	if _, err := rand.Read(rawTok[:]); err != nil {
+		return nil, fmt.Errorf("cache: lock token: %w", err)
+	}
+	token := hex.EncodeToString(rawTok[:])
+
+	lockKey := "fm:lock:" + key
+
+	var waitCtx context.Context = ctx
+	var cancel context.CancelFunc
+	if opts.WaitMax > 0 {
+		waitCtx, cancel = context.WithTimeout(ctx, opts.WaitMax)
+		defer cancel()
+	}
+
+	acquired := false
+	for {
+		ok, err := c.rdb.SetNX(ctx, lockKey, token, opts.LockTTL).Result()
+		if err == nil && ok {
+			acquired = true
+			break
+		}
+		if err != nil {
+			// Lock service unreachable — run fn anyway. Correctness
+			// still holds because Set uses its own cache TTL; the worst
+			// case is a small amount of duplicated work.
+			return fn(ctx)
+		}
+		select {
+		case <-waitCtx.Done():
+			// Timed out waiting: proceed without the lock. This matches
+			// the "best-effort stampede suppression" contract — under
+			// contention we'd rather serve with extra work than return
+			// a 5xx.
+			return fn(ctx)
+		case <-time.After(opts.PollInterval):
+		}
+	}
+
+	defer func() {
+		if !acquired {
+			return
+		}
+		// Best-effort release with a detached context so a canceled
+		// caller still frees the lock.
+		relCtx, relCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer relCancel()
+		_, _ = c.rdb.Eval(relCtx, releaseScript, []string{lockKey}, token).Result()
+	}()
+
+	return fn(ctx)
 }
