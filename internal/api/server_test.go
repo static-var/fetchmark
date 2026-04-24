@@ -135,17 +135,20 @@ func TestSearch_ProxyAllowedForAdmin(t *testing.T) {
 	}
 }
 
-func TestSummarize_Returns501WithSchema(t *testing.T) {
+func TestSummarize_NotConfiguredReturns503(t *testing.T) {
+	// With no summarizer registry configured the endpoint must fail
+	// fast with 503 so callers can surface a clear configuration hint
+	// instead of timing out against nil providers.
 	r, _ := newTestRouter(nil)
-	req := httptest.NewRequest("POST", "/v1/summarize", strings.NewReader("{}"))
+	req := httptest.NewRequest("POST", "/v1/summarize", strings.NewReader(`{"url":"https://x/y"}`))
 	req.Header.Set("X-API-Key", "k1")
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotImplemented {
-		t.Fatalf("status = %d", rec.Code)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "schema") {
-		t.Fatalf("body missing schema: %s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "summarize_not_configured") {
+		t.Fatalf("body missing hint: %s", rec.Body.String())
 	}
 }
 

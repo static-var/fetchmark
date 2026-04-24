@@ -171,26 +171,10 @@ func parseHandler(d Deps) http.HandlerFunc {
 	}
 }
 
-func summarizeHandler(_ Deps) http.HandlerFunc {
-	// v1 stub — designed but not wired to an LLM. Documented in
-	// docs/openapi.yaml; returns the schema so integrators can build
-	// against it.
+func summarizeHandlerStub(_ Deps) http.HandlerFunc {
+	// Retained only to keep the old stub referenced if the new handler
+	// is removed for a rollback. Not wired by NewRouter.
 	return func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusNotImplemented, map[string]any{
-			"error":       "not_implemented",
-			"operation":   "summarize",
-			"description": "Planned v2: accepts {url, format, instructions} and returns an LLM-generated summary.",
-			"schema": map[string]any{
-				"request": map[string]string{
-					"url":          "string (required)",
-					"format":       "string (markdown|plain|bullet)",
-					"instructions": "string (optional)",
-				},
-				"response": map[string]string{
-					"summary": "string",
-					"model":   "string",
-				},
-			},
-		})
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "not_implemented"})
 	}
 }

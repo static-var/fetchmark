@@ -13,6 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/staticvar/fetchmark/internal/adapters/summarizer"
 	"github.com/staticvar/fetchmark/internal/api/dashboard"
 	"github.com/staticvar/fetchmark/internal/api/middleware"
 	"github.com/staticvar/fetchmark/internal/config"
@@ -31,6 +32,11 @@ type Deps struct {
 	// reachable. Returning nil means ready; non-nil is rendered as the
 	// failure reason on /readyz.
 	ReadyCheck func() error
+
+	// Summarizers, when non-nil, backs /v1/summarize and the admin
+	// config endpoints. A nil or empty registry turns summarize into
+	// a 503 "not configured" response.
+	Summarizers *summarizer.Registry
 }
 
 // PipelineRunner is the subset of *pipeline.Pipeline the API layer uses;
@@ -61,6 +67,20 @@ func NewRouter(d Deps) http.Handler {
 		r.Post("/parse", parseHandler(d))
 		r.Post("/summarize", summarizeHandler(d))
 	})
+
+	// Admin surface. Mounted only when admin keys are configured so
+	// there is no unauthenticated path to probe. The admin middleware
+	// rejects non-admin callers with 403.
+	if len(d.Config.AdminAPIKeys) > 0 {
+		r.Route("/admin", func(r chi.Router) {
+			r.Use(middleware.APIKey(d.Config.AdminAPIKeys, d.Config.AdminAPIKeys))
+			r.Use(middleware.RateLimiter(d.Config.RateLimitPerSec, d.Config.RateLimitBurst, d.Redis))
+			r.Get("/summarize/config", adminSummarizeGet(d))
+			r.Put("/summarize/providers", adminSummarizeProviderPut(d))
+			r.Delete("/summarize/providers/{name}", adminSummarizeProviderDelete(d))
+			r.Put("/summarize/default", adminSummarizeDefaultPut(d))
+		})
+	}
 
 	dashboard.Mount(r, d.Config.DashboardUser, d.Config.DashboardPassword, dashboard.Deps{
 		Gatherer:   prometheus.DefaultGatherer,
