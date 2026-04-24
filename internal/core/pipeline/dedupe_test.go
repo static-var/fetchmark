@@ -123,3 +123,37 @@ if isCJKDominant("the quick brown fox jumps over 猫") {
 t.Fatal("ASCII-dominant body should not trip isCJKDominant")
 }
 }
+
+// Near-duplicate realism check: a base CJK article plus a short
+// appended credit/boilerplate tail should still collapse against the
+// base under the existing 0.85 threshold. This guards against the
+// char-bigram branch being too strict for real-world reposts.
+func TestDedupeNearDuplicates_CJKWithAppendedTailCollapses(t *testing.T) {
+base := "机器学习是人工智能的一个分支它研究计算机如何模拟或实现人类的学习行为以获取新的知识或技能重新组织已有的知识结构使之不断改善自身的性能它是人工智能的核心"
+withTail := base + "来源新浪科技编辑张三"
+in := []model.SearchResult{
+{URL: "https://a/", Score: 2, Content: &model.Content{MainText: base}},
+{URL: "https://b/", Score: 1, Content: &model.Content{MainText: withTail}},
+}
+out := dedupeNearDuplicates(in)
+if len(out) != 1 {
+t.Fatalf("base + short appended tail should collapse; got %d survivors (Jaccard too strict)", len(out))
+}
+if out[0].URL != "https://a/" {
+t.Fatalf("expected higher-score a to survive; got %s", out[0].URL)
+}
+}
+
+// Hangul coverage: the CJK branch relies on unicode.Is(Hangul) and
+// char bi-grams. Identical Korean bodies must collapse.
+func TestDedupeNearDuplicates_HangulIdenticalBodiesCollapse(t *testing.T) {
+body := "기계 학습은 인공 지능의 한 분야로 컴퓨터가 학습할 수 있도록 하는 알고리즘과 기술을 개발하는 분야이다"
+in := []model.SearchResult{
+{URL: "https://a/", Score: 2, Content: &model.Content{MainText: body}},
+{URL: "https://b/", Score: 1, Content: &model.Content{MainText: body}},
+}
+out := dedupeNearDuplicates(in)
+if len(out) != 1 || out[0].URL != "https://a/" {
+t.Fatalf("identical Hangul bodies should collapse to higher-score a; got %+v", out)
+}
+}

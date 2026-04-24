@@ -423,6 +423,19 @@ func (p *Pipeline) renderAndExtract(ctx context.Context, o Options, r *model.Sea
 	return blob, nil
 }
 
+// applyRenderedContent applies a rendered-artifact blob onto r,
+// overwriting any js_required placeholder populated by an earlier
+// plain fetch. Unlike applyContent (fill-only), this unconditionally
+// clears placeholder Title/Unsupported before applying so the rendered
+// upgrade is guaranteed to surface on r. Used at every rendered-cache-
+// hit site in tryAutoRender (pre-lock check, in-lock re-check, and
+// post-lock peer-populated path).
+func applyRenderedContent(r *model.SearchResult, c *model.Content) {
+	r.Title = ""
+	r.Unsupported = ""
+	applyContent(r, c)
+}
+
 // tryAutoRender upgrades a js_required plain result by running the
 // headless renderer and replacing r's content when the second pass
 // produces a real extraction. The rendered blob is cached under the
@@ -440,7 +453,7 @@ func (p *Pipeline) tryAutoRender(ctx context.Context, o Options, r *model.Search
 		if raw, _ := p.Cache.Get(ctx, renderedKey); raw != nil {
 			var c model.Content
 			if err := json.Unmarshal(raw, &c); err == nil && c.UnsupportedReason != extractor.ReasonJSRequired {
-				applyContent(r, &c)
+				applyRenderedContent(r, &c)
 				r.FromCache = true
 				obs.CacheEvents.WithLabelValues("fa", "hit").Inc()
 				return raw, nil
@@ -467,7 +480,7 @@ func (p *Pipeline) tryAutoRender(ctx context.Context, o Options, r *model.Search
 		if raw, _ := p.Cache.Get(ctx, renderedKey); raw != nil {
 			var c model.Content
 			if err := json.Unmarshal(raw, &c); err == nil && c.UnsupportedReason != extractor.ReasonJSRequired {
-				applyContent(r, &c)
+				applyRenderedContent(r, &c)
 				r.FromCache = true
 				obs.CacheEvents.WithLabelValues("fa", "hit").Inc()
 				return raw, nil
@@ -486,11 +499,7 @@ func (p *Pipeline) tryAutoRender(ctx context.Context, o Options, r *model.Search
 	if raw != nil && r.FromCache == false {
 		var c model.Content
 		if err := json.Unmarshal(raw, &c); err == nil && c.UnsupportedReason != extractor.ReasonJSRequired {
-			// Clear the stale js_required so applyContent can promote
-			// the rendered title/markdown onto r.
-			r.Title = ""
-			r.Unsupported = ""
-			applyContent(r, &c)
+			applyRenderedContent(r, &c)
 			r.FromCache = true
 		}
 	}
@@ -518,10 +527,12 @@ func (p *Pipeline) lockTTL(o Options) time.Duration {
 }
 
 // lockWait caps how long a second caller blocks before giving up and
-// running the work without the lock. We want contention to degrade
-// into extra work, never into error responses.
+// running the work without the lock. Match lockTTL so a waiter only
+// falls back to unlocked (duplicate) work when the lock is genuinely
+// stale, not while the leader is still legitimately inside its
+// critical section. Caller cancellation is still governed by ctx.
 func (p *Pipeline) lockWait(o Options) time.Duration {
-	return p.criticalBudget(o)
+	return p.lockTTL(o)
 }
 
 // criticalBudget returns the worst-case wall time for the work the

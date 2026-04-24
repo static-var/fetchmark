@@ -33,8 +33,8 @@ optional auto-render → dedupe → BM25, and returns
   peer-populated rendered blobs over a js-required placeholder,
   callers must clear `r.Title` and `r.Unsupported` first. This is
   done in the auto-render post-lock re-apply block.
-- Near-dup dedupe runs after exact-SHA dedupe and before BM25 rerank
-  so ranking operates on the deduped set.
+- Near-dup dedupe runs **after** BM25 rerank so cluster winners are
+  selected on real BM25 scores, not on ingest order.
 
 ## Tests
 

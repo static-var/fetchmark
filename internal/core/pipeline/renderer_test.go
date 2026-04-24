@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -278,5 +279,51 @@ t.Fatalf("first render should hit once; got %d", rend.hits)
 _ = p.Parse(context.Background(), Options{URLs: []string{"https://spa.example/js"}, Render: true})
 if rend.hits != 2 {
 t.Fatalf("js_required rendered blob must not be cached; expected hits=2 got %d", rend.hits)
+}
+}
+
+// TestPipeline_RendererAuto_CacheHitOverwritesPlaceholder proves the
+// pre-lock rendered-cache-hit branch of tryAutoRender replaces a stale
+// js_required placeholder with the rendered title/markdown. Regression
+// from GPT-5.4 round-3 review: applyContent is fill-only and was being
+// called on an r that already carried js_required placeholder fields,
+// so cache hits silently kept the placeholder.
+func TestPipeline_RendererAuto_CacheHitOverwritesPlaceholder(t *testing.T) {
+mr, err := miniredis.Run()
+if err != nil {
+t.Fatalf("miniredis: %v", err)
+}
+t.Cleanup(mr.Close)
+rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+t.Cleanup(func() { _ = rdb.Close() })
+
+c := cache.New(rdb, time.Minute)
+url := "https://spa.example/prewarmed"
+
+// Pre-warm the rendered cache as if a prior request already
+// populated it. No renderer is wired so the only way r can come
+// back with the rendered Title is via the cache-hit branch.
+blob, _ := json.Marshal(model.Content{Title: "Rendered", Markdown: "rendered md"})
+if err := c.Set(context.Background(), cache.RenderedArtifactKey(url), blob); err != nil {
+t.Fatalf("cache set: %v", err)
+}
+
+p := &Pipeline{Extractor: jsAwareExtractor{}, Cache: c, RendererAuto: true}
+r := &model.SearchResult{
+URL:         url,
+Title:       "Loading…",
+Unsupported: extractor.ReasonJSRequired,
+}
+if _, err := p.tryAutoRender(context.Background(), Options{Timeout: time.Second}, r, false); err != nil {
+t.Fatalf("tryAutoRender: %v", err)
+}
+if r.Title != "Rendered" {
+t.Fatalf("cache-hit branch must overwrite placeholder Title; got %q", r.Title)
+}
+if r.Unsupported != "" {
+t.Fatalf("cache-hit branch must clear js_required placeholder; got %q", r.Unsupported)
+}
+if !r.FromCache {
+t.Fatal("FromCache should be set on rendered-cache hit")
 }
 }
