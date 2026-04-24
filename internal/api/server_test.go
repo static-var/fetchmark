@@ -160,3 +160,68 @@ func TestParse_Success(t *testing.T) {
 		t.Fatalf("status=%d calls=%d body=%s", rec.Code, p.parseCalls, rec.Body.String())
 	}
 }
+
+// Admin-only overrides on /v1/parse must 403 for non-admin keys and
+// propagate through to pipeline.Options when the caller is admin.
+// Mirrors TestSearch_Proxy* but for the parse route; catches regressions
+// where buildOptions is wired only into the search handler.
+func TestParse_AdminOverridesTable(t *testing.T) {
+	type tc struct {
+		name   string
+		apiKey string
+		body   string
+		want   int
+		assert func(t *testing.T, p *fakePipeline)
+	}
+	cases := []tc{
+		{
+			name:   "non_admin_proxy_rejected",
+			apiKey: "k1",
+			body:   `{"urls":["https://x/y"],"proxy_url":"http://proxy:8080"}`,
+			want:   http.StatusForbidden,
+		},
+		{
+			name:   "non_admin_robots_false_rejected",
+			apiKey: "k1",
+			body:   `{"urls":["https://x/y"],"respect_robots":false}`,
+			want:   http.StatusForbidden,
+		},
+		{
+			name:   "admin_proxy_accepted",
+			apiKey: "admin1",
+			body:   `{"urls":["https://x/y"],"proxy_url":"http://proxy:8080"}`,
+			want:   http.StatusOK,
+			assert: func(t *testing.T, p *fakePipeline) {
+				if p.lastOpts.ProxyURL != "http://proxy:8080" {
+					t.Fatalf("proxy not propagated: %q", p.lastOpts.ProxyURL)
+				}
+			},
+		},
+		{
+			name:   "admin_robots_false_accepted",
+			apiKey: "admin1",
+			body:   `{"urls":["https://x/y"],"respect_robots":false}`,
+			want:   http.StatusOK,
+			assert: func(t *testing.T, p *fakePipeline) {
+				if p.lastOpts.RespectRobots {
+					t.Fatalf("respect_robots override not propagated")
+				}
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r, p := newTestRouter(nil)
+			req := httptest.NewRequest("POST", "/v1/parse", strings.NewReader(c.body))
+			req.Header.Set("X-API-Key", c.apiKey)
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, req)
+			if rec.Code != c.want {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, c.want, rec.Body.String())
+			}
+			if c.assert != nil {
+				c.assert(t, p)
+			}
+		})
+	}
+}

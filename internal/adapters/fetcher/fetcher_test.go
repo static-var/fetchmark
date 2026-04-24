@@ -119,6 +119,33 @@ func TestFetch_NonRetriedClientError(t *testing.T) {
 	}
 }
 
+// Retries exhausted against a persistent 5xx must surface a terminal
+// error so the pipeline marks the result fetch_failed rather than
+// silently emitting a non-2xx "success". Guards against a regression
+// where the retry loop's synthetic error was dropped on the floor.
+func TestFetch_RetriesExhausted_TerminalError(t *testing.T) {
+	var count int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&count, 1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	f := newFetcher(t, Budgets{Retries: 2})
+	res := f.Fetch(context.Background(), Request{URL: srv.URL})
+	if res.Err == nil {
+		t.Fatalf("expected terminal error after exhausted retries; status=%d", res.Status)
+	}
+	if res.Status != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", res.Status)
+	}
+	if got, want := atomic.LoadInt32(&count), int32(3); got != want {
+		t.Fatalf("attempts = %d, want %d (initial + 2 retries)", got, want)
+	}
+	if !strings.Contains(res.Err.Error(), "after 2 retries") {
+		t.Fatalf("error = %q; want mention of 'after 2 retries'", res.Err)
+	}
+}
+
 func TestFetch_EgressBlockedByPolicy(t *testing.T) {
 	// Use external policy + loopback URL -> must be rejected pre-connect.
 	f, err := New(Options{
