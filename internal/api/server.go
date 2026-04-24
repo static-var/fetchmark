@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -11,19 +12,26 @@ import (
 
 	"github.com/staticvar/fetchmark/internal/api/middleware"
 	"github.com/staticvar/fetchmark/internal/config"
+	"github.com/staticvar/fetchmark/internal/core/model"
+	"github.com/staticvar/fetchmark/internal/core/pipeline"
 )
 
-// Deps bundles the external collaborators an API server needs. New
-// collaborators (search, parse, cache, etc.) will extend this struct as
-// later phases land; keeping them here rather than as globals preserves
-// testability.
+// Deps bundles the external collaborators an API server needs.
 type Deps struct {
-	Log    *slog.Logger
-	Config config.Config
+	Log      *slog.Logger
+	Config   config.Config
+	Pipeline PipelineRunner
 	// ReadyCheck reports whether hard dependencies (Redis, SearXNG) are
 	// reachable. Returning nil means ready; non-nil is rendered as the
 	// failure reason on /readyz.
 	ReadyCheck func() error
+}
+
+// PipelineRunner is the subset of *pipeline.Pipeline the API layer uses;
+// kept as an interface to preserve handler testability.
+type PipelineRunner interface {
+	Search(ctx context.Context, o pipeline.Options) ([]model.SearchResult, error)
+	Parse(ctx context.Context, o pipeline.Options) []model.SearchResult
 }
 
 // NewRouter wires the full HTTP surface for Fetchmark. It is invoked once
@@ -41,9 +49,9 @@ func NewRouter(d Deps) http.Handler {
 
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(middleware.APIKey(d.Config.APIKeys, d.Config.AdminAPIKeys))
-		r.Post("/search", notImplemented("search"))
-		r.Post("/parse", notImplemented("parse"))
-		r.Post("/summarize", notImplemented("summarize"))
+		r.Post("/search", searchHandler(d))
+		r.Post("/parse", parseHandler(d))
+		r.Post("/summarize", summarizeHandler(d))
 	})
 
 	return r
