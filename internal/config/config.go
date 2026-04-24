@@ -18,8 +18,9 @@ type Config struct {
 	APIKeys      []string `env:"FM_API_KEYS"       envSeparator:","`
 	AdminAPIKeys []string `env:"FM_ADMIN_API_KEYS" envSeparator:","`
 
-	SearxngURL string `env:"FM_SEARXNG_URL" envDefault:"http://searxng:8080"`
-	RedisURL   string `env:"FM_REDIS_URL"   envDefault:"redis://redis:6379/0"`
+	SearxngURL  string   `env:"FM_SEARXNG_URL"  envDefault:"http://searxng:8080"`
+	SearxngURLs []string `env:"FM_SEARXNG_URLS" envSeparator:","`
+	RedisURL    string   `env:"FM_REDIS_URL"    envDefault:"redis://redis:6379/0"`
 
 	FetchConcurrency     int           `env:"FM_FETCH_CONCURRENCY"      envDefault:"10"`
 	PerHostConcurrency   int           `env:"FM_PER_HOST_CONCURRENCY"   envDefault:"2"`
@@ -66,6 +67,12 @@ func Load() (Config, error) {
 	c.UserAgentsPool = cleanList(c.UserAgentsPool)
 	c.HostAllowlist = cleanList(c.HostAllowlist)
 	c.HostDenylist = cleanList(c.HostDenylist)
+	c.SearxngURLs = cleanList(c.SearxngURLs)
+	// FM_SEARXNG_URLS wins when set; otherwise fall back to the single
+	// FM_SEARXNG_URL so existing deployments keep working unchanged.
+	if len(c.SearxngURLs) == 0 && c.SearxngURL != "" {
+		c.SearxngURLs = []string{c.SearxngURL}
+	}
 	if err := c.validate(); err != nil {
 		return Config{}, err
 	}
@@ -84,6 +91,9 @@ func (c Config) validate() error {
 	}
 	if c.MaxResults <= 0 || c.ResultsCap <= 0 || c.MaxResults > c.ResultsCap {
 		return errors.New("FM_MAX_RESULTS must be >0 and <= FM_RESULTS_CAP")
+	}
+	if len(c.SearxngURLs) == 0 {
+		return errors.New("at least one SearXNG URL must be configured (FM_SEARXNG_URL or FM_SEARXNG_URLS)")
 	}
 	return nil
 }

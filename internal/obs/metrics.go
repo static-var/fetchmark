@@ -98,3 +98,14 @@ var SearxngEngineUnresponsive = promauto.NewGaugeVec(
 	},
 	[]string{"engine"},
 )
+
+// SearxngInstanceUp is a gauge per configured SearXNG backend URL:
+// 1 when the instance responded successfully most recently, 0 when it
+// is cooling down after a failure.
+var SearxngInstanceUp = promauto.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Name: "fetchmark_searxng_instance_up",
+		Help: "1 if the SearXNG upstream instance is considered healthy.",
+	},
+	[]string{"instance"},
+)
