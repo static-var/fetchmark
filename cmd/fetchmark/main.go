@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/staticvar/fetchmark/internal/adapters/renderer"
 	"github.com/staticvar/fetchmark/internal/adapters/robots"
 	"github.com/staticvar/fetchmark/internal/adapters/searxng"
+	"github.com/staticvar/fetchmark/internal/adapters/summarizer"
 	"github.com/staticvar/fetchmark/internal/api"
 	"github.com/staticvar/fetchmark/internal/config"
 	"github.com/staticvar/fetchmark/internal/core/pipeline"
@@ -124,6 +126,7 @@ func run() error {
 		Config:   cfg,
 		Pipeline: pipe,
 		Redis:    rdb,
+		Summarizers: buildSummarizerRegistry(cfg, log),
 		ReadyCheck: func() error {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
@@ -175,4 +178,62 @@ func newLogger(level string) *slog.Logger {
 		lvl = slog.LevelInfo
 	}
 	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
+}
+
+// buildSummarizerRegistry seeds the summarize registry from env vars.
+// Providers with an empty model are skipped entirely so operators can
+// enable one upstream without being forced to set both. A dedicated
+// HTTP client is used so the LLM path is insulated from the Fetcher's
+// egress policy — LLM endpoints are admin-configured trusted upstreams
+// and may legitimately be on localhost (SubSandwich) during testing.
+func buildSummarizerRegistry(cfg config.Config, log *slog.Logger) *summarizer.Registry {
+	trusted := &http.Client{Timeout: 0} // per-call deadlines are set in the handler
+	reg := summarizer.NewRegistry(summarizer.DefaultFactory, trusted)
+
+	if cfg.SummarizeOpenAIModel != "" {
+		oa := summarizer.ProviderConfig{
+			Name:        "openai",
+			Kind:        summarizer.KindOpenAI,
+			BaseURL:     cfg.SummarizeOpenAIBaseURL,
+			APIKey:      cfg.SummarizeOpenAIAPIKey,
+			Model:       cfg.SummarizeOpenAIModel,
+			Timeout:     cfg.SummarizeOpenAITimeout,
+			MaxTokens:   cfg.SummarizeOpenAIMaxTokens,
+			Thinking: summarizer.Thinking{
+				Enabled: cfg.SummarizeOpenAIThinking,
+				Effort:  cfg.SummarizeOpenAIThinkEffort,
+			},
+		}
+		if err := reg.Set(oa); err != nil {
+			log.Warn("summarizer: openai profile rejected", "err", err)
+		} else {
+			log.Info("summarizer: openai profile configured", "model", oa.Model, "base_url", oa.BaseURL)
+		}
+	}
+	if cfg.SummarizeAnthropicModel != "" {
+		an := summarizer.ProviderConfig{
+			Name:      "anthropic",
+			Kind:      summarizer.KindAnthropic,
+			BaseURL:   cfg.SummarizeAnthropicBaseURL,
+			APIKey:    cfg.SummarizeAnthropicAPIKey,
+			Model:     cfg.SummarizeAnthropicModel,
+			Timeout:   cfg.SummarizeAnthropicTimeout,
+			MaxTokens: cfg.SummarizeAnthropicMaxTokens,
+			Thinking: summarizer.Thinking{
+				Enabled:      cfg.SummarizeAnthropicThinking,
+				BudgetTokens: cfg.SummarizeAnthropicThinkBudget,
+			},
+		}
+		if err := reg.Set(an); err != nil {
+			log.Warn("summarizer: anthropic profile rejected", "err", err)
+		} else {
+			log.Info("summarizer: anthropic profile configured", "model", an.Model, "base_url", an.BaseURL)
+		}
+	}
+	if d := strings.TrimSpace(cfg.SummarizeDefaultProvider); d != "" {
+		if err := reg.SetDefault(d); err != nil {
+			log.Warn("summarizer: default provider not registered", "name", d, "err", err)
+		}
+	}
+	return reg
 }
