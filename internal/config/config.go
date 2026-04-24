@@ -20,7 +20,11 @@ type Config struct {
 
 	SearxngURL  string   `env:"FM_SEARXNG_URL"  envDefault:"http://searxng:8080"`
 	SearxngURLs []string `env:"FM_SEARXNG_URLS" envSeparator:","`
-	RedisURL    string   `env:"FM_REDIS_URL"    envDefault:"redis://redis:6379/0"`
+	// SearxngCooldown is how long a SearXNG instance is skipped after a
+	// transport error or 5xx. Non-positive values are rejected so a
+	// misconfigured env var cannot accidentally disable failover.
+	SearxngCooldown time.Duration `env:"FM_SEARXNG_COOLDOWN" envDefault:"30s"`
+	RedisURL        string        `env:"FM_REDIS_URL"        envDefault:"redis://redis:6379/0"`
 
 	FetchConcurrency     int           `env:"FM_FETCH_CONCURRENCY"      envDefault:"10"`
 	PerHostConcurrency   int           `env:"FM_PER_HOST_CONCURRENCY"   envDefault:"2"`
@@ -104,6 +108,9 @@ func (c Config) validate() error {
 	}
 	if len(c.SearxngURLs) == 0 {
 		return errors.New("at least one SearXNG URL must be configured (FM_SEARXNG_URL or FM_SEARXNG_URLS)")
+	}
+	if c.SearxngCooldown <= 0 {
+		return errors.New("FM_SEARXNG_COOLDOWN must be > 0")
 	}
 	return nil
 }

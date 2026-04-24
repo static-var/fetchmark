@@ -44,7 +44,7 @@ func run() error {
 	// are permitted. External user-URL fetches will receive their own
 	// DefaultExternal client in P2.
 	internal := egress.DefaultInternal().HTTPClient(10 * time.Second)
-	sx, err := searxng.NewMulti(cfg.SearxngURLs, internal)
+	sx, err := searxng.NewMultiWithCooldown(cfg.SearxngURLs, internal, cfg.SearxngCooldown)
 	if err != nil {
 		return err
 	}

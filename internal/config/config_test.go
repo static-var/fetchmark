@@ -43,3 +43,20 @@ func TestDashboardEnabled(t *testing.T) {
 		t.Error("dashboard should be enabled when creds set")
 	}
 }
+
+func TestLoad_SearxngCooldownDefault(t *testing.T) {
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.SearxngCooldown.String() != "30s" {
+		t.Fatalf("SearxngCooldown default = %v", c.SearxngCooldown)
+	}
+}
+
+func TestLoad_SearxngCooldownRejectsZero(t *testing.T) {
+	t.Setenv("FM_SEARXNG_COOLDOWN", "0s")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error when FM_SEARXNG_COOLDOWN=0")
+	}
+}

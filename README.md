@@ -138,6 +138,7 @@ All config is environment-driven. Copy `.env.example` and edit.
 | `FM_ADMIN_API_KEYS`          | `dev-admin`              | Keys that can use admin-only fields   |
 | `FM_SEARXNG_URL`             | `http://searxng:8080`    | Single SearXNG instance               |
 | `FM_SEARXNG_URLS`            | _(unset)_                | Comma-separated list for failover     |
+| `FM_SEARXNG_COOLDOWN`        | `30s`                    | Skip window after an instance fails   |
 | `FM_REDIS_URL`               | `redis://redis:6379/0`   | Cache + rate-limit state              |
 | `FM_RATE_PER_SEC` / `_BURST` | `5` / `20`               | Default per-key token bucket          |
 | `FM_RENDERER_URL`            | _(unset)_                | Enable headless render path           |

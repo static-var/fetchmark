@@ -13,10 +13,10 @@ import (
 	"github.com/staticvar/fetchmark/internal/obs"
 )
 
-// instanceCooldown is how long an instance is skipped after a
-// transport error or 5xx. Short enough to recover within a single
-// user's retry window; long enough to not hammer a flapping backend.
-const instanceCooldown = 30 * time.Second
+// defaultInstanceCooldown is used when no cooldown is supplied via
+// NewMultiWithCooldown. Short enough to recover within a single user's
+// retry window; long enough to not hammer a flapping backend.
+const defaultInstanceCooldown = 30 * time.Second
 
 // MultiClient fans a single Searcher contract out across N SearXNG
 // instances. Strategy is round-robin among healthy instances with a
@@ -32,15 +32,29 @@ type MultiClient struct {
 	mu       sync.Mutex
 	cooldown []time.Time // clients[i] is unavailable until cooldown[i]
 
+	cooldownDur time.Duration
+
 	rr uint64 // round-robin counter; atomic
 }
 
-// NewMulti wraps one or more *Client instances. Ordering of bases
-// becomes the initial round-robin order; the counter is atomic so the
-// struct is safe for concurrent Search calls.
+// NewMulti wraps one or more *Client instances using the default
+// post-failure cooldown. Callers who want a tunable cooldown should use
+// NewMultiWithCooldown.
 func NewMulti(bases []string, httpc *http.Client) (*MultiClient, error) {
+	return NewMultiWithCooldown(bases, httpc, defaultInstanceCooldown)
+}
+
+// NewMultiWithCooldown wraps one or more *Client instances. Ordering of
+// bases becomes the initial round-robin order; the counter is atomic so
+// the struct is safe for concurrent Search calls. A non-positive
+// cooldown falls back to the default so operators cannot accidentally
+// disable failover by misconfiguring the env var.
+func NewMultiWithCooldown(bases []string, httpc *http.Client, cooldown time.Duration) (*MultiClient, error) {
 	if len(bases) == 0 {
 		return nil, errors.New("searxng: at least one base URL required")
+	}
+	if cooldown <= 0 {
+		cooldown = defaultInstanceCooldown
 	}
 	cs := make([]*Client, 0, len(bases))
 	labels := make([]string, 0, len(bases))
@@ -53,9 +67,10 @@ func NewMulti(bases []string, httpc *http.Client) (*MultiClient, error) {
 		labels = append(labels, c.base.String())
 	}
 	mc := &MultiClient{
-		clients:  cs,
-		labels:   labels,
-		cooldown: make([]time.Time, len(cs)),
+		clients:     cs,
+		labels:      labels,
+		cooldown:    make([]time.Time, len(cs)),
+		cooldownDur: cooldown,
 	}
 	// Seed gauges at "up" so scrapes before the first Search still
 	// report something meaningful.
@@ -146,7 +161,7 @@ func (m *MultiClient) fullOrder() []int {
 
 func (m *MultiClient) markDown(i int) {
 	m.mu.Lock()
-	m.cooldown[i] = time.Now().Add(instanceCooldown)
+	m.cooldown[i] = time.Now().Add(m.cooldownDur)
 	m.mu.Unlock()
 	obs.SearxngInstanceUp.WithLabelValues(m.labels[i]).Set(0)
 }

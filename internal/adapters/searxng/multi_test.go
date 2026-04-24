@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/staticvar/fetchmark/internal/core/search"
 )
@@ -114,5 +115,61 @@ func TestMultiClient_PingAnyHealthy(t *testing.T) {
 func TestMultiClient_RejectsEmpty(t *testing.T) {
 	if _, err := NewMulti(nil, nil); err == nil {
 		t.Fatal("expected error on empty bases")
+	}
+}
+
+// TestMultiClient_CooldownExpiresAfterDuration proves the cooldown
+// window honors the value passed to NewMultiWithCooldown. With a 50ms
+// cooldown, a failed instance must be retried on the next Search after
+// the window elapses. Uses real sleep since cooldown is tiny and the
+// code path reads time.Now() directly.
+func TestMultiClient_CooldownExpiresAfterDuration(t *testing.T) {
+	var attempts int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt64(&attempts, 1)
+		if n == 1 {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/search") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(fixture))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	mc, err := NewMultiWithCooldown([]string{srv.URL}, http.DefaultClient, 50*time.Millisecond)
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+
+	// First call fails; instance cools down.
+	if _, err := mc.Search(context.Background(), search.Query{Q: "x"}); err == nil {
+		t.Fatal("expected first call to fail")
+	}
+
+	// Sleep past the configured cooldown and retry — must recover.
+	time.Sleep(75 * time.Millisecond)
+	if _, err := mc.Search(context.Background(), search.Query{Q: "x"}); err != nil {
+		t.Fatalf("expected recovery after cooldown window: %v", err)
+	}
+}
+
+// TestMultiClient_NonPositiveCooldownFallsBack guards the safety net
+// that prevents FM_SEARXNG_COOLDOWN=0 (or negative) from silently
+// disabling failover — the ctor clamps up to the default instead.
+func TestMultiClient_NonPositiveCooldownFallsBack(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	mc, err := NewMultiWithCooldown([]string{srv.URL}, http.DefaultClient, 0)
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	if mc.cooldownDur != defaultInstanceCooldown {
+		t.Fatalf("cooldownDur = %v, want %v", mc.cooldownDur, defaultInstanceCooldown)
 	}
 }
