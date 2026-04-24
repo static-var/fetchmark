@@ -8,6 +8,7 @@ import (
 
 	"github.com/staticvar/fetchmark/internal/api/middleware"
 	"github.com/staticvar/fetchmark/internal/core/pipeline"
+	"github.com/staticvar/fetchmark/internal/obs"
 )
 
 // searchRequest is the JSON body for POST /v1/search.
@@ -109,9 +110,15 @@ func searchHandler(d Deps) http.HandlerFunc {
 
 		out, err := d.Pipeline.Search(r.Context(), opts)
 		if err != nil {
+			obs.SearchQueryTotal.WithLabelValues("upstream_error").Inc()
 			d.Log.Error("search failed", "err", err)
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "search_failed"})
 			return
+		}
+		if len(out) == 0 {
+			obs.SearchQueryTotal.WithLabelValues("empty").Inc()
+		} else {
+			obs.SearchQueryTotal.WithLabelValues("ok").Inc()
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"query":   req.Query,

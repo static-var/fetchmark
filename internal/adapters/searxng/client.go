@@ -15,15 +15,19 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/staticvar/fetchmark/internal/core/search"
+	"github.com/staticvar/fetchmark/internal/obs"
 )
 
 // Client is a thin typed wrapper around a SearXNG instance.
 type Client struct {
-	base *url.URL
-	http *http.Client
+	base      *url.URL
+	http      *http.Client
+	mu        sync.Mutex
+	knownEng  map[string]struct{}
 }
 
 // New constructs a Client. The provided HTTP client is used as-is, which
@@ -41,7 +45,7 @@ func New(baseURL string, httpc *http.Client) (*Client, error) {
 	if httpc == nil {
 		httpc = &http.Client{Timeout: 10 * time.Second}
 	}
-	return &Client{base: u, http: httpc}, nil
+	return &Client{base: u, http: httpc, knownEng: map[string]struct{}{}}, nil
 }
 
 // response mirrors the subset of SearXNG's JSON we consume. The schema
@@ -127,7 +131,49 @@ func (c *Client) Search(ctx context.Context, q search.Query) ([]search.Hit, erro
 			Engines: engines,
 		})
 	}
+
+	c.updateEngineHealth(body.Results, body.UnresponsiveEngines)
 	return out, nil
+}
+
+// updateEngineHealth mirrors SearXNG's per-engine availability into a
+// Prometheus gauge. SearXNG exposes "unresponsive_engines" as a list of
+// [name, reason] tuples; we track names across queries and clear the
+// gauge on engines that came back. Lock held briefly; this is not on
+// the hot path for latency.
+func (c *Client) updateEngineHealth(results []apiResult, unresponsive [][]any) {
+	bad := map[string]struct{}{}
+	for _, entry := range unresponsive {
+		if len(entry) == 0 {
+			continue
+		}
+		if name, ok := entry[0].(string); ok && name != "" {
+			bad[name] = struct{}{}
+		}
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for _, r := range results {
+		if r.Engine != "" {
+			c.knownEng[r.Engine] = struct{}{}
+		}
+		for _, e := range r.Engines {
+			c.knownEng[e] = struct{}{}
+		}
+	}
+	for name := range bad {
+		c.knownEng[name] = struct{}{}
+	}
+
+	for name := range c.knownEng {
+		v := 0.0
+		if _, unhealthy := bad[name]; unhealthy {
+			v = 1
+		}
+		obs.SearxngEngineUnresponsive.WithLabelValues(name).Set(v)
+	}
 }
 
 // Ping performs a lightweight GET against SearXNG's root to verify

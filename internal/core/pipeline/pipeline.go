@@ -17,6 +17,7 @@ import (
 	"github.com/staticvar/fetchmark/internal/adapters/fetcher"
 	"github.com/staticvar/fetchmark/internal/core/model"
 	"github.com/staticvar/fetchmark/internal/core/search"
+	"github.com/staticvar/fetchmark/internal/obs"
 )
 
 // Fetcher is the subset of fetcher.Fetcher the pipeline needs.
@@ -127,9 +128,11 @@ func (p *Pipeline) process(ctx context.Context, o Options, seed []model.SearchRe
 				if err := json.Unmarshal(raw, &c); err == nil {
 					applyContent(&results[i], &c)
 					results[i].FromCache = true
+					obs.CacheEvents.WithLabelValues("fa", "hit").Inc()
 					continue
 				}
 			}
+			obs.CacheEvents.WithLabelValues("fa", "miss").Inc()
 		}
 		needIdx = append(needIdx, i)
 		fetchReqs = append(fetchReqs, fetcher.Request{
@@ -148,21 +151,33 @@ func (p *Pipeline) process(ctx context.Context, o Options, seed []model.SearchRe
 			results[idx].FetchMS = fr.FetchMS
 			if fr.Err != nil {
 				results[idx].Unsupported = "fetch_failed"
+				obs.FetchOutcome.WithLabelValues("error").Inc()
 				continue
 			}
 			if fr.Unsupported != "" {
 				results[idx].Unsupported = fr.Unsupported
+				obs.FetchOutcome.WithLabelValues(fr.Unsupported).Inc()
 				continue
 			}
+			obs.FetchOutcome.WithLabelValues("ok").Inc()
+			obs.FetchDuration.Observe(float64(fr.FetchMS) / 1000.0)
 			c, err := p.Extractor.Extract(fr.Body, results[idx].URL)
 			if err != nil || c == nil {
 				results[idx].Unsupported = "extract_failed"
+				obs.ExtractOutcome.WithLabelValues("error").Inc()
 				continue
+			}
+			if c.UnsupportedReason != "" {
+				obs.ExtractOutcome.WithLabelValues(c.UnsupportedReason).Inc()
+			} else {
+				obs.ExtractOutcome.WithLabelValues("ok").Inc()
 			}
 			applyContent(&results[idx], c)
 			if !cacheBypass && p.Cache != nil {
 				if blob, mErr := json.Marshal(c); mErr == nil {
-					_ = p.Cache.Set(ctx, cache.ArtifactKey(results[idx].URL), blob)
+					if sErr := p.Cache.Set(ctx, cache.ArtifactKey(results[idx].URL), blob); sErr == nil {
+						obs.CacheEvents.WithLabelValues("fa", "write").Inc()
+					}
 				}
 			}
 		}

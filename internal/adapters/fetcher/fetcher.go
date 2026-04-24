@@ -24,6 +24,7 @@ import (
 
 	"github.com/staticvar/fetchmark/internal/adapters/egress"
 	"github.com/staticvar/fetchmark/internal/adapters/robots"
+	"github.com/staticvar/fetchmark/internal/obs"
 )
 
 // Budgets bound every outbound fetch. All fields must be > 0 except
@@ -168,6 +169,12 @@ func (f *Fetcher) Fetch(ctx context.Context, r Request) Result {
 	if err := f.policy.Validate(ctx, r.URL); err != nil {
 		res.Unsupported = ReasonEgress
 		res.Err = err
+		reason := "validate"
+		var eErr *egress.Error
+		if errors.As(err, &eErr) {
+			reason = eErr.Reason
+		}
+		obs.EgressRejects.WithLabelValues(reason).Inc()
 		return res
 	}
 
@@ -197,6 +204,7 @@ func (f *Fetcher) Fetch(ctx context.Context, r Request) Result {
 		if !allowed {
 			res.Unsupported = ReasonRobots
 			res.FetchMS = time.Since(start).Milliseconds()
+			obs.RobotsBlocks.Inc()
 			return res
 		}
 	}
