@@ -53,6 +53,10 @@ type Policy struct {
 	// DialTimeout bounds the time a single connect may take.
 	DialTimeout time.Duration
 
+	// ResponseHeaderTimeout bounds the time waiting for upstream headers.
+	// Zero means no header-specific timeout beyond the client timeout.
+	ResponseHeaderTimeout time.Duration
+
 	// Resolver is used for pre-connect DNS lookups. nil means net.DefaultResolver.
 	Resolver *net.Resolver
 }
@@ -194,6 +198,7 @@ func (p Policy) Transport() *http.Transport {
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: p.ResponseHeaderTimeout,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 	return tr

@@ -55,6 +55,11 @@ func run() error {
 	// egress.DefaultExternal, which refuses private IPs, CGNAT, and
 	// cross-scheme downgrades on redirect (see egress package doc).
 	external := egress.DefaultExternal()
+	external.HostAllowlist = cfg.HostAllowlist
+	external.HostDenylist = cfg.HostDenylist
+	external.MaxRedirects = cfg.MaxRedirects
+	external.DialTimeout = cfg.HeaderTimeout
+	external.ResponseHeaderTimeout = cfg.HeaderTimeout
 	rchk := robots.New(external.HTTPClient(5*time.Second), time.Hour, 0)
 	fx, err := fetcher.New(fetcher.Options{
 		Policy: external,
