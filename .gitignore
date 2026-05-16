@@ -10,3 +10,4 @@ coverage.html
 .vscode/
 .idea/
 deploy/.env.summarize
+.worktrees/
