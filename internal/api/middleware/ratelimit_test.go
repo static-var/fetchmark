@@ -60,8 +60,7 @@ func TestRateLimiter_Disabled(t *testing.T) {
 // TestRateLimiter_RedisAllowDeny runs the middleware against an
 // in-memory Redis and asserts the allow/deny semantics the cross-
 // instance coordinator is supposed to enforce: same key exhausts the
-// burst at once, a second key still passes. Uses a very high local
-// rate so the outcome is entirely driven by the Redis leg.
+// burst at once, a second key still passes.
 func TestRateLimiter_RedisAllowDeny(t *testing.T) {
 	mr, err := miniredis.Run()
 	if err != nil {
@@ -71,9 +70,9 @@ func TestRateLimiter_RedisAllowDeny(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
 
-	// Huge local rate so only the Redis leg denies. Burst=2 across all
-	// instances — key "kA" should go 2 OK, 1 denied; key "kB" still OK.
-	h := RateLimiter(1000, 2, rdb)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	// Low refill rate keeps the burst deterministic: key "kA" should go
+	// 2 OK, 1 denied; key "kB" still OK.
+	h := RateLimiter(0.5, 2, rdb)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	call := func(key string) int {
@@ -96,5 +95,81 @@ func TestRateLimiter_RedisAllowDeny(t *testing.T) {
 	if got := call("kB"); got != http.StatusOK {
 		t.Fatalf("different key must be unaffected; kB: %d", got)
 	}
-	_ = time.Second // time import retained for future expansion
+}
+
+func TestRateLimiter_RedisErrorFailsOpenAfterLocalBucketExhausted(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	rdb := redis.NewClient(&redis.Options{
+		Addr:        mr.Addr(),
+		DialTimeout: 10 * time.Millisecond,
+		MaxRetries:  -1,
+	})
+	t.Cleanup(func() { _ = rdb.Close() })
+	mr.Close()
+
+	h := RateLimiter(0.0001, 2, rdb)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	call := func() int {
+		ctx := context.WithValue(context.Background(), authKey, Principal{Key: "outage-key"})
+		req := httptest.NewRequest("POST", "/v1/search", strings.NewReader("{}")).WithContext(ctx)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	if got := call(); got != http.StatusOK {
+		t.Fatalf("call 1 status = %d", got)
+	}
+	if got := call(); got != http.StatusOK {
+		t.Fatalf("call 2 status = %d", got)
+	}
+	if got := call(); got != http.StatusOK {
+		t.Fatalf("call 3 status = %d, want fail-open 200", got)
+	}
+}
+
+func TestRateLimiter_RedisTokenBucketRefillsByRate(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	t.Cleanup(mr.Close)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+
+	newHandler := func() http.Handler {
+		return RateLimiter(0.5, 2, rdb)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+	}
+	call := func(h http.Handler) int {
+		ctx := context.WithValue(context.Background(), authKey, Principal{Key: "slow-key"})
+		req := httptest.NewRequest("POST", "/v1/search", strings.NewReader("{}")).WithContext(ctx)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	h := newHandler()
+
+	if got := call(h); got != http.StatusOK {
+		t.Fatalf("call 1 status = %d", got)
+	}
+	if got := call(h); got != http.StatusOK {
+		t.Fatalf("call 2 status = %d", got)
+	}
+	if got := call(newHandler()); got != http.StatusTooManyRequests {
+		t.Fatalf("call 3 status = %d, want 429", got)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	if got := call(newHandler()); got != http.StatusTooManyRequests {
+		t.Fatalf("call after 1.1s status = %d, want 429", got)
+	}
+	time.Sleep(1 * time.Second)
+	if got := call(newHandler()); got != http.StatusOK {
+		t.Fatalf("call after 2.1s status = %d, want 200", got)
+	}
 }

@@ -13,9 +13,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"net/http"
 	"sync"
-	"time"
 
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/time/rate"
@@ -28,10 +28,8 @@ import (
 //	burst      is the bucket capacity (max short-term burst).
 //	rdb        optional Redis client for cross-instance coordination.
 //
-// The Redis script is an atomic INCR/EXPIRE over a sliding window proxy:
-// we model the bucket as "approximate requests in the last second" using
-// a one-second key. This is coarser than a true token bucket but cheap,
-// resilient to clock skew, and good enough for coarse per-key limits.
+// The Redis script maintains an atomic token bucket per key so replicas
+// share the same sustained rate and burst capacity.
 func RateLimiter(ratePerSec float64, burst int, rdb *redis.Client) func(http.Handler) http.Handler {
 	if ratePerSec <= 0 {
 		return func(next http.Handler) http.Handler { return next }
@@ -75,13 +73,17 @@ type keyLimiter struct {
 func (k *keyLimiter) allow(ctx context.Context, key string) bool {
 	if k.rdb != nil {
 		ok, err := k.redisAllow(ctx, key)
-		if err == nil {
-			if !ok {
-				return false
-			}
-			// Redis said yes; still burn a local token so that an
-			// operator-side Redis outage does not briefly uncap the key.
+		if err != nil {
+			// Redis errors should fail open, but still burn a local token so
+			// the local bucket reflects outage traffic if Redis recovers later.
+			k.local(key).Allow()
+			return true
 		}
+		if !ok {
+			return false
+		}
+		// Redis said yes; still burn a local token so that an
+		// operator-side Redis outage does not briefly uncap the key.
 	}
 	return k.local(key).Allow()
 }
@@ -97,30 +99,67 @@ func (k *keyLimiter) local(key string) *rate.Limiter {
 	return l
 }
 
-// redisAllow increments a per-second counter for the key and denies the
-// request when the counter exceeds the burst capacity. We only keep a
-// 1-second TTL, which caps the limiter's memory footprint in Redis.
+var redisTokenBucketScript = redis.NewScript(`
+local bucket = KEYS[1]
+local rate = tonumber(ARGV[1])
+local burst = tonumber(ARGV[2])
+local ttl = tonumber(ARGV[3])
+
+local redis_time = redis.call("TIME")
+local now = (tonumber(redis_time[1]) * 1000) + math.floor(tonumber(redis_time[2]) / 1000)
+
+local state = redis.call("HMGET", bucket, "tokens", "ts")
+local tokens = tonumber(state[1])
+local ts = tonumber(state[2])
+
+if tokens == nil then
+  tokens = burst
+end
+if ts == nil then
+  ts = now
+end
+
+local elapsed = now - ts
+if elapsed < 0 then
+  elapsed = 0
+end
+
+tokens = math.min(burst, tokens + ((elapsed / 1000) * rate))
+
+local allowed = 0
+if tokens >= 1 then
+  tokens = tokens - 1
+  allowed = 1
+end
+
+redis.call("HSET", bucket, "tokens", tokens, "ts", now)
+redis.call("PEXPIRE", bucket, ttl)
+return allowed
+`)
+
+// redisAllow applies an atomic Redis token bucket for the key, denying
+// requests when the shared bucket has fewer than one token available.
 //
 // The Redis key embeds a SHA-256 hash of the API key, not the plaintext
 // secret, so operational surfaces (MONITOR, RDB dumps, backups) never
 // see raw credentials.
 func (k *keyLimiter) redisAllow(ctx context.Context, key string) (bool, error) {
-	limit := int64(k.burst)
-	if limit < 1 {
-		limit = 1
+	burst := k.burst
+	if burst < 1 {
+		burst = 1
 	}
+	ratePerSec := float64(k.rate)
+	ttlMS := int64(math.Ceil((float64(burst) / ratePerSec) * 2000))
+	if ttlMS < 2000 {
+		ttlMS = 2000
+	}
+
 	sum := sha256.Sum256([]byte(key))
 	hashed := hex.EncodeToString(sum[:8])
-	bucket := fmt.Sprintf("fm:rl:%s:%d", hashed, time.Now().Unix())
-
-	c, err := k.rdb.Incr(ctx, bucket).Result()
+	bucket := fmt.Sprintf("fm:rl:%s", hashed)
+	allowed, err := redisTokenBucketScript.Run(ctx, k.rdb, []string{bucket}, ratePerSec, burst, ttlMS).Int()
 	if err != nil {
 		return true, err
 	}
-	if c == 1 {
-		// Best-effort: ignore expire errors — the bucket key is only a
-		// second long anyway.
-		_ = k.rdb.Expire(ctx, bucket, 2*time.Second).Err()
-	}
-	return c <= limit, nil
+	return allowed == 1, nil
 }
