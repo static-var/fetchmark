@@ -286,10 +286,13 @@ FM_SUMMARIZE_DEFAULT_PROVIDER=openai          # "openai" or "anthropic"
 ```
 
 Per-request overrides (`provider`, `model`, `max_tokens`, `temperature`,
-`thinking`, `timeout_ms`) are supported on the POST body. Admins can also
-upsert providers at runtime via `/admin/summarize/providers` (see the
-OpenAPI spec); those overrides live in-process and revert to env on
-restart.
+`instructions`, `thinking`, `timeout_ms`) are supported on the POST body.
+For non-admin API keys, `provider`, `model`, and `thinking` overrides are
+disabled unless explicitly allowed by config. `max_tokens`, `timeout_ms`,
+`instructions`, and `thinking.budget_tokens` caps apply to all callers,
+including admins. Admins can also upsert providers at runtime via
+`/admin/summarize/providers` (see the OpenAPI spec); those overrides live
+in-process and revert to env on restart.
 
 **Docker compose + SubSandwich:** when running Fetchmark in the compose
 stack and SubSandwich on the host, point the base URL at

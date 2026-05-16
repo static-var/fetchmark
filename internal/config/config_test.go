@@ -22,6 +22,46 @@ func TestLoad_Defaults(t *testing.T) {
 	if !c.RespectRobots {
 		t.Error("RespectRobots should default to true")
 	}
+	if c.SummarizeMaxTokensCap != 4096 {
+		t.Errorf("SummarizeMaxTokensCap default = %d", c.SummarizeMaxTokensCap)
+	}
+	if c.SummarizeMaxTimeout.String() != "2m0s" {
+		t.Errorf("SummarizeMaxTimeout default = %v", c.SummarizeMaxTimeout)
+	}
+	if c.SummarizeMaxInstructionsLen != 4000 {
+		t.Errorf("SummarizeMaxInstructionsLen default = %d", c.SummarizeMaxInstructionsLen)
+	}
+	if c.SummarizeAllowModelOverride {
+		t.Error("SummarizeAllowModelOverride should default to false")
+	}
+	if c.SummarizeAllowProviderOverride {
+		t.Error("SummarizeAllowProviderOverride should default to false")
+	}
+	if c.SummarizeAllowThinkingOverride {
+		t.Error("SummarizeAllowThinkingOverride should default to false")
+	}
+}
+
+func TestLoad_InvalidSummarizeCaps(t *testing.T) {
+	cases := []struct {
+		name string
+		env  string
+		val  string
+		want string
+	}{
+		{"max tokens", "FM_SUMMARIZE_MAX_TOKENS_CAP", "0", "FM_SUMMARIZE_MAX_TOKENS_CAP must be > 0"},
+		{"timeout", "FM_SUMMARIZE_MAX_TIMEOUT", "0s", "FM_SUMMARIZE_MAX_TIMEOUT must be > 0"},
+		{"instructions", "FM_SUMMARIZE_MAX_INSTRUCTIONS_LEN", "-1", "FM_SUMMARIZE_MAX_INSTRUCTIONS_LEN must be >= 0"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(tc.env, tc.val)
+			_, err := Load()
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("Load error = %v want %q", err, tc.want)
+			}
+		})
+	}
 }
 
 func TestLoad_InvalidResults(t *testing.T) {

@@ -74,6 +74,13 @@ type Config struct {
 	// kind skips that profile entirely.
 	SummarizeDefaultProvider string `env:"FM_SUMMARIZE_DEFAULT_PROVIDER"`
 
+	SummarizeMaxTokensCap          int           `env:"FM_SUMMARIZE_MAX_TOKENS_CAP"       envDefault:"4096"`
+	SummarizeMaxTimeout            time.Duration `env:"FM_SUMMARIZE_MAX_TIMEOUT"          envDefault:"120s"`
+	SummarizeMaxInstructionsLen    int           `env:"FM_SUMMARIZE_MAX_INSTRUCTIONS_LEN" envDefault:"4000"`
+	SummarizeAllowModelOverride    bool          `env:"FM_SUMMARIZE_ALLOW_MODEL_OVERRIDE" envDefault:"false"`
+	SummarizeAllowProviderOverride bool          `env:"FM_SUMMARIZE_ALLOW_PROVIDER_OVERRIDE" envDefault:"false"`
+	SummarizeAllowThinkingOverride bool          `env:"FM_SUMMARIZE_ALLOW_THINKING_OVERRIDE" envDefault:"false"`
+
 	SummarizeOpenAIBaseURL     string        `env:"FM_SUMMARIZE_OPENAI_BASE_URL"`
 	SummarizeOpenAIAPIKey      string        `env:"FM_SUMMARIZE_OPENAI_API_KEY"`
 	SummarizeOpenAIModel       string        `env:"FM_SUMMARIZE_OPENAI_MODEL"`
@@ -82,13 +89,13 @@ type Config struct {
 	SummarizeOpenAIThinking    bool          `env:"FM_SUMMARIZE_OPENAI_THINKING"     envDefault:"false"`
 	SummarizeOpenAIThinkEffort string        `env:"FM_SUMMARIZE_OPENAI_THINK_EFFORT"`
 
-	SummarizeAnthropicBaseURL    string        `env:"FM_SUMMARIZE_ANTHROPIC_BASE_URL"`
-	SummarizeAnthropicAPIKey     string        `env:"FM_SUMMARIZE_ANTHROPIC_API_KEY"`
-	SummarizeAnthropicModel      string        `env:"FM_SUMMARIZE_ANTHROPIC_MODEL"`
-	SummarizeAnthropicMaxTokens  int           `env:"FM_SUMMARIZE_ANTHROPIC_MAX_TOKENS"  envDefault:"1024"`
-	SummarizeAnthropicTimeout    time.Duration `env:"FM_SUMMARIZE_ANTHROPIC_TIMEOUT"     envDefault:"60s"`
-	SummarizeAnthropicThinking   bool          `env:"FM_SUMMARIZE_ANTHROPIC_THINKING"    envDefault:"false"`
-	SummarizeAnthropicThinkBudget int          `env:"FM_SUMMARIZE_ANTHROPIC_THINK_BUDGET" envDefault:"0"`
+	SummarizeAnthropicBaseURL     string        `env:"FM_SUMMARIZE_ANTHROPIC_BASE_URL"`
+	SummarizeAnthropicAPIKey      string        `env:"FM_SUMMARIZE_ANTHROPIC_API_KEY"`
+	SummarizeAnthropicModel       string        `env:"FM_SUMMARIZE_ANTHROPIC_MODEL"`
+	SummarizeAnthropicMaxTokens   int           `env:"FM_SUMMARIZE_ANTHROPIC_MAX_TOKENS"  envDefault:"1024"`
+	SummarizeAnthropicTimeout     time.Duration `env:"FM_SUMMARIZE_ANTHROPIC_TIMEOUT"     envDefault:"60s"`
+	SummarizeAnthropicThinking    bool          `env:"FM_SUMMARIZE_ANTHROPIC_THINKING"    envDefault:"false"`
+	SummarizeAnthropicThinkBudget int           `env:"FM_SUMMARIZE_ANTHROPIC_THINK_BUDGET" envDefault:"0"`
 }
 
 // Load reads configuration from the environment, applies defaults,
@@ -134,6 +141,15 @@ func (c Config) validate() error {
 	}
 	if c.SearxngCooldown <= 0 {
 		return errors.New("FM_SEARXNG_COOLDOWN must be > 0")
+	}
+	if c.SummarizeMaxTokensCap <= 0 {
+		return errors.New("FM_SUMMARIZE_MAX_TOKENS_CAP must be > 0")
+	}
+	if c.SummarizeMaxTimeout <= 0 {
+		return errors.New("FM_SUMMARIZE_MAX_TIMEOUT must be > 0")
+	}
+	if c.SummarizeMaxInstructionsLen < 0 {
+		return errors.New("FM_SUMMARIZE_MAX_INSTRUCTIONS_LEN must be >= 0")
 	}
 	return nil
 }

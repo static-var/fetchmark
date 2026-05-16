@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/staticvar/fetchmark/internal/adapters/summarizer"
+	"github.com/staticvar/fetchmark/internal/api/middleware"
+	"github.com/staticvar/fetchmark/internal/config"
 	"github.com/staticvar/fetchmark/internal/core/model"
 	"github.com/staticvar/fetchmark/internal/obs"
 )
@@ -45,11 +47,11 @@ type summarizeResponse struct {
 }
 
 type summarizeSourceMeta struct {
-	Title      string `json:"title,omitempty"`
-	Author     string `json:"author,omitempty"`
-	SiteName   string `json:"site_name,omitempty"`
-	FromCache  bool   `json:"from_cache,omitempty"`
-	WordCount  int    `json:"word_count,omitempty"`
+	Title     string `json:"title,omitempty"`
+	Author    string `json:"author,omitempty"`
+	SiteName  string `json:"site_name,omitempty"`
+	FromCache bool   `json:"from_cache,omitempty"`
+	WordCount int    `json:"word_count,omitempty"`
 }
 
 const defaultSummarizeSystem = `You are a concise summarization assistant.
@@ -66,6 +68,10 @@ func summarizeHandler(d Deps) http.HandlerFunc {
 		}
 		if strings.TrimSpace(req.URL) == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url required"})
+			return
+		}
+		if err := validateSummarizeOverrides(req, d.Config, middleware.PrincipalFrom(r.Context()).Admin); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
 		if d.Summarizers == nil || d.Summarizers.Empty() {
@@ -180,6 +186,35 @@ func summarizeHandler(d Deps) http.HandlerFunc {
 }
 
 const summarizeMaxBodyChars = 60_000 // ~12-15k tokens for most tokenizers
+
+func validateSummarizeOverrides(req summarizeRequest, cfg config.Config, admin bool) error {
+	if strings.TrimSpace(req.Model) != "" && !admin && !cfg.SummarizeAllowModelOverride {
+		return errors.New("model override not allowed")
+	}
+	if strings.TrimSpace(req.Provider) != "" && !admin && !cfg.SummarizeAllowProviderOverride {
+		return errors.New("provider override not allowed")
+	}
+	if req.Thinking != nil && !admin && !cfg.SummarizeAllowThinkingOverride {
+		return errors.New("thinking override not allowed")
+	}
+	if req.MaxTokens > 0 && req.MaxTokens > cfg.SummarizeMaxTokensCap {
+		return errors.New("max_tokens over cap")
+	}
+	if req.Thinking != nil && req.Thinking.BudgetTokens > cfg.SummarizeMaxTokensCap {
+		return errors.New("thinking budget_tokens over cap")
+	}
+	if req.TimeoutMS < 0 {
+		return errors.New("timeout_ms must be >= 0")
+	}
+	maxTimeoutMS := int64(cfg.SummarizeMaxTimeout / time.Millisecond)
+	if req.TimeoutMS > 0 && int64(req.TimeoutMS) > maxTimeoutMS {
+		return errors.New("timeout_ms over cap")
+	}
+	if len(req.Instructions) > cfg.SummarizeMaxInstructionsLen {
+		return errors.New("instructions over cap")
+	}
+	return nil
+}
 
 // sanitizeForPageBlock neutralises any sequence that could close the
 // <page> delimiter early. A single pass replacing "</page" is enough

@@ -173,6 +173,11 @@ paths:
         page is wrapped in `<page>…</page>` delimiters and the model is
         instructed to treat it as untrusted. Raw reasoning/thinking text
         is never returned — only token counts.
+
+        Non-admin callers may only override provider, model, or thinking
+        when the corresponding server config gate allows it. max_tokens,
+        timeout_ms, instructions length, and thinking.budget_tokens caps
+        apply to all callers, including admins.
       requestBody:
         required: true
         content:
