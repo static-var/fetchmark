@@ -120,9 +120,8 @@ func TestMultiClient_RejectsEmpty(t *testing.T) {
 
 // TestMultiClient_CooldownExpiresAfterDuration proves the cooldown
 // window honors the value passed to NewMultiWithCooldown. With a 50ms
-// cooldown, a failed instance must be retried on the next Search after
-// the window elapses. Uses real sleep since cooldown is tiny and the
-// code path reads time.Now() directly.
+// cooldown, a failed instance must be retried on a subsequent Search
+// after the window elapses.
 func TestMultiClient_CooldownExpiresAfterDuration(t *testing.T) {
 	var attempts int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -150,11 +149,10 @@ func TestMultiClient_CooldownExpiresAfterDuration(t *testing.T) {
 		t.Fatal("expected first call to fail")
 	}
 
-	// Sleep past the configured cooldown and retry — must recover.
-	time.Sleep(75 * time.Millisecond)
-	if _, err := mc.Search(context.Background(), search.Query{Q: "x"}); err != nil {
-		t.Fatalf("expected recovery after cooldown window: %v", err)
-	}
+	requireEventually(t, time.Second, func() bool {
+		_, err := mc.Search(context.Background(), search.Query{Q: "x"})
+		return err == nil
+	})
 }
 
 // TestMultiClient_NonPositiveCooldownFallsBack guards the safety net

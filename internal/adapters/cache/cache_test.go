@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -46,7 +47,7 @@ func TestKeys(t *testing.T) {
 }
 
 func TestMemoryCache_RoundTrip(t *testing.T) {
-	c := New(nil, 500*time.Millisecond)
+	c := New(nil, 50*time.Millisecond)
 	ctx := context.Background()
 	if err := c.Set(ctx, "k", []byte("v")); err != nil {
 		t.Fatal(err)
@@ -55,34 +56,88 @@ func TestMemoryCache_RoundTrip(t *testing.T) {
 	if string(got) != "v" {
 		t.Fatalf("got %q", got)
 	}
-	time.Sleep(600 * time.Millisecond)
-	got, _ = c.Get(ctx, "k")
-	if got != nil {
-		t.Fatalf("expected expiry, got %q", got)
-	}
+	requireEventually(t, time.Second, func() bool {
+		got, _ = c.Get(ctx, "k")
+		return got == nil
+	})
 }
 
 func TestSingleflight_Suppression(t *testing.T) {
 	c := New(nil, time.Minute)
 	var calls int32
+	const goroutines = 5
+	entered := make(chan struct{})
+	release := make(chan struct{})
 	fn := func() (any, error) {
-		atomic.AddInt32(&calls, 1)
-		time.Sleep(50 * time.Millisecond)
+		if atomic.AddInt32(&calls, 1) == 1 {
+			close(entered)
+		}
+		<-release
 		return "ok", nil
 	}
-	done := make(chan struct{}, 5)
-	for i := 0; i < 5; i++ {
+
+	type result struct {
+		value  any
+		err    error
+		shared bool
+	}
+	results := make(chan result, goroutines)
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
 		go func() {
-			_, _, _ = c.Do("k", fn)
-			done <- struct{}{}
+			defer wg.Done()
+			v, err, shared := c.Do("k", fn)
+			results <- result{value: v, err: err, shared: shared}
 		}()
 	}
-	for i := 0; i < 5; i++ {
-		<-done
+	waitForReceive(t, entered, time.Second, "singleflight function to start")
+	requireEventually(t, time.Second, func() bool { return atomic.LoadInt32(&calls) == 1 })
+	assertNoReceive(t, results, 50*time.Millisecond, "waiter returned before release")
+
+	close(release)
+	waitForWaitGroup(t, &wg, time.Second, "singleflight callers")
+	close(results)
+
+	for res := range results {
+		if res.err != nil || res.value != "ok" || !res.shared {
+			t.Fatalf("Do result = (%v, %v, shared=%v), want (ok, nil, shared=true)", res.value, res.err, res.shared)
+		}
 	}
 	if atomic.LoadInt32(&calls) != 1 {
 		t.Fatalf("expected 1 call, got %d", calls)
 	}
+}
+
+func waitForReceive[T any](t *testing.T, ch <-chan T, timeout time.Duration, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(timeout):
+		t.Fatalf("timed out waiting for %s", what)
+		var zero T
+		return zero
+	}
+}
+
+func assertNoReceive[T any](t *testing.T, ch <-chan T, timeout time.Duration, msg string) {
+	t.Helper()
+	select {
+	case <-ch:
+		t.Fatal(msg)
+	case <-time.After(timeout):
+	}
+}
+
+func waitForWaitGroup(t *testing.T, wg *sync.WaitGroup, timeout time.Duration, what string) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	waitForReceive(t, done, timeout, what)
 }
 
 func TestWithLock_NoRedisRunsFnDirectly(t *testing.T) {
