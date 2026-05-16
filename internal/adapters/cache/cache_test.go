@@ -86,25 +86,25 @@ func TestSingleflight_Suppression(t *testing.T) {
 }
 
 func TestWithLock_NoRedisRunsFnDirectly(t *testing.T) {
-c := New(nil, time.Second)
-defer c.Close()
-called := 0
-out, err := c.WithLock(context.Background(), "k", LockOptions{}, func(_ context.Context) ([]byte, error) {
-called++
-return []byte("ok"), nil
-})
-if err != nil {
-t.Fatalf("WithLock: %v", err)
-}
-if called != 1 || string(out) != "ok" {
-t.Fatalf("called=%d out=%q", called, out)
-}
+	c := New(nil, time.Second)
+	defer c.Close()
+	called := 0
+	out, err := c.WithLock(context.Background(), "k", LockOptions{}, func(_ context.Context) ([]byte, error) {
+		called++
+		return []byte("ok"), nil
+	})
+	if err != nil {
+		t.Fatalf("WithLock: %v", err)
+	}
+	if called != 1 || string(out) != "ok" {
+		t.Fatalf("called=%d out=%q", called, out)
+	}
 }
 
 func TestWithLock_NilFnReturnsError(t *testing.T) {
-c := New(nil, time.Second)
-defer c.Close()
-if _, err := c.WithLock(context.Background(), "k", LockOptions{}, nil); err == nil {
-t.Fatal("expected error on nil fn")
-}
+	c := New(nil, time.Second)
+	defer c.Close()
+	if _, err := c.WithLock(context.Background(), "k", LockOptions{}, nil); err == nil {
+		t.Fatal("expected error on nil fn")
+	}
 }

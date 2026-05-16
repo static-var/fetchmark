@@ -243,43 +243,43 @@ func TestPipeline_RenderExplicit_SearchFlow(t *testing.T) {
 }
 
 func TestPipeline_RenderExplicit_EgressRejected(t *testing.T) {
-rend := &stubRenderer{body: []byte("RENDERED oops")}
-blocked := errors.New("blocked")
-p := &Pipeline{
-Fetcher:        stubFetcher{resp: map[string]fetcher.Result{}},
-Extractor:      jsAwareExtractor{},
-Cache:          cache.New(nil, 0),
-Renderer:       rend,
-EgressValidate: func(_ context.Context, _ string) error { return blocked },
-}
-out := p.Parse(context.Background(), Options{URLs: []string{"http://127.0.0.1/"}, Render: true})
-if len(out) != 1 || out[0].Unsupported != "egress_reject" {
-t.Fatalf("expected egress_reject; got %+v", out)
-}
-if rend.hits != 0 {
-t.Fatalf("renderer must not be invoked when egress rejects; hits=%d", rend.hits)
-}
+	rend := &stubRenderer{body: []byte("RENDERED oops")}
+	blocked := errors.New("blocked")
+	p := &Pipeline{
+		Fetcher:        stubFetcher{resp: map[string]fetcher.Result{}},
+		Extractor:      jsAwareExtractor{},
+		Cache:          cache.New(nil, 0),
+		Renderer:       rend,
+		EgressValidate: func(_ context.Context, _ string) error { return blocked },
+	}
+	out := p.Parse(context.Background(), Options{URLs: []string{"http://127.0.0.1/"}, Render: true})
+	if len(out) != 1 || out[0].Unsupported != "egress_reject" {
+		t.Fatalf("expected egress_reject; got %+v", out)
+	}
+	if rend.hits != 0 {
+		t.Fatalf("renderer must not be invoked when egress rejects; hits=%d", rend.hits)
+	}
 }
 
 func TestPipeline_Render_JSRequiredResult_NotCached(t *testing.T) {
-// Renderer returns a body that the extractor ALSO marks as
-// js_required. The rendered artifact must not be cached, or
-// subsequent explicit renders would be served a useless placeholder.
-rend := &stubRenderer{body: []byte("JS-SHIM still")}
-p := &Pipeline{
-Fetcher:   stubFetcher{resp: map[string]fetcher.Result{}},
-Extractor: jsAwareExtractor{},
-Cache:     cache.New(nil, 0),
-Renderer:  rend,
-}
-_ = p.Parse(context.Background(), Options{URLs: []string{"https://spa.example/js"}, Render: true})
-if rend.hits != 1 {
-t.Fatalf("first render should hit once; got %d", rend.hits)
-}
-_ = p.Parse(context.Background(), Options{URLs: []string{"https://spa.example/js"}, Render: true})
-if rend.hits != 2 {
-t.Fatalf("js_required rendered blob must not be cached; expected hits=2 got %d", rend.hits)
-}
+	// Renderer returns a body that the extractor ALSO marks as
+	// js_required. The rendered artifact must not be cached, or
+	// subsequent explicit renders would be served a useless placeholder.
+	rend := &stubRenderer{body: []byte("JS-SHIM still")}
+	p := &Pipeline{
+		Fetcher:   stubFetcher{resp: map[string]fetcher.Result{}},
+		Extractor: jsAwareExtractor{},
+		Cache:     cache.New(nil, 0),
+		Renderer:  rend,
+	}
+	_ = p.Parse(context.Background(), Options{URLs: []string{"https://spa.example/js"}, Render: true})
+	if rend.hits != 1 {
+		t.Fatalf("first render should hit once; got %d", rend.hits)
+	}
+	_ = p.Parse(context.Background(), Options{URLs: []string{"https://spa.example/js"}, Render: true})
+	if rend.hits != 2 {
+		t.Fatalf("js_required rendered blob must not be cached; expected hits=2 got %d", rend.hits)
+	}
 }
 
 // TestPipeline_RendererAuto_CacheHitOverwritesPlaceholder proves the
@@ -289,41 +289,41 @@ t.Fatalf("js_required rendered blob must not be cached; expected hits=2 got %d",
 // called on an r that already carried js_required placeholder fields,
 // so cache hits silently kept the placeholder.
 func TestPipeline_RendererAuto_CacheHitOverwritesPlaceholder(t *testing.T) {
-mr, err := miniredis.Run()
-if err != nil {
-t.Fatalf("miniredis: %v", err)
-}
-t.Cleanup(mr.Close)
-rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-t.Cleanup(func() { _ = rdb.Close() })
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	t.Cleanup(mr.Close)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
 
-c := cache.New(rdb, time.Minute)
-url := "https://spa.example/prewarmed"
+	c := cache.New(rdb, time.Minute)
+	url := "https://spa.example/prewarmed"
 
-// Pre-warm the rendered cache as if a prior request already
-// populated it. No renderer is wired so the only way r can come
-// back with the rendered Title is via the cache-hit branch.
-blob, _ := json.Marshal(model.Content{Title: "Rendered", Markdown: "rendered md"})
-if err := c.Set(context.Background(), cache.RenderedArtifactKey(url), blob); err != nil {
-t.Fatalf("cache set: %v", err)
-}
+	// Pre-warm the rendered cache as if a prior request already
+	// populated it. No renderer is wired so the only way r can come
+	// back with the rendered Title is via the cache-hit branch.
+	blob, _ := json.Marshal(model.Content{Title: "Rendered", Markdown: "rendered md"})
+	if err := c.Set(context.Background(), cache.RenderedArtifactKey(url), blob); err != nil {
+		t.Fatalf("cache set: %v", err)
+	}
 
-p := &Pipeline{Extractor: jsAwareExtractor{}, Cache: c, RendererAuto: true}
-r := &model.SearchResult{
-URL:         url,
-Title:       "Loading…",
-Unsupported: extractor.ReasonJSRequired,
-}
-if _, err := p.tryAutoRender(context.Background(), Options{Timeout: time.Second}, r, false); err != nil {
-t.Fatalf("tryAutoRender: %v", err)
-}
-if r.Title != "Rendered" {
-t.Fatalf("cache-hit branch must overwrite placeholder Title; got %q", r.Title)
-}
-if r.Unsupported != "" {
-t.Fatalf("cache-hit branch must clear js_required placeholder; got %q", r.Unsupported)
-}
-if !r.FromCache {
-t.Fatal("FromCache should be set on rendered-cache hit")
-}
+	p := &Pipeline{Extractor: jsAwareExtractor{}, Cache: c, RendererAuto: true}
+	r := &model.SearchResult{
+		URL:         url,
+		Title:       "Loading…",
+		Unsupported: extractor.ReasonJSRequired,
+	}
+	if _, err := p.tryAutoRender(context.Background(), Options{Timeout: time.Second}, r, false); err != nil {
+		t.Fatalf("tryAutoRender: %v", err)
+	}
+	if r.Title != "Rendered" {
+		t.Fatalf("cache-hit branch must overwrite placeholder Title; got %q", r.Title)
+	}
+	if r.Unsupported != "" {
+		t.Fatalf("cache-hit branch must clear js_required placeholder; got %q", r.Unsupported)
+	}
+	if !r.FromCache {
+		t.Fatal("FromCache should be set on rendered-cache hit")
+	}
 }

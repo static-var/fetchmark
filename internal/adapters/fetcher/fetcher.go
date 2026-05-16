@@ -45,11 +45,11 @@ type Budgets struct {
 // Request describes a single fetch. ProxyURL/UserAgent are admin-only in
 // the HTTP layer; at this layer we accept them unconditionally.
 type Request struct {
-	URL            string
-	ProxyURL       string
-	UserAgent      string
-	RespectRobots  bool
-	Timeout        time.Duration
+	URL           string
+	ProxyURL      string
+	UserAgent     string
+	RespectRobots bool
+	Timeout       time.Duration
 }
 
 // Result is the fetcher's output. A non-empty Unsupported or non-nil Err
@@ -80,12 +80,12 @@ const (
 // Fetcher is the concurrency-bounded HTTP worker pool. Safe for
 // concurrent use.
 type Fetcher struct {
-	policy      egress.Policy
-	budgets     Budgets
-	robots      *robots.Checker
-	defaultUA   string
-	userAgents  []string // pool (when robots off and pool provided)
-	respectRbt  bool
+	policy     egress.Policy
+	budgets    Budgets
+	robots     *robots.Checker
+	defaultUA  string
+	userAgents []string // pool (when robots off and pool provided)
+	respectRbt bool
 
 	clientMu sync.Mutex
 	clients  map[string]*http.Client // keyed by proxy URL, "" = default

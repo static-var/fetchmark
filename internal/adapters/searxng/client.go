@@ -24,10 +24,10 @@ import (
 
 // Client is a thin typed wrapper around a SearXNG instance.
 type Client struct {
-	base      *url.URL
-	http      *http.Client
-	mu        sync.Mutex
-	knownEng  map[string]struct{}
+	base     *url.URL
+	http     *http.Client
+	mu       sync.Mutex
+	knownEng map[string]struct{}
 }
 
 // New constructs a Client. The provided HTTP client is used as-is, which
@@ -52,10 +52,10 @@ func New(baseURL string, httpc *http.Client) (*Client, error) {
 // includes more fields (infoboxes, suggestions, answers) — deliberately
 // ignored here to keep the contract small.
 type response struct {
-	Query             string      `json:"query"`
-	NumberOfResults   int         `json:"number_of_results"`
-	Results           []apiResult `json:"results"`
-	UnresponsiveEngines [][]any   `json:"unresponsive_engines"`
+	Query               string      `json:"query"`
+	NumberOfResults     int         `json:"number_of_results"`
+	Results             []apiResult `json:"results"`
+	UnresponsiveEngines [][]any     `json:"unresponsive_engines"`
 }
 
 type apiResult struct {
