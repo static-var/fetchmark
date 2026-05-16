@@ -109,6 +109,9 @@ func (p *Pipeline) Search(ctx context.Context, o Options) ([]model.SearchResult,
 	if err != nil {
 		return nil, err
 	}
+	if o.MaxResults > 0 && len(hits) > o.MaxResults {
+		hits = hits[:o.MaxResults]
+	}
 	return p.process(ctx, o, hitsToResults(hits), o.Query), nil
 }
 

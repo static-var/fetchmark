@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 
 	"github.com/staticvar/fetchmark/internal/adapters/cache"
@@ -38,6 +39,54 @@ type stubExtractor struct{}
 
 func (stubExtractor) Extract(raw []byte, url string) (*model.Content, error) {
 	return &model.Content{URL: url, Title: "T", MainText: string(raw), Markdown: "# " + string(raw)}, nil
+}
+
+type countingFetcher struct {
+	calls atomic.Int64
+}
+
+func (f *countingFetcher) Fetch(_ context.Context, r fetcher.Request) fetcher.Result {
+	f.calls.Add(1)
+	return fetcher.Result{URL: r.URL, Status: 200, Body: []byte(r.URL)}
+}
+
+type countingExtractor struct {
+	calls atomic.Int64
+}
+
+func (e *countingExtractor) Extract(raw []byte, url string) (*model.Content, error) {
+	e.calls.Add(1)
+	return &model.Content{URL: url, Title: "T", MainText: string(raw), Markdown: string(raw)}, nil
+}
+
+func TestSearchCapsCandidatesBeforeFetch(t *testing.T) {
+	hits := []search.Hit{
+		{URL: "https://a.example/1"},
+		{URL: "https://b.example/2"},
+		{URL: "https://c.example/3"},
+	}
+	fetcher := &countingFetcher{}
+	extractor := &countingExtractor{}
+	p := &Pipeline{
+		Searcher:  stubSearcher{hits: hits},
+		Fetcher:   fetcher,
+		Extractor: extractor,
+		Cache:     cache.New(nil, 0),
+	}
+
+	out, err := p.Search(context.Background(), Options{Query: "hello", MaxResults: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("got %d results, want 1", len(out))
+	}
+	if got := fetcher.calls.Load(); got != 1 {
+		t.Fatalf("fetched %d URLs, want 1", got)
+	}
+	if got := extractor.calls.Load(); got != 1 {
+		t.Fatalf("extracted %d URLs, want 1", got)
+	}
 }
 
 func TestPipeline_Search_EndToEnd(t *testing.T) {
