@@ -259,20 +259,22 @@ func pickSingleSummarizable(results []model.SearchResult) (model.SearchResult, *
 	if r.Unsupported != "" {
 		return r, &summarizeError{http.StatusUnprocessableEntity, "unsupported", r.Unsupported, "parse_unsupported"}
 	}
-	if r.Content == nil || strings.TrimSpace(r.Content.MainText)+strings.TrimSpace(r.Content.Markdown) == "" {
+	if summarizeBody(r) == "" {
 		return r, &summarizeError{http.StatusUnprocessableEntity, "empty_content", "no extractable text", "parse_empty"}
 	}
 	return r, nil
 }
 
 func summarizeBody(r model.SearchResult) string {
-	if r.Content == nil {
-		return ""
+	if r.Content != nil {
+		if s := strings.TrimSpace(r.Content.Markdown); s != "" {
+			return s
+		}
+		if s := strings.TrimSpace(r.Content.MainText); s != "" {
+			return s
+		}
 	}
-	if s := strings.TrimSpace(r.Content.Markdown); s != "" {
-		return s
-	}
-	return strings.TrimSpace(r.Content.MainText)
+	return strings.TrimSpace(r.Markdown)
 }
 
 func buildSummarizePrompt(req summarizeRequest, body string) string {

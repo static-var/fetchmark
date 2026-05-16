@@ -41,6 +41,18 @@ func (stubExtractor) Extract(raw []byte, url string) (*model.Content, error) {
 	return &model.Content{URL: url, Title: "T", MainText: string(raw), Markdown: "# " + string(raw)}, nil
 }
 
+type formattedExtractor struct{}
+
+func (formattedExtractor) Extract(raw []byte, url string) (*model.Content, error) {
+	return &model.Content{
+		URL:         url,
+		Title:       "T",
+		MainText:    string(raw),
+		Markdown:    "# " + string(raw),
+		CleanedHTML: "<main>" + string(raw) + "</main>",
+	}, nil
+}
+
 type countingFetcher struct {
 	calls atomic.Int64
 }
@@ -114,6 +126,109 @@ func TestPipeline_Search_EndToEnd(t *testing.T) {
 	}
 	if out[0].URL != "https://a.example/x" {
 		t.Fatalf("ranking wrong; first=%v", out[0].URL)
+	}
+}
+
+func TestPipeline_ParseFormatsMarkdownOnlyClearsDuplicateAndUnrequestedFields(t *testing.T) {
+	p := formattedPipelineForParse()
+
+	out := p.Parse(context.Background(), Options{URLs: []string{"https://a.example/x"}, Formats: []string{" Markdown "}})
+	if len(out) != 1 {
+		t.Fatalf("got %d results, want 1", len(out))
+	}
+	if out[0].Markdown == "" {
+		t.Fatalf("top-level markdown was not preserved: %+v", out[0])
+	}
+	if out[0].Content == nil {
+		t.Fatal("content was cleared")
+	}
+	if out[0].Content.Markdown != "" {
+		t.Fatalf("duplicate content markdown was not cleared: %+v", out[0].Content)
+	}
+	if out[0].HTML != "" || out[0].Content.CleanedHTML != "" {
+		t.Fatalf("html fields were not cleared: %+v", out[0])
+	}
+	if out[0].Content.MainText != "" {
+		t.Fatalf("structured main text was not cleared: %+v", out[0].Content)
+	}
+}
+
+func TestPipeline_ParseFormatsHTMLOnlyClearsDuplicateAndUnrequestedFields(t *testing.T) {
+	p := formattedPipelineForParse()
+
+	out := p.Parse(context.Background(), Options{URLs: []string{"https://a.example/x"}, Formats: []string{"html"}})
+	if len(out) != 1 {
+		t.Fatalf("got %d results, want 1", len(out))
+	}
+	if out[0].HTML == "" {
+		t.Fatalf("top-level html was not preserved: %+v", out[0])
+	}
+	if out[0].Content == nil {
+		t.Fatal("content was cleared")
+	}
+	if out[0].Content.CleanedHTML != "" {
+		t.Fatalf("duplicate content html was not cleared: %+v", out[0].Content)
+	}
+	if out[0].Markdown != "" || out[0].Content.Markdown != "" {
+		t.Fatalf("markdown fields were not cleared: %+v", out[0])
+	}
+	if out[0].Content.MainText != "" {
+		t.Fatalf("structured main text was not cleared: %+v", out[0].Content)
+	}
+}
+
+func TestPipeline_ParseUnknownOnlyFormatsPreserveContent(t *testing.T) {
+	p := formattedPipelineForParse()
+
+	out := p.Parse(context.Background(), Options{URLs: []string{"https://a.example/x"}, Formats: []string{"pdf", "unknown"}})
+	if len(out) != 1 {
+		t.Fatalf("got %d results, want 1", len(out))
+	}
+	assertFullFormattedContent(t, out[0])
+}
+
+func TestPipeline_SearchFormatsMarkdownOnlyFiltersResults(t *testing.T) {
+	p := &Pipeline{
+		Searcher: stubSearcher{hits: []search.Hit{{URL: "https://a.example/x"}}},
+		Fetcher: stubFetcher{resp: map[string]fetcher.Result{
+			"https://a.example/x": {URL: "https://a.example/x", Status: 200, Body: []byte("article")},
+		}},
+		Extractor: formattedExtractor{},
+		Cache:     cache.New(nil, 0),
+	}
+
+	out, err := p.Search(context.Background(), Options{Formats: []string{"markdown"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("got %d results, want 1", len(out))
+	}
+	if out[0].Markdown == "" || out[0].Content == nil {
+		t.Fatalf("markdown result missing content: %+v", out[0])
+	}
+	if out[0].Content.Markdown != "" || out[0].HTML != "" || out[0].Content.CleanedHTML != "" || out[0].Content.MainText != "" {
+		t.Fatalf("search result was not format-filtered: %+v", out[0])
+	}
+}
+
+func formattedPipelineForParse() *Pipeline {
+	return &Pipeline{
+		Fetcher: stubFetcher{resp: map[string]fetcher.Result{
+			"https://a.example/x": {URL: "https://a.example/x", Status: 200, Body: []byte("article")},
+		}},
+		Extractor: formattedExtractor{},
+		Cache:     cache.New(nil, 0),
+	}
+}
+
+func assertFullFormattedContent(t *testing.T, got model.SearchResult) {
+	t.Helper()
+	if got.Markdown == "" || got.HTML == "" || got.Content == nil {
+		t.Fatalf("top-level/content fields missing: %+v", got)
+	}
+	if got.Content.Markdown == "" || got.Content.CleanedHTML == "" || got.Content.MainText == "" {
+		t.Fatalf("content was not preserved: %+v", got.Content)
 	}
 }
 

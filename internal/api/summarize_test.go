@@ -123,6 +123,38 @@ func TestSummarize_HappyPath(t *testing.T) {
 	}
 }
 
+func TestSummarize_UsesTopLevelMarkdownFromParseFormats(t *testing.T) {
+	stub := &stubProvider{
+		name: "openai", kind: summarizer.KindOpenAI,
+		resp: summarizer.Response{Summary: "TLDR: top-level markdown."},
+	}
+	r, pipe, _ := withSummarizer(t, stub)
+	pipe.results = []model.SearchResult{{
+		URL:      "https://example.com/a",
+		Title:    "Example",
+		Markdown: "# Example\n\nTop-level markdown from formats filtering should be summarized.",
+		Content:  &model.Content{},
+	}}
+
+	req := httptest.NewRequest("POST", "/v1/summarize", strings.NewReader(`{"url":"https://example.com/a"}`))
+	req.Header.Set("X-API-Key", "k1")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if pipe.parseCalls != 1 || len(pipe.lastOpts.Formats) != 1 || pipe.lastOpts.Formats[0] != "markdown" {
+		t.Fatalf("parse was not called with markdown-only format: calls=%d opts=%+v", pipe.parseCalls, pipe.lastOpts)
+	}
+	if !strings.Contains(stub.last.UserPrompt, "Top-level markdown from formats filtering") {
+		t.Fatalf("top-level markdown missing from prompt: %q", stub.last.UserPrompt)
+	}
+	if strings.Contains(rec.Body.String(), "empty_content") {
+		t.Fatalf("top-level markdown was treated as empty content: %s", rec.Body.String())
+	}
+}
+
 func TestSummarize_RejectsOverridesOverCapsForNonAdmin(t *testing.T) {
 	cases := []struct {
 		name string

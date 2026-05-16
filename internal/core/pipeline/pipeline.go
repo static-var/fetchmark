@@ -112,7 +112,9 @@ func (p *Pipeline) Search(ctx context.Context, o Options) ([]model.SearchResult,
 	if o.MaxResults > 0 && len(hits) > o.MaxResults {
 		hits = hits[:o.MaxResults]
 	}
-	return p.process(ctx, o, hitsToResults(hits), o.Query), nil
+	results := p.process(ctx, o, hitsToResults(hits), o.Query)
+	filterResultsByFormats(results, o.Formats)
+	return results, nil
 }
 
 // Parse runs the fetch+extract+rank portion on a caller-supplied URL
@@ -122,7 +124,9 @@ func (p *Pipeline) Parse(ctx context.Context, o Options) []model.SearchResult {
 	for _, u := range o.URLs {
 		seed = append(seed, model.SearchResult{URL: u})
 	}
-	return p.process(ctx, o, seed, o.Query)
+	results := p.process(ctx, o, seed, o.Query)
+	filterResultsByFormats(results, o.Formats)
+	return results
 }
 
 func hitsToResults(hits []search.Hit) []model.SearchResult {
@@ -210,6 +214,44 @@ func (p *Pipeline) process(ctx context.Context, o Options, seed []model.SearchRe
 		results = results[:o.MaxResults]
 	}
 	return results
+}
+
+func filterResultsByFormats(results []model.SearchResult, formats []string) {
+	if len(formats) == 0 {
+		return
+	}
+
+	requested := map[string]bool{}
+	for _, format := range formats {
+		format = strings.ToLower(strings.TrimSpace(format))
+		switch format {
+		case "markdown", "html", "json":
+			requested[format] = true
+		}
+	}
+	if len(requested) == 0 {
+		return
+	}
+
+	keepMarkdown := requested["markdown"]
+	keepHTML := requested["html"]
+	keepJSON := requested["json"]
+
+	for i := range results {
+		if !keepMarkdown {
+			results[i].Markdown = ""
+		}
+		if !keepHTML {
+			results[i].HTML = ""
+		}
+		if results[i].Content != nil {
+			results[i].Content.Markdown = ""
+			results[i].Content.CleanedHTML = ""
+			if !keepJSON {
+				results[i].Content.MainText = ""
+			}
+		}
+	}
 }
 
 func applyContent(r *model.SearchResult, c *model.Content) {
