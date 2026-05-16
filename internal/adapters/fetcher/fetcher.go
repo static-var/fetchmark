@@ -75,6 +75,8 @@ const (
 	ReasonTooLarge        = "too_large"
 	ReasonDecompressLarge = "decompressed_too_large"
 	ReasonEgress          = "egress_blocked"
+
+	maxHostGates = 1024
 )
 
 // Fetcher is the concurrency-bounded HTTP worker pool. Safe for
@@ -92,8 +94,9 @@ type Fetcher struct {
 
 	globalSem chan struct{}
 
-	hostsMu sync.Mutex
-	hosts   map[string]chan struct{}
+	hostsMu          sync.Mutex
+	hosts            map[string]*hostGate
+	overflowHostGate chan struct{}
 }
 
 // Options collects construction-time inputs. policy, budgets, robots and
@@ -128,15 +131,16 @@ func New(o Options) (*Fetcher, error) {
 		return nil, errors.New("fetcher: DefaultUA required")
 	}
 	return &Fetcher{
-		policy:     o.Policy,
-		budgets:    o.Budgets,
-		robots:     o.Robots,
-		defaultUA:  o.DefaultUA,
-		userAgents: o.UserAgentPool,
-		respectRbt: o.RespectRobots,
-		clients:    map[string]*http.Client{},
-		globalSem:  make(chan struct{}, o.Budgets.GlobalConcurrency),
-		hosts:      map[string]chan struct{}{},
+		policy:           o.Policy,
+		budgets:          o.Budgets,
+		robots:           o.Robots,
+		defaultUA:        o.DefaultUA,
+		userAgents:       o.UserAgentPool,
+		respectRbt:       o.RespectRobots,
+		clients:          map[string]*http.Client{},
+		globalSem:        make(chan struct{}, o.Budgets.GlobalConcurrency),
+		hosts:            map[string]*hostGate{},
+		overflowHostGate: make(chan struct{}, o.Budgets.PerHostConcurrency),
 	}, nil
 }
 
@@ -216,14 +220,12 @@ func (f *Fetcher) Fetch(ctx context.Context, r Request) Result {
 	}
 	defer func() { <-f.globalSem }()
 
-	hostGate := f.gateFor(u.Hostname())
-	select {
-	case hostGate <- struct{}{}:
-	case <-ctx.Done():
-		res.Err = ctx.Err()
+	releaseHostGate, err := f.acquireHostGate(ctx, u.Hostname())
+	if err != nil {
+		res.Err = err
 		return res
 	}
-	defer func() { <-hostGate }()
+	defer releaseHostGate()
 
 	ua := f.chooseUA(r.UserAgent)
 	res.UAUsed = ua
@@ -391,15 +393,86 @@ func (f *Fetcher) chooseUA(override string) string {
 	return f.userAgents[rand.Intn(len(f.userAgents))]
 }
 
+type hostGate struct {
+	sem    chan struct{}
+	active int
+}
+
+func (f *Fetcher) acquireHostGate(ctx context.Context, host string) (func(), error) {
+	g, overflow := f.reserveHostGate(host)
+	select {
+	case g <- struct{}{}:
+		return func() {
+			<-g
+			if !overflow {
+				f.releaseHostGate(host)
+			}
+		}, nil
+	case <-ctx.Done():
+		if !overflow {
+			f.releaseHostGate(host)
+		}
+		return nil, ctx.Err()
+	}
+}
+
+func (f *Fetcher) reserveHostGate(host string) (chan struct{}, bool) {
+	f.hostsMu.Lock()
+	defer f.hostsMu.Unlock()
+	if g, ok := f.hosts[host]; ok {
+		g.active++
+		return g.sem, false
+	}
+	if len(f.hosts) >= maxHostGates {
+		for h, g := range f.hosts {
+			if g.active == 0 && len(g.sem) == 0 {
+				delete(f.hosts, h)
+				break
+			}
+		}
+	}
+	if len(f.hosts) >= maxHostGates {
+		return f.overflowHostGate, true
+	}
+	g := &hostGate{sem: make(chan struct{}, f.budgets.PerHostConcurrency), active: 1}
+	f.hosts[host] = g
+	return g.sem, false
+}
+
+func (f *Fetcher) releaseHostGate(host string) {
+	f.hostsMu.Lock()
+	defer f.hostsMu.Unlock()
+	if g, ok := f.hosts[host]; ok && g.active > 0 {
+		g.active--
+	}
+}
+
 func (f *Fetcher) gateFor(host string) chan struct{} {
 	f.hostsMu.Lock()
 	defer f.hostsMu.Unlock()
-	g, ok := f.hosts[host]
-	if !ok {
-		g = make(chan struct{}, f.budgets.PerHostConcurrency)
-		f.hosts[host] = g
+	if g, ok := f.hosts[host]; ok {
+		return g.sem
 	}
-	return g
+	if len(f.hosts) >= maxHostGates {
+		for h, g := range f.hosts {
+			if g.active == 0 && len(g.sem) == 0 {
+				delete(f.hosts, h)
+				break
+			}
+		}
+	}
+	if len(f.hosts) >= maxHostGates {
+		return f.overflowHostGate
+	}
+	g := &hostGate{sem: make(chan struct{}, f.budgets.PerHostConcurrency)}
+	f.hosts[host] = g
+	return g.sem
+}
+
+func (f *Fetcher) hostGateCount() int {
+	f.hostsMu.Lock()
+	defer f.hostsMu.Unlock()
+	return len(f.hosts)
 }
 
 // clientFor returns (and memoizes) an *http.Client subject to f.policy,

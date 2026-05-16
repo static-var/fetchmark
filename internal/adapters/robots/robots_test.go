@@ -56,3 +56,19 @@ func TestChecker_UnreachableFailsOpen(t *testing.T) {
 		t.Fatal("unreachable robots.txt should fail open")
 	}
 }
+
+func TestChecker_SweepExpiredRemovesOldEntries(t *testing.T) {
+	c := New(http.DefaultClient, time.Minute, 0)
+	now := time.Now()
+	c.cache["http://expired.example"] = entry{fetched: now.Add(-2 * time.Minute)}
+	c.cache["http://fresh.example"] = entry{fetched: now.Add(-30 * time.Second)}
+
+	c.sweepExpired(now)
+
+	if _, ok := c.cache["http://expired.example"]; ok {
+		t.Fatal("expired cache entry was not removed")
+	}
+	if _, ok := c.cache["http://fresh.example"]; !ok {
+		t.Fatal("fresh cache entry was removed")
+	}
+}

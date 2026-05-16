@@ -203,3 +203,90 @@ func TestClientFor_BadProxy(t *testing.T) {
 		t.Fatal("expected parse error")
 	}
 }
+
+func TestGateFor_BoundsHostGateGrowth(t *testing.T) {
+	f := newFetcher(t, Budgets{PerHostConcurrency: 1})
+
+	for i := 0; i < maxHostGates*2; i++ {
+		_ = f.gateFor(fmt.Sprintf("host-%d.example", i))
+	}
+
+	if got := f.hostGateCount(); got > maxHostGates {
+		t.Fatalf("host gate count = %d, want <= %d", got, maxHostGates)
+	}
+}
+
+func TestGateFor_UsesOverflowWhenAllGatesBusyAtCap(t *testing.T) {
+	f := newFetcher(t, Budgets{PerHostConcurrency: 1})
+
+	for i := 0; i < maxHostGates; i++ {
+		release, err := f.acquireHostGate(context.Background(), fmt.Sprintf("busy-%d.example", i))
+		if err != nil {
+			t.Fatalf("acquireHostGate: %v", err)
+		}
+		defer release()
+	}
+
+	release, err := f.acquireHostGate(context.Background(), "overflow.example")
+	if err != nil {
+		t.Fatalf("acquireHostGate overflow: %v", err)
+	}
+	defer release()
+	if got := f.hostGateCount(); got != maxHostGates {
+		t.Fatalf("host gate count = %d, want %d", got, maxHostGates)
+	}
+}
+
+func TestAcquireHostGate_DoesNotEvictReservedGate(t *testing.T) {
+	f := newFetcher(t, Budgets{PerHostConcurrency: 1})
+
+	releaseHeld, err := f.acquireHostGate(context.Background(), "reserved.example")
+	if err != nil {
+		t.Fatalf("acquire held gate: %v", err)
+	}
+
+	reservedStarted := make(chan struct{})
+	reservedAcquired := make(chan func())
+	go func() {
+		close(reservedStarted)
+		release, err := f.acquireHostGate(context.Background(), "reserved.example")
+		if err != nil {
+			t.Errorf("reserve second gate: %v", err)
+			close(reservedAcquired)
+			return
+		}
+		reservedAcquired <- release
+	}()
+	<-reservedStarted
+	deadline := time.Now().Add(time.Second)
+	for {
+		f.hostsMu.Lock()
+		active := f.hosts["reserved.example"].active
+		f.hostsMu.Unlock()
+		if active == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for blocked acquire to reserve host gate")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	for i := 0; i < maxHostGates-1; i++ {
+		_ = f.gateFor(fmt.Sprintf("idle-%d.example", i))
+	}
+	_ = f.gateFor("new.example")
+
+	f.hostsMu.Lock()
+	_, ok := f.hosts["reserved.example"]
+	f.hostsMu.Unlock()
+	if !ok {
+		t.Fatal("reserved gate was evicted while an acquire was blocked on its semaphore")
+	}
+
+	releaseHeld()
+	releaseSecond := <-reservedAcquired
+	if releaseSecond != nil {
+		releaseSecond()
+	}
+}
