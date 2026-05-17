@@ -91,6 +91,21 @@ func TestSearch_MissingQueryIs400(t *testing.T) {
 	}
 }
 
+func TestSearch_PropagatesSearchControls(t *testing.T) {
+	r, p := newTestRouter(nil)
+	body := strings.NewReader(`{"query":"birds","categories":["general","news"],"language":"en","time_range":"year"}`)
+	req := httptest.NewRequest("POST", "/v1/search", body)
+	req.Header.Set("X-API-Key", "k1")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(p.lastOpts.Categories) != 2 || p.lastOpts.Categories[0] != "general" || p.lastOpts.Categories[1] != "news" || p.lastOpts.Language != "en" || p.lastOpts.TimeRange != "year" {
+		t.Fatalf("search controls not propagated: %+v", p.lastOpts)
+	}
+}
+
 func TestSearch_Success(t *testing.T) {
 	r, p := newTestRouter(nil)
 	req := httptest.NewRequest("POST", "/v1/search", strings.NewReader(`{"query":"go"}`))

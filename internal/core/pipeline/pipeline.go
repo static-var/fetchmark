@@ -61,6 +61,9 @@ type Options struct {
 	Query         string
 	URLs          []string
 	Engines       []string
+	Categories    []string
+	Language      string
+	TimeRange     string
 	MaxResults    int
 	RespectRobots bool
 	ProxyURL      string
@@ -104,6 +107,9 @@ func (p *Pipeline) Search(ctx context.Context, o Options) ([]model.SearchResult,
 	hits, err := p.Searcher.Search(ctx, search.Query{
 		Q:          o.Query,
 		Engines:    o.Engines,
+		Categories: o.Categories,
+		Language:   o.Language,
+		TimeRange:  o.TimeRange,
 		MaxResults: o.MaxResults,
 	})
 	if err != nil {
@@ -133,10 +139,12 @@ func hitsToResults(hits []search.Hit) []model.SearchResult {
 	out := make([]model.SearchResult, len(hits))
 	for i, h := range hits {
 		out[i] = model.SearchResult{
-			URL:     h.URL,
-			Title:   h.Title,
-			Snippet: h.Snippet,
-			Engines: h.Engines,
+			URL:         h.URL,
+			Title:       h.Title,
+			Snippet:     h.Snippet,
+			Engines:     h.Engines,
+			PublishedAt: h.PublishedAt,
+			Metadata:    h.Metadata,
 		}
 	}
 	return out

@@ -59,12 +59,16 @@ type response struct {
 }
 
 type apiResult struct {
-	URL      string   `json:"url"`
-	Title    string   `json:"title"`
-	Content  string   `json:"content"`
-	Engine   string   `json:"engine"`
-	Engines  []string `json:"engines"`
-	Category string   `json:"category"`
+	URL           string          `json:"url"`
+	Title         string          `json:"title"`
+	Content       string          `json:"content"`
+	Engine        string          `json:"engine"`
+	Engines       []string        `json:"engines"`
+	Category      string          `json:"category"`
+	Date          json.RawMessage `json:"date"`
+	Published     json.RawMessage `json:"published"`
+	PublishedAt   json.RawMessage `json:"published_at"`
+	PublishedDate json.RawMessage `json:"publishedDate"`
 }
 
 // Search runs a SearXNG query and returns hits in the order SearXNG
@@ -88,6 +92,9 @@ func (c *Client) Search(ctx context.Context, q search.Query) ([]search.Hit, erro
 	}
 	if q.Language != "" {
 		vals.Set("language", q.Language)
+	}
+	if q.TimeRange != "" {
+		vals.Set("time_range", q.TimeRange)
 	}
 	if q.MaxResults > 0 {
 		// SearXNG paginates via pageno; request only page 1 and rely on
@@ -119,21 +126,78 @@ func (c *Client) Search(ctx context.Context, q search.Query) ([]search.Hit, erro
 	}
 
 	out := make([]search.Hit, 0, len(body.Results))
-	for _, r := range body.Results {
+	for i, r := range body.Results {
 		engines := r.Engines
 		if len(engines) == 0 && r.Engine != "" {
 			engines = []string{r.Engine}
 		}
+		metadata := map[string]string{"original_rank": strconv.Itoa(i + 1)}
+		if r.Category != "" {
+			metadata["category"] = r.Category
+		}
+		publishedAt, rawPublished := decodePublishedAt(r)
+		if rawPublished != "" {
+			metadata["published_at"] = rawPublished
+		}
 		out = append(out, search.Hit{
-			URL:     r.URL,
-			Title:   r.Title,
-			Snippet: r.Content,
-			Engines: engines,
+			URL:         r.URL,
+			Title:       r.Title,
+			Snippet:     r.Content,
+			Engines:     engines,
+			PublishedAt: publishedAt,
+			Metadata:    metadata,
 		})
 	}
 
 	c.updateEngineHealth(body.Results, body.UnresponsiveEngines)
 	return out, nil
+}
+
+func decodePublishedAt(r apiResult) (*time.Time, string) {
+	firstRaw := ""
+	for _, raw := range []json.RawMessage{r.PublishedAt, r.PublishedDate, r.Published, r.Date} {
+		if len(raw) == 0 || string(raw) == "null" {
+			continue
+		}
+		text, ok := decodeDateString(raw)
+		if !ok || text == "" {
+			continue
+		}
+		if firstRaw == "" {
+			firstRaw = text
+		}
+		if t, ok := parseDate(text); ok {
+			return &t, text
+		}
+	}
+	return nil, firstRaw
+}
+
+func decodeDateString(raw json.RawMessage) (string, bool) {
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return strings.TrimSpace(s), true
+	}
+	var n json.Number
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return n.String(), true
+	}
+	return "", false
+}
+
+func parseDate(s string) (time.Time, bool) {
+	if unix, err := strconv.ParseInt(s, 10, 64); err == nil {
+		if unix > 1_000_000_000_000 {
+			unix /= 1000
+		}
+		return time.Unix(unix, 0).UTC(), true
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, time.RFC1123Z, time.RFC1123, "2006-01-02", "2006-01-02 15:04:05", "Jan 2, 2006", "2 Jan 2006"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // updateEngineHealth mirrors SearXNG's per-engine availability into a

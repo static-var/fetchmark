@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/staticvar/fetchmark/internal/adapters/cache"
 	"github.com/staticvar/fetchmark/internal/adapters/fetcher"
@@ -17,9 +18,13 @@ import (
 type stubSearcher struct {
 	hits []search.Hit
 	err  error
+	last *search.Query
 }
 
-func (s stubSearcher) Search(_ context.Context, _ search.Query) ([]search.Hit, error) {
+func (s stubSearcher) Search(_ context.Context, q search.Query) ([]search.Hit, error) {
+	if s.last != nil {
+		*s.last = q
+	}
 	return s.hits, s.err
 }
 func (s stubSearcher) Ping(_ context.Context) error { return nil }
@@ -132,6 +137,34 @@ func TestFetchAndExtractAppliesSharedSingleflightFetchFailure(t *testing.T) {
 
 	if r.Unsupported != "fetch_failed" || r.FetchMS != 34 {
 		t.Fatalf("shared fetch failure was not applied to result: %+v", r)
+	}
+}
+
+func TestSearchPropagatesControlsAndMetadata(t *testing.T) {
+	publishedAt := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+	var got search.Query
+	p := &Pipeline{
+		Searcher:  stubSearcher{hits: []search.Hit{{URL: "https://a.example/1", PublishedAt: &publishedAt, Metadata: map[string]string{"category": "news", "original_rank": "1"}}}, last: &got},
+		Fetcher:   stubFetcher{resp: map[string]fetcher.Result{"https://a.example/1": {Status: 200, Body: []byte("body")}}},
+		Extractor: stubExtractor{},
+		Cache:     cache.New(nil, 0),
+	}
+
+	out, err := p.Search(context.Background(), Options{Query: "birds", Categories: []string{"general", "news"}, Language: "en", TimeRange: "year", MaxResults: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Categories) != 2 || got.Categories[0] != "general" || got.Categories[1] != "news" || got.Language != "en" || got.TimeRange != "year" {
+		t.Fatalf("query controls not propagated: %+v", got)
+	}
+	if len(out) != 1 {
+		t.Fatalf("got %d results, want 1", len(out))
+	}
+	if out[0].Metadata["category"] != "news" || out[0].Metadata["original_rank"] != "1" {
+		t.Fatalf("metadata not copied: %+v", out)
+	}
+	if out[0].PublishedAt == nil || !out[0].PublishedAt.Equal(publishedAt) {
+		t.Fatalf("published_at not copied: %+v", out[0].PublishedAt)
 	}
 }
 
