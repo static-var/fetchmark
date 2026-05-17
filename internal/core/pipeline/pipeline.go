@@ -270,6 +270,13 @@ func applyContent(r *model.SearchResult, c *model.Content) {
 	}
 }
 
+type fetchOutcome struct {
+	raw         []byte
+	fromCache   bool
+	unsupported string
+	fetchMS     int64
+}
+
 // fetchAndExtract populates r by fetching, extracting, and caching a
 // single URL. Concurrent callers of the same URL within a process are
 // coalesced via Cache.Do; across processes a Redis-backed WithLock
@@ -386,7 +393,7 @@ func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.Sear
 			if err := applyRaw(r, raw); err == nil {
 				r.FromCache = true
 			}
-			return raw, nil
+			return fetchOutcome{raw: raw, fromCache: true}, nil
 		}
 		// Cross-process lock. LockTTL is generous relative to our
 		// fetch+extract budget so a slow fetcher doesn't lose the lock
@@ -397,7 +404,7 @@ func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.Sear
 			PollInterval: 100 * time.Millisecond,
 		}, doFetch)
 		if err != nil {
-			return nil, err
+			return fetchOutcome{unsupported: r.Unsupported, fetchMS: r.FetchMS}, nil
 		}
 		// If another worker/process populated the cache while we
 		// waited, the lock path returned that blob without calling our
@@ -407,11 +414,28 @@ func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.Sear
 				r.FromCache = true
 			}
 		}
-		return raw, nil
+		return fetchOutcome{raw: raw, fromCache: r.FromCache, unsupported: r.Unsupported, fetchMS: r.FetchMS}, nil
 	})
-	if raw, ok := v.([]byte); ok && raw != nil && r.Content == nil && r.Unsupported == "" {
-		if err := applyRaw(r, raw); err == nil {
-			r.FromCache = true
+	applyFetchOutcome(r, v)
+}
+
+func applyFetchOutcome(r *model.SearchResult, v any) {
+	out, ok := v.(fetchOutcome)
+	if !ok {
+		if raw, ok := v.([]byte); ok {
+			out.raw = raw
+		} else {
+			return
+		}
+	}
+	if out.unsupported != "" && r.Unsupported == "" && r.Content == nil {
+		r.Unsupported = out.unsupported
+		r.FetchMS = out.fetchMS
+		return
+	}
+	if out.raw != nil && r.Content == nil && r.Unsupported == "" {
+		if err := applyRaw(r, out.raw); err == nil {
+			r.FromCache = out.fromCache
 		}
 	}
 }

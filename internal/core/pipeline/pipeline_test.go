@@ -72,16 +72,16 @@ func (e *countingExtractor) Extract(raw []byte, url string) (*model.Content, err
 	return &model.Content{URL: url, Title: "T", MainText: string(raw), Markdown: string(raw)}, nil
 }
 
-type sharedRawCache struct {
-	raw []byte
+type sharedOutcomeCache struct {
+	out any
 }
 
-func (c sharedRawCache) Get(context.Context, string) ([]byte, error) { return nil, nil }
-func (c sharedRawCache) Set(context.Context, string, []byte) error   { return nil }
-func (c sharedRawCache) Do(string, func() (any, error)) (any, error, bool) {
-	return c.raw, nil, true
+func (c sharedOutcomeCache) Get(context.Context, string) ([]byte, error) { return nil, nil }
+func (c sharedOutcomeCache) Set(context.Context, string, []byte) error   { return nil }
+func (c sharedOutcomeCache) Do(string, func() (any, error)) (any, error, bool) {
+	return c.out, nil, true
 }
-func (c sharedRawCache) WithLock(ctx context.Context, _ string, _ cache.LockOptions, fn func(context.Context) ([]byte, error)) ([]byte, error) {
+func (c sharedOutcomeCache) WithLock(ctx context.Context, _ string, _ cache.LockOptions, fn func(context.Context) ([]byte, error)) ([]byte, error) {
 	return fn(ctx)
 }
 
@@ -94,7 +94,7 @@ func TestFetchAndExtractAppliesSharedSingleflightRaw(t *testing.T) {
 	p := &Pipeline{
 		Fetcher:   stubFetcher{resp: map[string]fetcher.Result{}},
 		Extractor: stubExtractor{},
-		Cache:     sharedRawCache{raw: raw},
+		Cache:     sharedOutcomeCache{out: fetchOutcome{raw: raw, fromCache: true}},
 	}
 	r := &model.SearchResult{URL: "https://a.example/x"}
 
@@ -102,6 +102,36 @@ func TestFetchAndExtractAppliesSharedSingleflightRaw(t *testing.T) {
 
 	if r.Title != "Shared" || r.Content == nil || r.Content.MainText != "shared body" || r.Markdown != "# shared" || !r.FromCache {
 		t.Fatalf("shared singleflight raw was not applied to result: %+v", r)
+	}
+}
+
+func TestFetchAndExtractAppliesSharedSingleflightUnsupported(t *testing.T) {
+	p := &Pipeline{
+		Fetcher:   stubFetcher{resp: map[string]fetcher.Result{}},
+		Extractor: stubExtractor{},
+		Cache:     sharedOutcomeCache{out: fetchOutcome{unsupported: fetcher.ReasonRobots, fetchMS: 12}},
+	}
+	r := &model.SearchResult{URL: "https://a.example/x"}
+
+	p.fetchAndExtract(context.Background(), Options{}, r, false)
+
+	if r.Unsupported != fetcher.ReasonRobots || r.FetchMS != 12 {
+		t.Fatalf("shared unsupported outcome was not applied to result: %+v", r)
+	}
+}
+
+func TestFetchAndExtractAppliesSharedSingleflightFetchFailure(t *testing.T) {
+	p := &Pipeline{
+		Fetcher:   stubFetcher{resp: map[string]fetcher.Result{}},
+		Extractor: stubExtractor{},
+		Cache:     sharedOutcomeCache{out: fetchOutcome{unsupported: "fetch_failed", fetchMS: 34}},
+	}
+	r := &model.SearchResult{URL: "https://a.example/x"}
+
+	p.fetchAndExtract(context.Background(), Options{}, r, false)
+
+	if r.Unsupported != "fetch_failed" || r.FetchMS != 34 {
+		t.Fatalf("shared fetch failure was not applied to result: %+v", r)
 	}
 }
 
