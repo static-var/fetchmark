@@ -106,13 +106,21 @@ func TestFetch_NonRetriedClientError(t *testing.T) {
 	var count int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&count, 1)
+		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("<html><body>bad request page</body></html>"))
 	}))
 	t.Cleanup(srv.Close)
 	f := newFetcher(t, Budgets{Retries: 3})
 	res := f.Fetch(context.Background(), Request{URL: srv.URL})
-	if res.Status != 400 || res.Err != nil {
+	if res.Status != http.StatusBadRequest || res.Err != nil {
 		t.Fatalf("status=%d err=%v", res.Status, res.Err)
+	}
+	if res.Unsupported != "http_status" {
+		t.Fatalf("unsupported = %q, want http_status", res.Unsupported)
+	}
+	if len(res.Body) != 0 {
+		t.Fatalf("4xx body should not be extractable content, got %q", res.Body)
 	}
 	if atomic.LoadInt32(&count) != 1 {
 		t.Fatalf("should not retry 4xx, attempts=%d", count)

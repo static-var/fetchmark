@@ -75,6 +75,7 @@ const (
 	ReasonTooLarge        = "too_large"
 	ReasonDecompressLarge = "decompressed_too_large"
 	ReasonEgress          = "egress_blocked"
+	ReasonHTTPStatus      = "http_status"
 
 	maxHostGates = 1024
 )
@@ -291,7 +292,7 @@ func (f *Fetcher) doWithRetry(ctx context.Context, client *http.Client, rawURL, 
 		}
 		// Only retry on transient conditions (5xx, 429, network).
 		if err == nil && !(status == 429 || status >= 500) {
-			return body, status, ctype, "", nil
+			return nil, status, ctype, ReasonHTTPStatus, nil
 		}
 		lastErr = err
 		lastStatus = status
