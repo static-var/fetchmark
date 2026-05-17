@@ -48,6 +48,12 @@ services:
       # Lets FM_SUMMARIZE_*_BASE_URL point at SubSandwich on the host.
       # On Linux this resolves via Docker's built-in host-gateway alias.
       - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "/fetchmark", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
     depends_on:
       redis:
         condition: service_healthy
@@ -69,7 +75,9 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    command: ["redis-server", "--save", "", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis-data:/data
     expose:
       - "6379"
     healthcheck:

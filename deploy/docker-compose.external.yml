@@ -13,6 +13,12 @@ services:
       FM_REDIS_URL: "redis://redis:6379/0"
       FM_API_KEYS: "${FM_API_KEYS:?set FM_API_KEYS}"
       FM_ADMIN_API_KEYS: "${FM_ADMIN_API_KEYS:-}"
+    healthcheck:
+      test: ["CMD", "/fetchmark", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
     depends_on:
       redis:
         condition: service_healthy
@@ -20,7 +26,9 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    command: ["redis-server", "--save", "", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis-data:/data
     expose:
       - "6379"
     healthcheck:
@@ -28,3 +36,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+volumes:
+  redis-data:
