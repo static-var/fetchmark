@@ -10,7 +10,9 @@ package rank
 
 import (
 	"math"
+	"net/url"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/staticvar/fetchmark/internal/core/model"
@@ -25,10 +27,19 @@ const (
 )
 
 // Ranker scores a slice of SearchResults against a query.
-type Ranker struct{}
+type Ranker struct {
+	now func() time.Time
+}
 
 // New constructs a Ranker.
-func New() *Ranker { return &Ranker{} }
+func New() *Ranker { return &Ranker{now: time.Now} }
+
+func (r *Ranker) currentTime() time.Time {
+	if r != nil && r.now != nil {
+		return r.now()
+	}
+	return time.Now()
+}
 
 // Score mutates results in place by assigning .Score and returns the
 // slice sorted in descending score order. Results with empty extracted
@@ -84,6 +95,7 @@ func (r *Ranker) Score(query string, results []model.SearchResult) []model.Searc
 			bonus := engineBonusMax * math.Min(float64(n-1)/2.0, 1.0)
 			score += bonus
 		}
+		score += qualityAdjustmentAt(query, results[i], r.currentTime())
 		results[i].Score = score
 	}
 
@@ -94,6 +106,131 @@ func (r *Ranker) Score(query string, results []model.SearchResult) []model.Searc
 		}
 	}
 	return results
+}
+
+func qualityAdjustment(query string, result model.SearchResult) float64 {
+	return qualityAdjustmentAt(query, result, time.Now())
+}
+
+func qualityAdjustmentAt(query string, result model.SearchResult, now time.Time) float64 {
+	adj := 0.0
+	fresh := isFreshnessQuery(query)
+	u, err := url.Parse(result.URL)
+	host := ""
+	if err == nil {
+		host = strings.ToLower(u.Hostname())
+	}
+
+	if result.Unsupported != "" {
+		adj -= 1.0
+	}
+	if fresh {
+		if isSocialHost(host) {
+			adj -= 0.7
+		}
+		if isHomepage(result.URL) {
+			adj -= 0.45
+		}
+		if isReferenceURL(result.URL) {
+			adj -= 0.25
+		}
+		if hasRecentPublishedAt(result, now) && isArticleLike(result) {
+			adj += 0.35
+		}
+	} else if isReferenceURL(result.URL) {
+		adj += 0.15
+	}
+	if adj > 0.5 {
+		return 0.5
+	}
+	if adj < -1.5 {
+		return -1.5
+	}
+	return adj
+}
+
+func hasRecentPublishedAt(r model.SearchResult, now time.Time) bool {
+	if r.PublishedAt == nil {
+		return false
+	}
+	age := now.Sub(*r.PublishedAt)
+	return age >= 0 && age <= 90*24*time.Hour
+}
+
+func isFreshnessQuery(query string) bool {
+	q := strings.ToLower(query)
+	phraseMarkers := []string{"this week", "this month"}
+	for _, marker := range phraseMarkers {
+		if strings.Contains(q, marker) {
+			return true
+		}
+	}
+
+	tokens := tokenize(query)
+	markers := map[string]struct{}{
+		"latest": {},
+		"recent": {},
+		"new":    {},
+		"news":   {},
+		"today":  {},
+		"2024":   {},
+		"2025":   {},
+		"2026":   {},
+	}
+	for _, token := range tokens {
+		if _, ok := markers[token]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func isSocialHost(host string) bool {
+	host = strings.TrimPrefix(strings.ToLower(host), "www.")
+	social := []string{"x.com", "twitter.com", "facebook.com", "instagram.com", "tiktok.com", "reddit.com", "linkedin.com", "threads.net", "bsky.app"}
+	for _, s := range social {
+		if host == s || strings.HasSuffix(host, "."+s) {
+			return true
+		}
+	}
+	return false
+}
+
+func isHomepage(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	p := strings.Trim(u.EscapedPath(), "/")
+	return p == "" && u.RawQuery == "" && u.Fragment == ""
+}
+
+func isReferenceURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := strings.TrimPrefix(strings.ToLower(u.Hostname()), "www.")
+	if host == "wikipedia.org" || strings.HasSuffix(host, ".wikipedia.org") || host == "britannica.com" || strings.HasSuffix(host, ".britannica.com") {
+		return true
+	}
+	path := strings.ToLower(u.EscapedPath())
+	return strings.Contains(path, "/wiki/") || strings.Contains(path, "/reference/") || strings.Contains(path, "/encyclopedia/")
+}
+
+func isArticleLike(r model.SearchResult) bool {
+	u, err := url.Parse(r.URL)
+	if err != nil {
+		return false
+	}
+	path := strings.ToLower(u.EscapedPath())
+	articleMarkers := []string{"/news/", "/article/", "/articles/", "/blog/", "/posts/", "/2024/", "/2025/", "/2026/"}
+	for _, marker := range articleMarkers {
+		if strings.Contains(path, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func pickTitle(r model.SearchResult) string {
