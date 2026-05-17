@@ -130,11 +130,11 @@ func (c *Client) Search(ctx context.Context, q search.Query) ([]search.Hit, erro
 			return nil, fmt.Errorf("searxng: close response: %w", closeErr)
 		}
 
+		allResults = append(allResults, body.Results...)
+		allUnresponsive = append(allUnresponsive, body.UnresponsiveEngines...)
 		if len(body.Results) == 0 {
 			break
 		}
-		allResults = append(allResults, body.Results...)
-		allUnresponsive = append(allUnresponsive, body.UnresponsiveEngines...)
 		for _, r := range body.Results {
 			out = append(out, hitFromAPIResult(r, len(out)+1))
 			if q.MaxResults > 0 && len(out) >= q.MaxResults {

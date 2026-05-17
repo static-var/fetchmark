@@ -96,6 +96,24 @@ func TestSearch_FetchesAdditionalPagesUntilMaxResults(t *testing.T) {
 	}
 }
 
+func TestSearch_RecordsUnresponsiveEnginesFromEmptyPage(t *testing.T) {
+	c := newStub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"results":[],"unresponsive_engines":[["google","timeout"]]}`))
+	})
+
+	_, err := c.Search(context.Background(), search.Query{Q: "birds", MaxResults: 5})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	c.mu.Lock()
+	_, ok := c.knownEng["google"]
+	c.mu.Unlock()
+	if !ok {
+		t.Fatalf("unresponsive engine from empty page was not recorded")
+	}
+}
+
 func TestSearch_PreservesPublishedAtMetadata(t *testing.T) {
 	c := newStub(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
