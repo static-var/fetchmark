@@ -35,6 +35,9 @@ func newStub(t *testing.T, handler http.HandlerFunc) *Client {
 func TestSearch_ControlsAndMetadata(t *testing.T) {
 	c := newStub(t, func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
+		if q.Get("q") != `"bird species" site:a.example -site:b.example` {
+			t.Errorf("q = %q", q.Get("q"))
+		}
 		if q.Get("categories") != "general,news" {
 			t.Errorf("categories = %q", q.Get("categories"))
 		}
@@ -44,11 +47,24 @@ func TestSearch_ControlsAndMetadata(t *testing.T) {
 		if q.Get("time_range") != "year" {
 			t.Errorf("time_range = %q", q.Get("time_range"))
 		}
+		if q.Get("safesearch") != "1" {
+			t.Errorf("safesearch = %q", q.Get("safesearch"))
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"results":[{"url":"https://a.example","title":"A","content":"one","category":"general"},{"url":"https://b.example","title":"B","content":"two","category":"news"}]}`))
 	})
 
-	hits, err := c.Search(context.Background(), search.Query{Q: "bird species", Categories: []string{"general", "news"}, Language: "en", TimeRange: "year"})
+	safeSearch := 1
+	hits, err := c.Search(context.Background(), search.Query{
+		Q:              "bird species",
+		Categories:     []string{"general", "news"},
+		Language:       "en",
+		TimeRange:      "year",
+		SafeSearch:     &safeSearch,
+		IncludeDomains: []string{"a.example"},
+		ExcludeDomains: []string{"b.example"},
+		ExactMatch:     true,
+	})
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}

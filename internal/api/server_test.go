@@ -93,7 +93,7 @@ func TestSearch_MissingQueryIs400(t *testing.T) {
 
 func TestSearch_PropagatesSearchControls(t *testing.T) {
 	r, p := newTestRouter(nil)
-	body := strings.NewReader(`{"query":"birds","categories":["general","news"],"language":"en","time_range":"year"}`)
+	body := strings.NewReader(`{"query":"birds","categories":["general","news"],"language":"en","time_range":"year","safesearch":1,"include_domains":["a.example"],"exclude_domains":["b.example"],"exact_match":true,"search_depth":"advanced","chunks_per_source":2}`)
 	req := httptest.NewRequest("POST", "/v1/search", body)
 	req.Header.Set("X-API-Key", "k1")
 	rec := httptest.NewRecorder()
@@ -103,6 +103,55 @@ func TestSearch_PropagatesSearchControls(t *testing.T) {
 	}
 	if len(p.lastOpts.Categories) != 2 || p.lastOpts.Categories[0] != "general" || p.lastOpts.Categories[1] != "news" || p.lastOpts.Language != "en" || p.lastOpts.TimeRange != "year" {
 		t.Fatalf("search controls not propagated: %+v", p.lastOpts)
+	}
+	if p.lastOpts.SafeSearch == nil || *p.lastOpts.SafeSearch != 1 || len(p.lastOpts.IncludeDomains) != 1 || p.lastOpts.IncludeDomains[0] != "a.example" || len(p.lastOpts.ExcludeDomains) != 1 || p.lastOpts.ExcludeDomains[0] != "b.example" || !p.lastOpts.ExactMatch || p.lastOpts.SearchDepth != "advanced" || p.lastOpts.ChunksPerSource != 2 {
+		t.Fatalf("advanced controls not propagated: %+v", p.lastOpts)
+	}
+	if p.lastOpts.CandidateCap != 50 {
+		t.Fatalf("advanced candidate cap = %d, want 50", p.lastOpts.CandidateCap)
+	}
+}
+
+func TestSearch_InvalidSearchControlsReturn400(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{name: "unsupported time range", body: `{"query":"birds","time_range":"week"}`},
+		{name: "unsupported safesearch", body: `{"query":"birds","safesearch":3}`},
+		{name: "unsupported search depth", body: `{"query":"birds","search_depth":"deep"}`},
+		{name: "unsupported chunks per source", body: `{"query":"birds","chunks_per_source":4}`},
+		{name: "malformed include domain", body: `{"query":"birds","include_domains":["%"]}`},
+		{name: "malformed exclude domain", body: `{"query":"birds","exclude_domains":["https://"]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, _ := newTestRouter(nil)
+			req := httptest.NewRequest("POST", "/v1/search", strings.NewReader(tc.body))
+			req.Header.Set("X-API-Key", "k1")
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestSearch_NormalizesSearchControlValues(t *testing.T) {
+	r, p := newTestRouter(nil)
+	req := httptest.NewRequest("POST", "/v1/search", strings.NewReader(`{"query":"birds","time_range":" Year ","search_depth":" Advanced "}`))
+	req.Header.Set("X-API-Key", "k1")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if p.lastOpts.TimeRange != "year" {
+		t.Fatalf("time range = %q, want normalized year", p.lastOpts.TimeRange)
+	}
+	if p.lastOpts.SearchDepth != "advanced" {
+		t.Fatalf("search depth = %q, want normalized advanced", p.lastOpts.SearchDepth)
 	}
 }
 

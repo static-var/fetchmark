@@ -97,7 +97,7 @@ func summarizeHandler(d Deps) http.HandlerFunc {
 		//    production egress policy, robots enforcement, cache, and
 		//    extractor — none of which the LLM adapter should know about.
 		parseOpts, err := buildOptions(r, d.Config.RespectRobots, "", "", nil,
-			req.TimeoutMS, 0, []string{"markdown"}, nil, "", []string{req.URL}, req.Render, nil, "", "")
+			req.TimeoutMS, 0, []string{"markdown"}, nil, "", []string{req.URL}, req.Render, nil, "", "", nil, nil, nil, false, "", 0)
 		if err != nil {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return

@@ -58,20 +58,26 @@ type Cache interface {
 
 // Options adjust a single pipeline call.
 type Options struct {
-	Query         string
-	URLs          []string
-	Engines       []string
-	Categories    []string
-	Language      string
-	TimeRange     string
-	MaxResults    int
-	CandidateCap  int
-	RespectRobots bool
-	ProxyURL      string
-	UserAgent     string
-	Timeout       time.Duration
-	Formats       []string
-	AdminRequest  bool
+	Query           string
+	URLs            []string
+	Engines         []string
+	Categories      []string
+	Language        string
+	TimeRange       string
+	SafeSearch      *int
+	IncludeDomains  []string
+	ExcludeDomains  []string
+	ExactMatch      bool
+	SearchDepth     string
+	ChunksPerSource int
+	MaxResults      int
+	CandidateCap    int
+	RespectRobots   bool
+	ProxyURL        string
+	UserAgent       string
+	Timeout         time.Duration
+	Formats         []string
+	AdminRequest    bool
 	// Render forces the headless renderer to handle this call, bypassing
 	// the first-pass plain fetch only when the extractor flags it as
 	// js_required. It is a hint; an absent Renderer or a disabled
@@ -110,12 +116,16 @@ func (p *Pipeline) Search(ctx context.Context, o Options) ([]model.SearchResult,
 		candidateCap = o.MaxResults
 	}
 	hits, err := p.Searcher.Search(ctx, search.Query{
-		Q:          o.Query,
-		Engines:    o.Engines,
-		Categories: o.Categories,
-		Language:   o.Language,
-		TimeRange:  o.TimeRange,
-		MaxResults: candidateCap,
+		Q:              o.Query,
+		Engines:        o.Engines,
+		Categories:     o.Categories,
+		Language:       o.Language,
+		TimeRange:      o.TimeRange,
+		SafeSearch:     o.SafeSearch,
+		IncludeDomains: o.IncludeDomains,
+		ExcludeDomains: o.ExcludeDomains,
+		ExactMatch:     o.ExactMatch,
+		MaxResults:     candidateCap,
 	})
 	if err != nil {
 		return nil, err
@@ -171,6 +181,7 @@ func (p *Pipeline) process(ctx context.Context, o Options, seed []model.SearchRe
 		r.URL = canon
 		results = append(results, r)
 	}
+	results = filterResultsByDomains(results, o.IncludeDomains, o.ExcludeDomains)
 
 	cacheBypass := o.ProxyURL != ""
 	renderMode := o.Render && p.Renderer != nil
@@ -221,6 +232,9 @@ func (p *Pipeline) process(ctx context.Context, o Options, seed []model.SearchRe
 	// more relevant duplicate.
 	if p.Ranker != nil && query != "" {
 		results = p.Ranker.Score(query, results)
+	}
+	if query != "" && o.ChunksPerSource > 0 {
+		attachQueryChunks(results, query, o.ChunksPerSource)
 	}
 	results = dedupeNearDuplicates(results)
 	if o.MaxResults > 0 && len(results) > o.MaxResults {

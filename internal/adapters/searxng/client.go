@@ -82,7 +82,7 @@ func (c *Client) Search(ctx context.Context, q search.Query) ([]search.Hit, erro
 	u.Path = strings.TrimRight(u.Path, "/") + "/search"
 
 	vals := url.Values{}
-	vals.Set("q", q.Q)
+	vals.Set("q", queryText(q))
 	vals.Set("format", "json")
 	if len(q.Engines) > 0 {
 		vals.Set("engines", strings.Join(q.Engines, ","))
@@ -95,6 +95,9 @@ func (c *Client) Search(ctx context.Context, q search.Query) ([]search.Hit, erro
 	}
 	if q.TimeRange != "" {
 		vals.Set("time_range", q.TimeRange)
+	}
+	if q.SafeSearch != nil {
+		vals.Set("safesearch", strconv.Itoa(*q.SafeSearch))
 	}
 	out := make([]search.Hit, 0, q.MaxResults)
 	var allResults []apiResult
@@ -149,6 +152,52 @@ func (c *Client) Search(ctx context.Context, q search.Query) ([]search.Hit, erro
 
 	c.updateEngineHealth(allResults, allUnresponsive)
 	return out, nil
+}
+
+func queryText(q search.Query) string {
+	text := strings.TrimSpace(q.Q)
+	if q.ExactMatch && !isQuoted(text) {
+		text = strconv.Quote(text)
+	}
+	terms := []string{text}
+	if include := siteTerms(q.IncludeDomains, ""); len(include) == 1 {
+		terms = append(terms, include[0])
+	} else if len(include) > 1 {
+		terms = append(terms, "("+strings.Join(include, " OR ")+")")
+	}
+	terms = append(terms, siteTerms(q.ExcludeDomains, "-")...)
+	return strings.Join(terms, " ")
+}
+
+func isQuoted(s string) bool {
+	return len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"'
+}
+
+func siteTerms(domains []string, prefix string) []string {
+	out := make([]string, 0, len(domains))
+	for _, domain := range domains {
+		host := domainHost(domain)
+		if host == "" {
+			continue
+		}
+		out = append(out, prefix+"site:"+host)
+	}
+	return out
+}
+
+func domainHost(domain string) string {
+	domain = strings.TrimSpace(strings.ToLower(domain))
+	if domain == "" {
+		return ""
+	}
+	if !strings.Contains(domain, "://") {
+		domain = "https://" + domain
+	}
+	u, err := url.Parse(domain)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimPrefix(u.Hostname(), "*.")
 }
 
 func cloneValues(vals url.Values) url.Values {

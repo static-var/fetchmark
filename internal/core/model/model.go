@@ -23,6 +23,15 @@ type SearchResult struct {
 	FetchMS     int64             `json:"fetch_ms,omitempty"`
 	Unsupported string            `json:"unsupported_reason,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
+	Chunks      []ContentChunk    `json:"chunks,omitempty"`
+}
+
+// ContentChunk is a query-focused excerpt selected from extracted page
+// text. Score is local to one Fetchmark response and should not be
+// compared across different queries.
+type ContentChunk struct {
+	Text  string  `json:"text"`
+	Score float64 `json:"score"`
 }
 
 // Content is the structured extraction output: metadata, main text, and

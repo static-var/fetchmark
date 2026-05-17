@@ -9,12 +9,16 @@ import (
 
 // Query describes a user's search intent.
 type Query struct {
-	Q          string
-	Engines    []string
-	Categories []string
-	Language   string
-	TimeRange  string
-	MaxResults int
+	Q              string
+	Engines        []string
+	Categories     []string
+	Language       string
+	TimeRange      string
+	SafeSearch     *int
+	IncludeDomains []string
+	ExcludeDomains []string
+	ExactMatch     bool
+	MaxResults     int
 }
 
 // Hit is the minimal per-result data returned by a Searcher, prior to

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -45,6 +46,12 @@ type stubExtractor struct{}
 
 func (stubExtractor) Extract(raw []byte, url string) (*model.Content, error) {
 	return &model.Content{URL: url, Title: "T", MainText: string(raw), Markdown: "# " + string(raw)}, nil
+}
+
+type emptyExtractor struct{}
+
+func (emptyExtractor) Extract(_ []byte, url string) (*model.Content, error) {
+	return &model.Content{URL: url, Title: "T"}, nil
 }
 
 type formattedExtractor struct{}
@@ -143,6 +150,7 @@ func TestFetchAndExtractAppliesSharedSingleflightFetchFailure(t *testing.T) {
 func TestSearchPropagatesControlsAndMetadata(t *testing.T) {
 	publishedAt := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
 	var got search.Query
+	safeSearch := 1
 	p := &Pipeline{
 		Searcher:  stubSearcher{hits: []search.Hit{{URL: "https://a.example/1", PublishedAt: &publishedAt, Metadata: map[string]string{"category": "news", "original_rank": "1"}}}, last: &got},
 		Fetcher:   stubFetcher{resp: map[string]fetcher.Result{"https://a.example/1": {Status: 200, Body: []byte("body")}}},
@@ -150,12 +158,25 @@ func TestSearchPropagatesControlsAndMetadata(t *testing.T) {
 		Cache:     cache.New(nil, 0),
 	}
 
-	out, err := p.Search(context.Background(), Options{Query: "birds", Categories: []string{"general", "news"}, Language: "en", TimeRange: "year", MaxResults: 10})
+	out, err := p.Search(context.Background(), Options{
+		Query:          "birds",
+		Categories:     []string{"general", "news"},
+		Language:       "en",
+		TimeRange:      "year",
+		SafeSearch:     &safeSearch,
+		IncludeDomains: []string{"a.example"},
+		ExcludeDomains: []string{"b.example"},
+		ExactMatch:     true,
+		MaxResults:     10,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got.Categories) != 2 || got.Categories[0] != "general" || got.Categories[1] != "news" || got.Language != "en" || got.TimeRange != "year" {
 		t.Fatalf("query controls not propagated: %+v", got)
+	}
+	if got.SafeSearch == nil || *got.SafeSearch != 1 || len(got.IncludeDomains) != 1 || got.IncludeDomains[0] != "a.example" || len(got.ExcludeDomains) != 1 || got.ExcludeDomains[0] != "b.example" || !got.ExactMatch {
+		t.Fatalf("advanced query controls not propagated: %+v", got)
 	}
 	if len(out) != 1 {
 		t.Fatalf("got %d results, want 1", len(out))
@@ -165,6 +186,114 @@ func TestSearchPropagatesControlsAndMetadata(t *testing.T) {
 	}
 	if out[0].PublishedAt == nil || !out[0].PublishedAt.Equal(publishedAt) {
 		t.Fatalf("published_at not copied: %+v", out[0].PublishedAt)
+	}
+}
+
+func TestSearchFiltersDomainsBeforeFetch(t *testing.T) {
+	fetcher := &countingFetcher{}
+	p := &Pipeline{
+		Searcher: stubSearcher{hits: []search.Hit{
+			{URL: "https://docs.example.com/keep"},
+			{URL: "https://blog.example.com/drop"},
+			{URL: "https://blocked.example.com/keep-looking"},
+			{URL: "https://other.test/also-drop"},
+		}},
+		Fetcher:   fetcher,
+		Extractor: stubExtractor{},
+		Cache:     cache.New(nil, 0),
+	}
+
+	out, err := p.Search(context.Background(), Options{
+		Query:          "keep",
+		IncludeDomains: []string{"example.com"},
+		ExcludeDomains: []string{"blog.example.com", "blocked.example.com"},
+		MaxResults:     10,
+		CandidateCap:   10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 || out[0].URL != "https://docs.example.com/keep" {
+		t.Fatalf("domain-filtered results = %+v", out)
+	}
+	if got := fetcher.calls.Load(); got != 1 {
+		t.Fatalf("fetched %d URLs, want only the included non-excluded URL", got)
+	}
+}
+
+func TestSearchAttachesQueryFocusedChunks(t *testing.T) {
+	p := &Pipeline{
+		Searcher: stubSearcher{hits: []search.Hit{
+			{URL: "https://a.example/article", Title: "Bird migration"},
+		}},
+		Fetcher: stubFetcher{resp: map[string]fetcher.Result{
+			"https://a.example/article": {Status: 200, Body: []byte("Intro paragraph about unrelated weather.\n\nDetailed migration routes show birds crossing oceans every year.\n\nAnother migration paragraph mentions birds and route timing.")},
+		}},
+		Extractor: stubExtractor{},
+		Cache:     cache.New(nil, 0),
+	}
+
+	out, err := p.Search(context.Background(), Options{Query: "bird migration routes", MaxResults: 5, CandidateCap: 5, ChunksPerSource: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("got %d results, want 1", len(out))
+	}
+	if len(out[0].Chunks) != 2 {
+		t.Fatalf("chunks = %+v, want 2", out[0].Chunks)
+	}
+	if !strings.Contains(out[0].Chunks[0].Text, "migration routes") {
+		t.Fatalf("top chunk should be the most query-focused paragraph: %+v", out[0].Chunks)
+	}
+	if out[0].Chunks[0].Score <= out[0].Chunks[1].Score {
+		t.Fatalf("chunks should be sorted by score desc: %+v", out[0].Chunks)
+	}
+}
+
+func TestSearchOmitsZeroScoreChunks(t *testing.T) {
+	p := &Pipeline{
+		Searcher: stubSearcher{hits: []search.Hit{
+			{URL: "https://a.example/article", Title: "Weather"},
+		}},
+		Fetcher: stubFetcher{resp: map[string]fetcher.Result{
+			"https://a.example/article": {Status: 200, Body: []byte("Clouds formed over the city.\n\nRain moved across the coastline.")},
+		}},
+		Extractor: stubExtractor{},
+		Cache:     cache.New(nil, 0),
+	}
+
+	out, err := p.Search(context.Background(), Options{Query: "bird migration routes", MaxResults: 5, CandidateCap: 5, ChunksPerSource: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("got %d results, want 1", len(out))
+	}
+	if len(out[0].Chunks) != 0 {
+		t.Fatalf("zero-score chunks should be omitted: %+v", out[0].Chunks)
+	}
+}
+
+func TestSearchOmitsChunksWithoutExtractedContent(t *testing.T) {
+	p := &Pipeline{
+		Searcher: stubSearcher{hits: []search.Hit{
+			{URL: "https://a.example/article", Snippet: "bird migration routes"},
+		}},
+		Fetcher:   stubFetcher{resp: map[string]fetcher.Result{"https://a.example/article": {Status: 200, Body: []byte("body")}}},
+		Extractor: emptyExtractor{},
+		Cache:     cache.New(nil, 0),
+	}
+
+	out, err := p.Search(context.Background(), Options{Query: "bird migration routes", MaxResults: 5, CandidateCap: 5, ChunksPerSource: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("got %d results, want 1", len(out))
+	}
+	if len(out[0].Chunks) != 0 {
+		t.Fatalf("chunks should require extracted page text, got: %+v", out[0].Chunks)
 	}
 }
 
