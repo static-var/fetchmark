@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/staticvar/fetchmark/internal/adapters/cache"
 	"github.com/staticvar/fetchmark/internal/adapters/fetcher"
@@ -17,9 +18,13 @@ import (
 type stubSearcher struct {
 	hits []search.Hit
 	err  error
+	last *search.Query
 }
 
-func (s stubSearcher) Search(_ context.Context, _ search.Query) ([]search.Hit, error) {
+func (s stubSearcher) Search(_ context.Context, q search.Query) ([]search.Hit, error) {
+	if s.last != nil {
+		*s.last = q
+	}
 	return s.hits, s.err
 }
 func (s stubSearcher) Ping(_ context.Context) error { return nil }
@@ -135,33 +140,96 @@ func TestFetchAndExtractAppliesSharedSingleflightFetchFailure(t *testing.T) {
 	}
 }
 
+func TestSearchPropagatesControlsAndMetadata(t *testing.T) {
+	publishedAt := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+	var got search.Query
+	p := &Pipeline{
+		Searcher:  stubSearcher{hits: []search.Hit{{URL: "https://a.example/1", PublishedAt: &publishedAt, Metadata: map[string]string{"category": "news", "original_rank": "1"}}}, last: &got},
+		Fetcher:   stubFetcher{resp: map[string]fetcher.Result{"https://a.example/1": {Status: 200, Body: []byte("body")}}},
+		Extractor: stubExtractor{},
+		Cache:     cache.New(nil, 0),
+	}
+
+	out, err := p.Search(context.Background(), Options{Query: "birds", Categories: []string{"general", "news"}, Language: "en", TimeRange: "year", MaxResults: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Categories) != 2 || got.Categories[0] != "general" || got.Categories[1] != "news" || got.Language != "en" || got.TimeRange != "year" {
+		t.Fatalf("query controls not propagated: %+v", got)
+	}
+	if len(out) != 1 {
+		t.Fatalf("got %d results, want 1", len(out))
+	}
+	if out[0].Metadata["category"] != "news" || out[0].Metadata["original_rank"] != "1" {
+		t.Fatalf("metadata not copied: %+v", out)
+	}
+	if out[0].PublishedAt == nil || !out[0].PublishedAt.Equal(publishedAt) {
+		t.Fatalf("published_at not copied: %+v", out[0].PublishedAt)
+	}
+}
+
 func TestSearchCapsCandidatesBeforeFetch(t *testing.T) {
-	hits := []search.Hit{
-		{URL: "https://a.example/1"},
-		{URL: "https://b.example/2"},
-		{URL: "https://c.example/3"},
+	hits := make([]search.Hit, 20)
+	resp := make(map[string]fetcher.Result, len(hits))
+	for i := range hits {
+		u := "https://example.com/" + string(rune('a'+i))
+		hits[i] = search.Hit{URL: u}
+		resp[u] = fetcher.Result{Status: 200, Body: []byte(u)}
 	}
 	fetcher := &countingFetcher{}
 	extractor := &countingExtractor{}
+	var got search.Query
 	p := &Pipeline{
-		Searcher:  stubSearcher{hits: hits},
+		Searcher:  stubSearcher{hits: hits, last: &got},
 		Fetcher:   fetcher,
 		Extractor: extractor,
 		Cache:     cache.New(nil, 0),
 	}
 
-	out, err := p.Search(context.Background(), Options{Query: "hello", MaxResults: 1})
+	out, err := p.Search(context.Background(), Options{Query: "hello", MaxResults: 5, CandidateCap: 15})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) > 5 {
+		t.Fatalf("got %d results, want at most 5", len(out))
+	}
+	if got.MaxResults != 15 {
+		t.Fatalf("search query max results = %d, want candidate cap 15", got.MaxResults)
+	}
+	if got := fetcher.calls.Load(); got != 15 {
+		t.Fatalf("fetched %d URLs, want 15", got)
+	}
+	if got := extractor.calls.Load(); got != 15 {
+		t.Fatalf("extracted %d URLs, want 15", got)
+	}
+}
+
+func TestSearchDuplicateCandidatesDoNotStarveLaterUniqueResults(t *testing.T) {
+	hits := []search.Hit{
+		{URL: "https://a.example/same?utm_source=one"},
+		{URL: "https://a.example/same?utm_source=two"},
+		{URL: "https://b.example/unique"},
+	}
+	p := &Pipeline{
+		Searcher: stubSearcher{hits: hits},
+		Fetcher: stubFetcher{resp: map[string]fetcher.Result{
+			"https://a.example/same":   {Status: 200, Body: []byte("first")},
+			"https://b.example/unique": {Status: 200, Body: []byte("later relevant unique")},
+		}},
+		Extractor: stubExtractor{},
+		Cache:     cache.New(nil, 0),
+		Ranker:    rank.New(),
+	}
+
+	out, err := p.Search(context.Background(), Options{Query: "later relevant unique", MaxResults: 1, CandidateCap: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(out) != 1 {
 		t.Fatalf("got %d results, want 1", len(out))
 	}
-	if got := fetcher.calls.Load(); got != 1 {
-		t.Fatalf("fetched %d URLs, want 1", got)
-	}
-	if got := extractor.calls.Load(); got != 1 {
-		t.Fatalf("extracted %d URLs, want 1", got)
+	if out[0].URL != "https://b.example/unique" {
+		t.Fatalf("duplicate-before-cap starved later unique candidate: %+v", out)
 	}
 }
 

@@ -38,6 +38,22 @@ components:
       properties:
         query:           { type: string, example: "site:go.dev slices" }
         engines:         { type: array, items: { type: string } }
+        categories:
+          type: array
+          items: { type: string }
+          description: "SearXNG categories to search, for example general, news, science, or images. Sent as a comma-separated category list upstream."
+          example: [general, news]
+        language:
+          type: string
+          description: "SearXNG language code for search results, for example en or auto."
+          example: en
+        time_range:
+          type: string
+          enum: [day, week, month, year]
+          description: "Optional SearXNG freshness filter."
+        render:
+          type: boolean
+          description: "When true, fetch pages with the configured rendering path for JavaScript-heavy content."
         max_results:     { type: integer, minimum: 1, maximum: 50, default: 10 }
         formats:         { type: array, items: { type: string, enum: [json, markdown, html] } }
         timeout_ms:      { type: integer, minimum: 1, maximum: 60000 }
@@ -70,6 +86,16 @@ components:
         fetch_ms:       { type: integer }
         status:         { type: integer, description: "(Reserved — not currently populated.) HTTP status returned by upstream." }
         score:          { type: number, format: float }
+        published_at:   { type: string, format: date-time, description: "Parsed publication date for the search result, when provided by the upstream provider." }
+        metadata:
+          type: object
+          additionalProperties: { type: string }
+          description: "Search-provider metadata. Current keys include category (the SearXNG category for the result), original_rank (the 1-based rank returned by the upstream provider before Fetchmark re-ranking), date (the raw SearXNG date string), and published_at (the raw provider publication date string, when useful)."
+          examples:
+            - category: news
+              original_rank: "3"
+              date: "2025-01-02"
+              published_at: "2025-01-02T03:04:05Z"
         content:        { $ref: "#/components/schemas/Content" }
         unsupported_reason: { type: string, description: "Reason if parsing could not complete: non_html, js_required, robots_disallowed, egress_blocked, fetch_failed, extract_failed." }
 

@@ -15,6 +15,9 @@ import (
 type searchRequest struct {
 	Query         string   `json:"query"`
 	Engines       []string `json:"engines,omitempty"`
+	Categories    []string `json:"categories,omitempty"`
+	Language      string   `json:"language,omitempty"`
+	TimeRange     string   `json:"time_range,omitempty"`
 	MaxResults    int      `json:"max_results,omitempty"`
 	Formats       []string `json:"formats,omitempty"`
 	TimeoutMS     int      `json:"timeout_ms,omitempty"`
@@ -49,12 +52,15 @@ func decodeJSON(r *http.Request, v any) error {
 
 // buildOptions maps a request's common options onto pipeline.Options and
 // enforces admin-only gates on proxy_url and respect_robots=false.
-func buildOptions(r *http.Request, defaultRobots bool, proxy, ua string, respect *bool, timeoutMS int, maxResults int, formats, engines []string, query string, urls []string, render *bool) (pipeline.Options, error) {
+func buildOptions(r *http.Request, defaultRobots bool, proxy, ua string, respect *bool, timeoutMS int, maxResults int, formats, engines []string, query string, urls []string, render *bool, categories []string, language, timeRange string) (pipeline.Options, error) {
 	p := middleware.PrincipalFrom(r.Context())
 	opts := pipeline.Options{
 		Query:         query,
 		URLs:          urls,
 		Engines:       engines,
+		Categories:    categories,
+		Language:      language,
+		TimeRange:     timeRange,
 		MaxResults:    maxResults,
 		Formats:       formats,
 		AdminRequest:  p.Admin,
@@ -107,11 +113,19 @@ func searchHandler(d Deps) http.HandlerFunc {
 			max = d.Config.ResultsCap
 		}
 		opts, err := buildOptions(r, d.Config.RespectRobots, req.ProxyURL, "", req.RespectRobots,
-			req.TimeoutMS, max, req.Formats, req.Engines, req.Query, nil, req.Render)
+			req.TimeoutMS, max, req.Formats, req.Engines, req.Query, nil, req.Render, req.Categories, req.Language, req.TimeRange)
 		if err != nil {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return
 		}
+		candidateCap := max * 3
+		if candidateCap < max {
+			candidateCap = max
+		}
+		if candidateCap > d.Config.ResultsCap {
+			candidateCap = d.Config.ResultsCap
+		}
+		opts.CandidateCap = candidateCap
 
 		out, err := d.Pipeline.Search(r.Context(), opts)
 		if err != nil {
@@ -158,7 +172,7 @@ func parseHandler(d Deps) http.HandlerFunc {
 			return
 		}
 		opts, err := buildOptions(r, d.Config.RespectRobots, req.ProxyURL, "", req.RespectRobots,
-			req.TimeoutMS, 0, req.Formats, nil, req.Query, req.URLs, req.Render)
+			req.TimeoutMS, 0, req.Formats, nil, req.Query, req.URLs, req.Render, nil, "", "")
 		if err != nil {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return

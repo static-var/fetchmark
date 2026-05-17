@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/staticvar/fetchmark/internal/core/search"
 )
@@ -29,6 +30,113 @@ func newStub(t *testing.T, handler http.HandlerFunc) *Client {
 		t.Fatalf("New: %v", err)
 	}
 	return c
+}
+
+func TestSearch_ControlsAndMetadata(t *testing.T) {
+	c := newStub(t, func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("categories") != "general,news" {
+			t.Errorf("categories = %q", q.Get("categories"))
+		}
+		if q.Get("language") != "en" {
+			t.Errorf("language = %q", q.Get("language"))
+		}
+		if q.Get("time_range") != "year" {
+			t.Errorf("time_range = %q", q.Get("time_range"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"results":[{"url":"https://a.example","title":"A","content":"one","category":"general"},{"url":"https://b.example","title":"B","content":"two","category":"news"}]}`))
+	})
+
+	hits, err := c.Search(context.Background(), search.Query{Q: "bird species", Categories: []string{"general", "news"}, Language: "en", TimeRange: "year"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) != 2 {
+		t.Fatalf("hits = %d", len(hits))
+	}
+	if hits[0].Metadata["category"] != "general" || hits[0].Metadata["original_rank"] != "1" {
+		t.Fatalf("first metadata = %#v", hits[0].Metadata)
+	}
+	if hits[1].Metadata["category"] != "news" || hits[1].Metadata["original_rank"] != "2" {
+		t.Fatalf("second metadata = %#v", hits[1].Metadata)
+	}
+}
+
+func TestSearch_FetchesAdditionalPagesUntilMaxResults(t *testing.T) {
+	var pages []string
+	c := newStub(t, func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("pageno")
+		pages = append(pages, page)
+		w.Header().Set("Content-Type", "application/json")
+		switch page {
+		case "1":
+			_, _ = w.Write([]byte(`{"results":[{"url":"https://a.example","title":"A"},{"url":"https://b.example","title":"B"}]}`))
+		case "2":
+			_, _ = w.Write([]byte(`{"results":[{"url":"https://c.example","title":"C"},{"url":"https://d.example","title":"D"}]}`))
+		case "3":
+			_, _ = w.Write([]byte(`{"results":[{"url":"https://e.example","title":"E"}]}`))
+		default:
+			t.Fatalf("unexpected page %q", page)
+		}
+	})
+
+	hits, err := c.Search(context.Background(), search.Query{Q: "bird species", MaxResults: 5})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if got, want := strings.Join(pages, ","), "1,2,3"; got != want {
+		t.Fatalf("pages = %q, want %q", got, want)
+	}
+	if len(hits) != 5 {
+		t.Fatalf("hits = %d, want 5", len(hits))
+	}
+	if hits[4].URL != "https://e.example" || hits[4].Metadata["original_rank"] != "5" {
+		t.Fatalf("last hit = %+v", hits[4])
+	}
+}
+
+func TestSearch_RecordsUnresponsiveEnginesFromEmptyPage(t *testing.T) {
+	c := newStub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"results":[],"unresponsive_engines":[["google","timeout"]]}`))
+	})
+
+	_, err := c.Search(context.Background(), search.Query{Q: "birds", MaxResults: 5})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	c.mu.Lock()
+	_, ok := c.knownEng["google"]
+	c.mu.Unlock()
+	if !ok {
+		t.Fatalf("unresponsive engine from empty page was not recorded")
+	}
+}
+
+func TestSearch_PreservesPublishedAtMetadata(t *testing.T) {
+	c := newStub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"results":[{"url":"https://a.example","title":"A","content":"one","publishedDate":"2025-01-02T03:04:05Z","date":"2025-01-02"},{"url":"https://b.example","title":"B","content":"two","date":"not a date"}]}`))
+	})
+
+	hits, err := c.Search(context.Background(), search.Query{Q: "birds"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) != 2 {
+		t.Fatalf("hits = %d", len(hits))
+	}
+	want := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+	if hits[0].PublishedAt == nil || !hits[0].PublishedAt.Equal(want) {
+		t.Fatalf("publishedAt = %+v, want %s", hits[0].PublishedAt, want)
+	}
+	if hits[0].Metadata["published_at"] != "2025-01-02T03:04:05Z" || hits[0].Metadata["date"] != "2025-01-02" {
+		t.Fatalf("published metadata = %#v", hits[0].Metadata)
+	}
+	if hits[1].PublishedAt != nil || hits[1].Metadata["published_at"] != "not a date" || hits[1].Metadata["date"] != "not a date" {
+		t.Fatalf("invalid date should be preserved as metadata only: %+v", hits[1])
+	}
 }
 
 func TestSearch_Success(t *testing.T) {

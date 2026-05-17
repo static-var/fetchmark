@@ -61,7 +61,11 @@ type Options struct {
 	Query         string
 	URLs          []string
 	Engines       []string
+	Categories    []string
+	Language      string
+	TimeRange     string
 	MaxResults    int
+	CandidateCap  int
 	RespectRobots bool
 	ProxyURL      string
 	UserAgent     string
@@ -101,16 +105,23 @@ type Pipeline struct {
 // Search runs the full search pipeline: hit SearXNG, parallel fetch,
 // extract, dedupe, rank.
 func (p *Pipeline) Search(ctx context.Context, o Options) ([]model.SearchResult, error) {
+	candidateCap := o.CandidateCap
+	if candidateCap <= 0 {
+		candidateCap = o.MaxResults
+	}
 	hits, err := p.Searcher.Search(ctx, search.Query{
 		Q:          o.Query,
 		Engines:    o.Engines,
-		MaxResults: o.MaxResults,
+		Categories: o.Categories,
+		Language:   o.Language,
+		TimeRange:  o.TimeRange,
+		MaxResults: candidateCap,
 	})
 	if err != nil {
 		return nil, err
 	}
-	if o.MaxResults > 0 && len(hits) > o.MaxResults {
-		hits = hits[:o.MaxResults]
+	if candidateCap > 0 && len(hits) > candidateCap {
+		hits = hits[:candidateCap]
 	}
 	results := p.process(ctx, o, hitsToResults(hits), o.Query)
 	filterResultsByFormats(results, o.Formats)
@@ -133,10 +144,12 @@ func hitsToResults(hits []search.Hit) []model.SearchResult {
 	out := make([]model.SearchResult, len(hits))
 	for i, h := range hits {
 		out[i] = model.SearchResult{
-			URL:     h.URL,
-			Title:   h.Title,
-			Snippet: h.Snippet,
-			Engines: h.Engines,
+			URL:         h.URL,
+			Title:       h.Title,
+			Snippet:     h.Snippet,
+			Engines:     h.Engines,
+			PublishedAt: h.PublishedAt,
+			Metadata:    h.Metadata,
 		}
 	}
 	return out

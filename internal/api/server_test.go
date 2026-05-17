@@ -91,6 +91,21 @@ func TestSearch_MissingQueryIs400(t *testing.T) {
 	}
 }
 
+func TestSearch_PropagatesSearchControls(t *testing.T) {
+	r, p := newTestRouter(nil)
+	body := strings.NewReader(`{"query":"birds","categories":["general","news"],"language":"en","time_range":"year"}`)
+	req := httptest.NewRequest("POST", "/v1/search", body)
+	req.Header.Set("X-API-Key", "k1")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(p.lastOpts.Categories) != 2 || p.lastOpts.Categories[0] != "general" || p.lastOpts.Categories[1] != "news" || p.lastOpts.Language != "en" || p.lastOpts.TimeRange != "year" {
+		t.Fatalf("search controls not propagated: %+v", p.lastOpts)
+	}
+}
+
 func TestSearch_Success(t *testing.T) {
 	r, p := newTestRouter(nil)
 	req := httptest.NewRequest("POST", "/v1/search", strings.NewReader(`{"query":"go"}`))
@@ -105,6 +120,29 @@ func TestSearch_Success(t *testing.T) {
 	}
 	if p.lastOpts.RespectRobots != true {
 		t.Fatal("default respect_robots should be true")
+	}
+	if p.lastOpts.MaxResults != 10 {
+		t.Fatalf("max results = %d, want 10", p.lastOpts.MaxResults)
+	}
+	if p.lastOpts.CandidateCap != 30 {
+		t.Fatalf("candidate cap = %d, want 30", p.lastOpts.CandidateCap)
+	}
+}
+
+func TestSearch_CandidateCapIsClampedToResultsCap(t *testing.T) {
+	r, p := newTestRouter(nil)
+	req := httptest.NewRequest("POST", "/v1/search", strings.NewReader(`{"query":"go","max_results":20}`))
+	req.Header.Set("X-API-Key", "k1")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if p.lastOpts.MaxResults != 20 {
+		t.Fatalf("max results = %d, want 20", p.lastOpts.MaxResults)
+	}
+	if p.lastOpts.CandidateCap != 50 {
+		t.Fatalf("candidate cap = %d, want 50", p.lastOpts.CandidateCap)
 	}
 }
 
