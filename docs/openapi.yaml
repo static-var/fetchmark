@@ -41,6 +41,7 @@ components:
         max_results:     { type: integer, minimum: 1, maximum: 50, default: 10 }
         formats:         { type: array, items: { type: string, enum: [json, markdown, html] } }
         timeout_ms:      { type: integer, minimum: 1, maximum: 60000 }
+        render:          { type: boolean, description: "Use the configured headless renderer when available." }
         respect_robots:
           type: boolean
           description: "Admin only when set to false."
@@ -56,6 +57,7 @@ components:
         query:           { type: string, description: "Optional — enables ranking." }
         formats:         { type: array, items: { type: string, enum: [json, markdown, html] } }
         timeout_ms:      { type: integer }
+        render:          { type: boolean, description: "Use the configured headless renderer when available." }
         respect_robots:  { type: boolean, description: "Admin only when false." }
         proxy_url:       { type: string,  description: "Admin only." }
 
@@ -66,12 +68,19 @@ components:
         title:          { type: string }
         snippet:        { type: string }
         engines:        { type: array, items: { type: string } }
+        published_at:   { type: string, format: date-time }
+        author:         { type: string }
+        markdown:       { type: string }
+        html:           { type: string }
         from_cache:     { type: boolean }
         fetch_ms:       { type: integer }
         status:         { type: integer, description: "(Reserved — not currently populated.) HTTP status returned by upstream." }
         score:          { type: number, format: float }
         content:        { $ref: "#/components/schemas/Content" }
-        unsupported_reason: { type: string, description: "Reason if parsing could not complete: non_html, js_required, robots_disallowed, egress_blocked, fetch_failed, extract_failed." }
+        unsupported_reason:
+          type: string
+          enum: [non_html, too_large, decompressed_too_large, http_status, js_required, robots_disallowed, egress_blocked, egress_reject, fetch_failed, extract_failed, render_failed]
+          description: "Reason if fetching, rendering, or extraction could not produce usable content."
 
     Content:
       type: object
@@ -86,12 +95,16 @@ components:
         main_text:     { type: string }
         markdown:      { type: string }
         cleaned_html:  { type: string }
-        unsupported_reason: { type: string }
+        unsupported_reason:
+          type: string
+          enum: [js_required]
+          description: "Extractor-level content warning. Fetch and render failures are reported on results[].unsupported_reason."
 
     ErrorResponse:
       type: object
       properties:
-        error:     { type: string }
+        error:           { type: string }
+        upstream_status: { type: integer }
 
 paths:
   /healthz:
@@ -99,7 +112,15 @@ paths:
       summary: Liveness probe.
       security: []
       responses:
-        "200": { description: ok }
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:  { type: string }
+                  version: { type: string }
 
   /readyz:
     get:
@@ -135,7 +156,7 @@ paths:
                   query:   { type: string }
                   count:   { type: integer }
                   results: { type: array, items: { $ref: "#/components/schemas/SearchResult" } }
-        "400": { description: bad_request, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "400": { description: bad_request_or_non_retryable_search_request, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
         "401": { description: missing_or_invalid_api_key }
         "403": { description: admin_only_flag_used_with_non_admin_key }
         "429": { description: rate_limited }
@@ -214,6 +235,14 @@ paths:
                   model:    { type: string }
                   url:      { type: string }
                   title:    { type: string }
+                  source:
+                    type: object
+                    properties:
+                      title:      { type: string }
+                      author:     { type: string }
+                      site_name:  { type: string }
+                      from_cache: { type: boolean }
+                      word_count: { type: integer }
                   usage:
                     type: object
                     properties:

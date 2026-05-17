@@ -7,7 +7,7 @@ pipeline, and a BM25 re-ranker into one small Go binary. Point it at a query,
 get back ranked results with clean Markdown, structured JSON, and cleaned
 HTML — ready for RAG, LLM context, or downstream processing.
 
-[![Go](https://img.shields.io/badge/go-1.22-00ADD8)](go.mod)
+[![Go](https://img.shields.io/badge/go-1.26-00ADD8)](go.mod)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Docker](https://img.shields.io/badge/docker-ready-2496ED)](deploy/docker-compose.yml)
 
@@ -64,9 +64,10 @@ curl -s -X POST localhost:8080/v1/parse \
   -d '{"urls":["https://example.com"],"query":"example"}' | jq
 ```
 
-A successful response contains `results[]` with `title`, `markdown`,
-`cleaned_html`, `main_text`, `author`, `published_at`, BM25 `score`, and a
-`from_cache` flag.
+A successful response contains `results[]` with `title`, top-level `markdown`
+/ `html` shortcuts, nested `content.cleaned_html` / `content.main_text`,
+metadata such as `author` and `published_at`, BM25 `score`, and a `from_cache`
+flag.
 
 ---
 
@@ -136,7 +137,7 @@ admin access, set `FM_ADMIN_API_KEYS` explicitly to one or more generated keys.
 | Ops dashboard (HTMX, read-only)         |   ✅   |
 | Headless rendering (opt-in)             |   ✅   |
 | Proxy URL passthrough (admin)           |   ✅   |
-| LLM summarisation endpoint              |  🧪 (stub) |
+| LLM summarisation endpoint              |   ✅   |
 | SSE streaming                           |  ⏳    |
 
 ---
@@ -243,6 +244,12 @@ for patterns (stub adapters, table-driven cases).
   `/dashboard/`. Shows recent requests, cache hit-rate, SearXNG instance
   health, and per-engine outcomes. Read-only; no mutating actions.
 - **Logs.** Structured JSON via `log/slog`, with a request ID on every line.
+- **Cache durability.** The bundled compose stack mounts Redis at `/data` and
+  enables AOF persistence so extracted artifact cache entries survive container
+  restarts. Remove the `redis-data` volume if you want a fully ephemeral cache.
+- **Container health.** Compose runs `/fetchmark healthcheck`, which probes the
+  local `/healthz` endpoint without requiring curl or a shell in the distroless
+  image.
 - **Graceful shutdown.** `SIGTERM` drains in-flight requests, flushes
   metrics, and closes Redis.
 
