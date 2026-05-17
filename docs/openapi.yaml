@@ -117,12 +117,15 @@ components:
         metadata:
           type: object
           additionalProperties: { type: string }
-          description: "Search-provider metadata. Current keys include category (the SearXNG category for the result), original_rank (the 1-based rank returned by the upstream provider before Fetchmark re-ranking), date (the raw SearXNG date string), and published_at (the raw provider publication date string, when useful)."
+          description: "Search-provider metadata. Current keys include category (the SearXNG category for the result), original_rank (the 1-based rank returned by the upstream provider before Fetchmark re-ranking), date (the raw SearXNG date string), published_at (the raw provider publication date string, when useful), and advanced-mode RRF fields rrf_score, rrf_variants, and rrf_original_rank."
           examples:
             - category: news
               original_rank: "3"
               date: "2025-01-02"
               published_at: "2025-01-02T03:04:05Z"
+              rrf_score: "0.032522"
+              rrf_variants: "original,exact"
+              rrf_original_rank: "3"
         chunks:
           type: array
           items: { $ref: "#/components/schemas/ContentChunk" }
