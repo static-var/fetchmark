@@ -118,6 +118,14 @@ func searchHandler(d Deps) http.HandlerFunc {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return
 		}
+		candidateCap := max * 3
+		if candidateCap < max {
+			candidateCap = max
+		}
+		if candidateCap > d.Config.ResultsCap {
+			candidateCap = d.Config.ResultsCap
+		}
+		opts.CandidateCap = candidateCap
 
 		out, err := d.Pipeline.Search(r.Context(), opts)
 		if err != nil {

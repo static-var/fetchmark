@@ -65,6 +65,7 @@ type Options struct {
 	Language      string
 	TimeRange     string
 	MaxResults    int
+	CandidateCap  int
 	RespectRobots bool
 	ProxyURL      string
 	UserAgent     string
@@ -104,19 +105,23 @@ type Pipeline struct {
 // Search runs the full search pipeline: hit SearXNG, parallel fetch,
 // extract, dedupe, rank.
 func (p *Pipeline) Search(ctx context.Context, o Options) ([]model.SearchResult, error) {
+	candidateCap := o.CandidateCap
+	if candidateCap <= 0 {
+		candidateCap = o.MaxResults
+	}
 	hits, err := p.Searcher.Search(ctx, search.Query{
 		Q:          o.Query,
 		Engines:    o.Engines,
 		Categories: o.Categories,
 		Language:   o.Language,
 		TimeRange:  o.TimeRange,
-		MaxResults: o.MaxResults,
+		MaxResults: candidateCap,
 	})
 	if err != nil {
 		return nil, err
 	}
-	if o.MaxResults > 0 && len(hits) > o.MaxResults {
-		hits = hits[:o.MaxResults]
+	if candidateCap > 0 && len(hits) > candidateCap {
+		hits = hits[:candidateCap]
 	}
 	results := p.process(ctx, o, hitsToResults(hits), o.Query)
 	filterResultsByFormats(results, o.Formats)
