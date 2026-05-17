@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"io"
 	"log/slog"
@@ -44,7 +45,7 @@ func newTestRouter(ready func() error) (http.Handler, *fakePipeline) {
 		RespectRobots: true,
 	}
 	p := &fakePipeline{results: []model.SearchResult{{URL: "https://x/y", Title: "t"}}}
-	return NewRouter(Deps{Log: log, Config: cfg, Pipeline: p, ReadyCheck: ready}), p
+	return NewRouter(Deps{Log: log, Config: cfg, Pipeline: p, ReadyCheck: ready, Version: "test-version"}), p
 }
 
 func TestHealthz(t *testing.T) {
@@ -54,6 +55,9 @@ func TestHealthz(t *testing.T) {
 	r.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "test-version") {
+		t.Fatalf("health response missing version: %s", rec.Body.String())
 	}
 }
 
@@ -77,6 +81,27 @@ func TestV1RequiresAPIKey(t *testing.T) {
 	r.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d", rec.Code)
+	}
+}
+
+func TestDashboardUsesConfiguredVersion(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := config.Config{
+		DashboardUser:     "ops",
+		DashboardPassword: "secret",
+	}
+	r := NewRouter(Deps{Log: log, Config: cfg, Version: "v9.8.7-test"})
+
+	req := httptest.NewRequest("GET", "/dashboard", nil)
+	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("ops:secret")))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "version v9.8.7-test") {
+		t.Fatalf("dashboard did not render configured version: %s", rec.Body.String())
 	}
 }
 

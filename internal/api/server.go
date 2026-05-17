@@ -26,6 +26,7 @@ type Deps struct {
 	Log      *slog.Logger
 	Config   config.Config
 	Pipeline PipelineRunner
+	Version  string
 	// Redis is optional; when set it backs cross-instance rate limiting.
 	Redis *redis.Client
 	// ReadyCheck reports whether hard dependencies (Redis, SearXNG) are
@@ -56,7 +57,7 @@ func NewRouter(d Deps) http.Handler {
 	r.Use(middleware.Metrics)
 	r.Use(chimw.Recoverer)
 
-	r.Get("/healthz", healthz)
+	r.Get("/healthz", healthz(displayVersion(d.Version)))
 	r.Get("/readyz", readyz(d.ReadyCheck))
 	r.Handle("/metrics", promhttp.Handler())
 
@@ -86,7 +87,7 @@ func NewRouter(d Deps) http.Handler {
 		Gatherer:    prometheus.DefaultGatherer,
 		SearxngURL:  d.Config.SearxngURL,
 		RedisURL:    redactRedis(d.Config.RedisURL),
-		Version:     "0.1",
+		Version:     displayVersion(d.Version),
 		Summarizers: summarizerDashboardView(d.Summarizers),
 	})
 
@@ -135,8 +136,13 @@ func redactRedis(raw string) string {
 	return raw
 }
 
-func healthz(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+func healthz(version string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":  "ok",
+			"version": version,
+		})
+	}
 }
 
 func readyz(check func() error) http.HandlerFunc {
@@ -169,4 +175,12 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func displayVersion(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "dev"
+	}
+	return v
 }
