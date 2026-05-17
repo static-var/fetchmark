@@ -1,4 +1,4 @@
-.PHONY: build test tidy run lint fmt vet cover docker compose-up compose-down
+.PHONY: build test tidy run lint fmt fmt-check tidy-check vet cover docker compose-up compose-down
 
 BINARY := bin/fetchmark
 PKG    := ./...
@@ -18,6 +18,13 @@ tidy:
 
 fmt:
 	gofmt -s -w .
+
+fmt-check:
+	@test -z "$$(gofmt -l .)"
+
+tidy-check:
+	@go mod tidy
+	@git diff --exit-code go.mod go.sum
 
 vet:
 	go vet $(PKG)

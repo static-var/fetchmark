@@ -135,23 +135,15 @@ func TestPipeline_RendererAutoOff_KeepsJSRequired(t *testing.T) {
 	}
 }
 
-// TestPipeline_RendererAuto_RenderedKeyLock proves the second Redis
-// lock on the rendered key coalesces concurrent auto-render upgrades
-// across pipelines (replicas). We exercise tryAutoRender directly with
-// a shared Redis-backed cache; without the lock the renderer would be
-// called twice for the same URL.
+// TestPipeline_RendererAuto_RenderedKeyLock proves the rendered-key lock
+// coalesces concurrent auto-render upgrades across pipelines (replicas).
+// The instrumented cache exposes the moment the second caller is waiting
+// on that lock, so the assertion is made under true contention without a
+// scheduler-dependent sleep.
 func TestPipeline_RendererAuto_RenderedKeyLock(t *testing.T) {
-	mr, err := miniredis.Run()
-	if err != nil {
-		t.Fatalf("miniredis: %v", err)
-	}
-	t.Cleanup(mr.Close)
-	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = rdb.Close() })
-
-	shared := cache.New(rdb, time.Minute)
 	url := "https://spa.example/shared"
-	rend := &slowRenderer{body: []byte("RENDERED body"), block: make(chan struct{})}
+	shared := newInstrumentedLockCache()
+	rend := &slowRenderer{body: []byte("RENDERED body"), block: make(chan struct{}), entered: make(chan struct{})}
 
 	newPipe := func() *Pipeline {
 		return &Pipeline{
@@ -173,14 +165,20 @@ func TestPipeline_RendererAuto_RenderedKeyLock(t *testing.T) {
 		defer wg.Done()
 		_, _ = p1.tryAutoRender(context.Background(), Options{Timeout: time.Second}, r1, false)
 	}()
-	time.Sleep(25 * time.Millisecond)
+	waitForReceive(t, rend.entered, time.Second, "first renderer invocation")
+
 	go func() {
 		defer wg.Done()
 		_, _ = p2.tryAutoRender(context.Background(), Options{Timeout: time.Second}, r2, false)
 	}()
-	time.Sleep(50 * time.Millisecond)
+	waitForReceive(t, shared.waiterBlocked, time.Second, "second caller to block on rendered-key lock")
+
+	if got := rend.hits.Load(); got != 1 {
+		t.Fatalf("second caller rendered while waiting on rendered-key lock; hits=%d", got)
+	}
+
 	close(rend.block)
-	wg.Wait()
+	waitForWaitGroup(t, &wg, time.Second, "rendered-key lock callers")
 
 	if got := rend.hits.Load(); got != 1 {
 		t.Fatalf("rendered-key lock failed to coalesce; renderer hits=%d, want 1", got)
@@ -190,14 +188,187 @@ func TestPipeline_RendererAuto_RenderedKeyLock(t *testing.T) {
 	}
 }
 
+func TestPipeline_RendererAuto_RedisBackedRenderedKeyLock(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	t.Cleanup(mr.Close)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+
+	c1 := cache.New(rdb, time.Minute)
+	t.Cleanup(c1.Close)
+	c2 := cache.New(rdb, time.Minute)
+	t.Cleanup(c2.Close)
+	url := "https://spa.example/redis-shared"
+	renderedKey := cache.RenderedArtifactKey(url)
+	renderLockKey := "fm:lock:" + renderedKey
+	rend := &slowRenderer{body: []byte("RENDERED body"), block: make(chan struct{}), entered: make(chan struct{})}
+	newPipe := func(c *cache.Cache) *Pipeline {
+		return &Pipeline{
+			Extractor:       jsAwareExtractor{},
+			Cache:           c,
+			Renderer:        rend,
+			RendererAuto:    true,
+			RendererTimeout: 5 * time.Second,
+		}
+	}
+	p1, p2 := newPipe(c1), newPipe(c2)
+	r1 := &model.SearchResult{URL: url, Unsupported: extractor.ReasonJSRequired}
+	r2 := &model.SearchResult{URL: url, Unsupported: extractor.ReasonJSRequired}
+
+	type result struct{ err error }
+	results := make(chan result, 2)
+	go func() {
+		_, err := p1.tryAutoRender(context.Background(), Options{Timeout: time.Second}, r1, false)
+		results <- result{err: err}
+	}()
+	waitForReceive(t, rend.entered, time.Second, "first renderer invocation")
+	requireEventually(t, time.Second, func() bool {
+		n, err := rdb.Exists(context.Background(), renderLockKey).Result()
+		return err == nil && n == 1
+	})
+
+	go func() {
+		_, err := p2.tryAutoRender(context.Background(), Options{Timeout: time.Second}, r2, false)
+		results <- result{err: err}
+	}()
+	assertNoReceive(t, results, 50*time.Millisecond, "rendered-key caller returned before render release")
+
+	close(rend.block)
+	for i := 0; i < 2; i++ {
+		res := waitForReceive(t, results, time.Second, "redis rendered-key caller result")
+		if res.err != nil {
+			t.Fatalf("tryAutoRender: %v", res.err)
+		}
+	}
+	if got := rend.hits.Load(); got != 1 {
+		t.Fatalf("redis rendered-key lock failed to coalesce; renderer hits=%d, want 1", got)
+	}
+	if r1.Title != "Rendered" || r2.Title != "Rendered" {
+		t.Fatalf("both callers must observe rendered content; r1.Title=%q r2.Title=%q", r1.Title, r2.Title)
+	}
+}
+
+func requireEventually(t *testing.T, timeout time.Duration, ok func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if ok() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if ok() {
+		return
+	}
+	t.Fatalf("condition not met within %s", timeout)
+}
+
+func waitForReceive[T any](t *testing.T, ch <-chan T, timeout time.Duration, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(timeout):
+		t.Fatalf("timed out waiting for %s", what)
+		var zero T
+		return zero
+	}
+}
+
+func assertNoReceive[T any](t *testing.T, ch <-chan T, timeout time.Duration, msg string) {
+	t.Helper()
+	select {
+	case <-ch:
+		t.Fatal(msg)
+	case <-time.After(timeout):
+	}
+}
+
+func waitForWaitGroup(t *testing.T, wg *sync.WaitGroup, timeout time.Duration, what string) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	waitForReceive(t, done, timeout, what)
+}
+
+type instrumentedLockCache struct {
+	mu            sync.Mutex
+	cond          *sync.Cond
+	mem           map[string][]byte
+	locked        map[string]bool
+	waiterBlocked chan struct{}
+	waiterOnce    sync.Once
+}
+
+func newInstrumentedLockCache() *instrumentedLockCache {
+	c := &instrumentedLockCache{
+		mem:           make(map[string][]byte),
+		locked:        make(map[string]bool),
+		waiterBlocked: make(chan struct{}),
+	}
+	c.cond = sync.NewCond(&c.mu)
+	return c
+}
+
+func (c *instrumentedLockCache) Get(_ context.Context, key string) ([]byte, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if v := c.mem[key]; v != nil {
+		return append([]byte(nil), v...), nil
+	}
+	return nil, nil
+}
+
+func (c *instrumentedLockCache) Set(_ context.Context, key string, val []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.mem[key] = append([]byte(nil), val...)
+	return nil
+}
+
+func (c *instrumentedLockCache) Do(_ string, fn func() (any, error)) (any, error, bool) {
+	v, err := fn()
+	return v, err, false
+}
+
+func (c *instrumentedLockCache) WithLock(ctx context.Context, key string, _ cache.LockOptions, fn func(context.Context) ([]byte, error)) ([]byte, error) {
+	c.mu.Lock()
+	for c.locked[key] {
+		c.waiterOnce.Do(func() { close(c.waiterBlocked) })
+		c.cond.Wait()
+	}
+	c.locked[key] = true
+	c.mu.Unlock()
+
+	defer func() {
+		c.mu.Lock()
+		delete(c.locked, key)
+		c.cond.Broadcast()
+		c.mu.Unlock()
+	}()
+
+	return fn(ctx)
+}
+
 type slowRenderer struct {
-	body  []byte
-	block chan struct{}
-	hits  atomic.Int64
+	body        []byte
+	block       chan struct{}
+	entered     chan struct{}
+	enteredOnce sync.Once
+	hits        atomic.Int64
 }
 
 func (s *slowRenderer) Render(ctx context.Context, _ string) ([]byte, error) {
 	s.hits.Add(1)
+	if s.entered != nil {
+		s.enteredOnce.Do(func() { close(s.entered) })
+	}
 	select {
 	case <-s.block:
 	case <-ctx.Done():
@@ -243,43 +414,43 @@ func TestPipeline_RenderExplicit_SearchFlow(t *testing.T) {
 }
 
 func TestPipeline_RenderExplicit_EgressRejected(t *testing.T) {
-rend := &stubRenderer{body: []byte("RENDERED oops")}
-blocked := errors.New("blocked")
-p := &Pipeline{
-Fetcher:        stubFetcher{resp: map[string]fetcher.Result{}},
-Extractor:      jsAwareExtractor{},
-Cache:          cache.New(nil, 0),
-Renderer:       rend,
-EgressValidate: func(_ context.Context, _ string) error { return blocked },
-}
-out := p.Parse(context.Background(), Options{URLs: []string{"http://127.0.0.1/"}, Render: true})
-if len(out) != 1 || out[0].Unsupported != "egress_reject" {
-t.Fatalf("expected egress_reject; got %+v", out)
-}
-if rend.hits != 0 {
-t.Fatalf("renderer must not be invoked when egress rejects; hits=%d", rend.hits)
-}
+	rend := &stubRenderer{body: []byte("RENDERED oops")}
+	blocked := errors.New("blocked")
+	p := &Pipeline{
+		Fetcher:        stubFetcher{resp: map[string]fetcher.Result{}},
+		Extractor:      jsAwareExtractor{},
+		Cache:          cache.New(nil, 0),
+		Renderer:       rend,
+		EgressValidate: func(_ context.Context, _ string) error { return blocked },
+	}
+	out := p.Parse(context.Background(), Options{URLs: []string{"http://127.0.0.1/"}, Render: true})
+	if len(out) != 1 || out[0].Unsupported != "egress_reject" {
+		t.Fatalf("expected egress_reject; got %+v", out)
+	}
+	if rend.hits != 0 {
+		t.Fatalf("renderer must not be invoked when egress rejects; hits=%d", rend.hits)
+	}
 }
 
 func TestPipeline_Render_JSRequiredResult_NotCached(t *testing.T) {
-// Renderer returns a body that the extractor ALSO marks as
-// js_required. The rendered artifact must not be cached, or
-// subsequent explicit renders would be served a useless placeholder.
-rend := &stubRenderer{body: []byte("JS-SHIM still")}
-p := &Pipeline{
-Fetcher:   stubFetcher{resp: map[string]fetcher.Result{}},
-Extractor: jsAwareExtractor{},
-Cache:     cache.New(nil, 0),
-Renderer:  rend,
-}
-_ = p.Parse(context.Background(), Options{URLs: []string{"https://spa.example/js"}, Render: true})
-if rend.hits != 1 {
-t.Fatalf("first render should hit once; got %d", rend.hits)
-}
-_ = p.Parse(context.Background(), Options{URLs: []string{"https://spa.example/js"}, Render: true})
-if rend.hits != 2 {
-t.Fatalf("js_required rendered blob must not be cached; expected hits=2 got %d", rend.hits)
-}
+	// Renderer returns a body that the extractor ALSO marks as
+	// js_required. The rendered artifact must not be cached, or
+	// subsequent explicit renders would be served a useless placeholder.
+	rend := &stubRenderer{body: []byte("JS-SHIM still")}
+	p := &Pipeline{
+		Fetcher:   stubFetcher{resp: map[string]fetcher.Result{}},
+		Extractor: jsAwareExtractor{},
+		Cache:     cache.New(nil, 0),
+		Renderer:  rend,
+	}
+	_ = p.Parse(context.Background(), Options{URLs: []string{"https://spa.example/js"}, Render: true})
+	if rend.hits != 1 {
+		t.Fatalf("first render should hit once; got %d", rend.hits)
+	}
+	_ = p.Parse(context.Background(), Options{URLs: []string{"https://spa.example/js"}, Render: true})
+	if rend.hits != 2 {
+		t.Fatalf("js_required rendered blob must not be cached; expected hits=2 got %d", rend.hits)
+	}
 }
 
 // TestPipeline_RendererAuto_CacheHitOverwritesPlaceholder proves the
@@ -289,41 +460,41 @@ t.Fatalf("js_required rendered blob must not be cached; expected hits=2 got %d",
 // called on an r that already carried js_required placeholder fields,
 // so cache hits silently kept the placeholder.
 func TestPipeline_RendererAuto_CacheHitOverwritesPlaceholder(t *testing.T) {
-mr, err := miniredis.Run()
-if err != nil {
-t.Fatalf("miniredis: %v", err)
-}
-t.Cleanup(mr.Close)
-rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-t.Cleanup(func() { _ = rdb.Close() })
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	t.Cleanup(mr.Close)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
 
-c := cache.New(rdb, time.Minute)
-url := "https://spa.example/prewarmed"
+	c := cache.New(rdb, time.Minute)
+	url := "https://spa.example/prewarmed"
 
-// Pre-warm the rendered cache as if a prior request already
-// populated it. No renderer is wired so the only way r can come
-// back with the rendered Title is via the cache-hit branch.
-blob, _ := json.Marshal(model.Content{Title: "Rendered", Markdown: "rendered md"})
-if err := c.Set(context.Background(), cache.RenderedArtifactKey(url), blob); err != nil {
-t.Fatalf("cache set: %v", err)
-}
+	// Pre-warm the rendered cache as if a prior request already
+	// populated it. No renderer is wired so the only way r can come
+	// back with the rendered Title is via the cache-hit branch.
+	blob, _ := json.Marshal(model.Content{Title: "Rendered", Markdown: "rendered md"})
+	if err := c.Set(context.Background(), cache.RenderedArtifactKey(url), blob); err != nil {
+		t.Fatalf("cache set: %v", err)
+	}
 
-p := &Pipeline{Extractor: jsAwareExtractor{}, Cache: c, RendererAuto: true}
-r := &model.SearchResult{
-URL:         url,
-Title:       "Loading…",
-Unsupported: extractor.ReasonJSRequired,
-}
-if _, err := p.tryAutoRender(context.Background(), Options{Timeout: time.Second}, r, false); err != nil {
-t.Fatalf("tryAutoRender: %v", err)
-}
-if r.Title != "Rendered" {
-t.Fatalf("cache-hit branch must overwrite placeholder Title; got %q", r.Title)
-}
-if r.Unsupported != "" {
-t.Fatalf("cache-hit branch must clear js_required placeholder; got %q", r.Unsupported)
-}
-if !r.FromCache {
-t.Fatal("FromCache should be set on rendered-cache hit")
-}
+	p := &Pipeline{Extractor: jsAwareExtractor{}, Cache: c, RendererAuto: true}
+	r := &model.SearchResult{
+		URL:         url,
+		Title:       "Loading…",
+		Unsupported: extractor.ReasonJSRequired,
+	}
+	if _, err := p.tryAutoRender(context.Background(), Options{Timeout: time.Second}, r, false); err != nil {
+		t.Fatalf("tryAutoRender: %v", err)
+	}
+	if r.Title != "Rendered" {
+		t.Fatalf("cache-hit branch must overwrite placeholder Title; got %q", r.Title)
+	}
+	if r.Unsupported != "" {
+		t.Fatalf("cache-hit branch must clear js_required placeholder; got %q", r.Unsupported)
+	}
+	if !r.FromCache {
+		t.Fatal("FromCache should be set on rendered-cache hit")
+	}
 }

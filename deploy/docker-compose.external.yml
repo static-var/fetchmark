@@ -11,8 +11,8 @@ services:
       FM_LISTEN_ADDR: ":8080"
       FM_SEARXNG_URL: "${FM_SEARXNG_URL:?set FM_SEARXNG_URL in .env}"
       FM_REDIS_URL: "redis://redis:6379/0"
-      FM_API_KEYS: "${FM_API_KEYS:-dev-key}"
-      FM_ADMIN_API_KEYS: "${FM_ADMIN_API_KEYS:-dev-admin}"
+      FM_API_KEYS: "${FM_API_KEYS:?set FM_API_KEYS}"
+      FM_ADMIN_API_KEYS: "${FM_ADMIN_API_KEYS:-}"
     depends_on:
       redis:
         condition: service_healthy

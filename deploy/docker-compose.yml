@@ -11,8 +11,8 @@ services:
       FM_LISTEN_ADDR: ":8080"
       FM_SEARXNG_URL: "http://searxng:8080"
       FM_REDIS_URL: "redis://redis:6379/0"
-      FM_API_KEYS: "${FM_API_KEYS:-dev-key}"
-      FM_ADMIN_API_KEYS: "${FM_ADMIN_API_KEYS:-dev-admin}"
+      FM_API_KEYS: "${FM_API_KEYS:?set FM_API_KEYS}"
+      FM_ADMIN_API_KEYS: "${FM_ADMIN_API_KEYS:-}"
       FM_DASHBOARD_USER: "${FM_DASHBOARD_USER:-}"
       FM_DASHBOARD_PASSWORD: "${FM_DASHBOARD_PASSWORD:-}"
       FM_RESPECT_ROBOTS: "true"
@@ -85,13 +85,19 @@ services:
   # The image is pinned but intentionally documented as movable — bump
   # when upstream ships a security release.
   chromium:
-    image: ghcr.io/browserless/chromium:latest
+    image: ghcr.io/browserless/chromium:v2.24.3
     profiles: ["render"]
     restart: unless-stopped
     environment:
       CONCURRENT: "4"
       TIMEOUT: "30000"
+      # Keep interpolation optional so non-renderer `docker compose config` works;
+      # the renderer profile requires this token at container startup.
       TOKEN: "${FM_RENDERER_TOKEN:-}"
+    command:
+      - /bin/sh
+      - -lc
+      - ': "$${TOKEN:?set FM_RENDERER_TOKEN when renderer is enabled}" && exec /usr/src/app/start.sh'
     expose:
       - "3000"
 

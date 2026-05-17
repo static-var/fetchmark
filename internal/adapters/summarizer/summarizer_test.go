@@ -32,9 +32,9 @@ type openAIMessage struct {
 }
 
 type openAIUsage struct {
-	PromptTokens            int64                 `json:"prompt_tokens"`
-	CompletionTokens        int64                 `json:"completion_tokens"`
-	TotalTokens             int64                 `json:"total_tokens"`
+	PromptTokens            int64                  `json:"prompt_tokens"`
+	CompletionTokens        int64                  `json:"completion_tokens"`
+	TotalTokens             int64                  `json:"total_tokens"`
 	CompletionTokensDetails openAICompletionTokens `json:"completion_tokens_details"`
 }
 
@@ -63,9 +63,9 @@ func TestOpenAIProvider_Summarize_OK(t *testing.T) {
 				FinishReason: "stop",
 			}},
 			Usage: openAIUsage{
-				PromptTokens:     10,
-				CompletionTokens: 20,
-				TotalTokens:      30,
+				PromptTokens:            10,
+				CompletionTokens:        20,
+				TotalTokens:             30,
 				CompletionTokensDetails: openAICompletionTokens{ReasoningTokens: 5},
 			},
 		})
@@ -153,11 +153,11 @@ func TestOpenAIProvider_Summarize_Classified(t *testing.T) {
 
 // Anthropic mock — minimum messages response.
 type anthroResp struct {
-	ID      string         `json:"id"`
-	Type    string         `json:"type"`
-	Role    string         `json:"role"`
-	Model   string         `json:"model"`
-	Content []anthroBlock  `json:"content"`
+	ID      string          `json:"id"`
+	Type    string          `json:"type"`
+	Role    string          `json:"role"`
+	Model   string          `json:"model"`
+	Content []anthroBlock   `json:"content"`
 	Usage   anthroRespUsage `json:"usage"`
 }
 
@@ -167,8 +167,8 @@ type anthroBlock struct {
 }
 
 type anthroRespUsage struct {
-	InputTokens  int64 `json:"input_tokens"`
-	OutputTokens int64 `json:"output_tokens"`
+	InputTokens              int64 `json:"input_tokens"`
+	OutputTokens             int64 `json:"output_tokens"`
 	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
 	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
 }

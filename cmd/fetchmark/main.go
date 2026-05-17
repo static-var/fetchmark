@@ -55,6 +55,11 @@ func run() error {
 	// egress.DefaultExternal, which refuses private IPs, CGNAT, and
 	// cross-scheme downgrades on redirect (see egress package doc).
 	external := egress.DefaultExternal()
+	external.HostAllowlist = cfg.HostAllowlist
+	external.HostDenylist = cfg.HostDenylist
+	external.MaxRedirects = cfg.MaxRedirects
+	external.DialTimeout = cfg.HeaderTimeout
+	external.ResponseHeaderTimeout = cfg.HeaderTimeout
 	rchk := robots.New(external.HTTPClient(5*time.Second), time.Hour, 0)
 	fx, err := fetcher.New(fetcher.Options{
 		Policy: external,
@@ -85,10 +90,21 @@ func run() error {
 		rdb = redis.NewClient(opt)
 		if cerr := rdb.Ping(context.Background()).Err(); cerr != nil {
 			log.Warn("redis unreachable; falling back to in-memory cache", "err", cerr)
+			if err := rdb.Close(); err != nil {
+				log.Warn("redis close failed", "err", err)
+			}
 			rdb = nil
 		}
 	}
 	c := cache.New(rdb, cfg.CacheTTL)
+	defer c.Close()
+	if rdb != nil {
+		defer func() {
+			if err := rdb.Close(); err != nil {
+				log.Warn("redis close failed", "err", err)
+			}
+		}()
+	}
 
 	pipe := &pipeline.Pipeline{
 		Searcher:  sx,
@@ -122,10 +138,10 @@ func run() error {
 	}
 
 	handler := api.NewRouter(api.Deps{
-		Log:      log,
-		Config:   cfg,
-		Pipeline: pipe,
-		Redis:    rdb,
+		Log:         log,
+		Config:      cfg,
+		Pipeline:    pipe,
+		Redis:       rdb,
 		Summarizers: buildSummarizerRegistry(cfg, log),
 		ReadyCheck: func() error {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -146,6 +162,8 @@ func run() error {
 		Addr:              cfg.ListenAddr,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      90 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 
@@ -192,13 +210,13 @@ func buildSummarizerRegistry(cfg config.Config, log *slog.Logger) *summarizer.Re
 
 	if cfg.SummarizeOpenAIModel != "" {
 		oa := summarizer.ProviderConfig{
-			Name:        "openai",
-			Kind:        summarizer.KindOpenAI,
-			BaseURL:     cfg.SummarizeOpenAIBaseURL,
-			APIKey:      cfg.SummarizeOpenAIAPIKey,
-			Model:       cfg.SummarizeOpenAIModel,
-			Timeout:     cfg.SummarizeOpenAITimeout,
-			MaxTokens:   cfg.SummarizeOpenAIMaxTokens,
+			Name:      "openai",
+			Kind:      summarizer.KindOpenAI,
+			BaseURL:   cfg.SummarizeOpenAIBaseURL,
+			APIKey:    cfg.SummarizeOpenAIAPIKey,
+			Model:     cfg.SummarizeOpenAIModel,
+			Timeout:   cfg.SummarizeOpenAITimeout,
+			MaxTokens: cfg.SummarizeOpenAIMaxTokens,
 			Thinking: summarizer.Thinking{
 				Enabled: cfg.SummarizeOpenAIThinking,
 				Effort:  cfg.SummarizeOpenAIThinkEffort,

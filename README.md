@@ -33,10 +33,19 @@ HTML — ready for RAG, LLM context, or downstream processing.
 ```bash
 git clone https://github.com/staticvar/fetchmark && cd fetchmark
 cp .env.example .env
+printf 'FM_API_KEYS=%s\n' "$(openssl rand -hex 32)" > .env
+printf 'FM_ADMIN_API_KEYS=\n' >> .env
 docker compose -f deploy/docker-compose.yml up -d --build
 ```
 
 Fetchmark listens on `:8080`. Redis and a bundled SearXNG come up alongside.
+Use the generated key from `.env` for requests:
+
+```bash
+export FM_API_KEY=$(grep '^FM_API_KEYS=' .env | cut -d= -f2)
+```
+
+Generate replacement API keys with `openssl rand -hex 32`.
 
 ```bash
 # Health
@@ -44,13 +53,13 @@ curl -s localhost:8080/healthz
 
 # Search — meta-search + fetch + extract + rank
 curl -s -X POST localhost:8080/v1/search \
-  -H "Authorization: Bearer dev-key" \
+  -H "Authorization: Bearer $FM_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"query":"BM25 ranking algorithm","max_results":5}' | jq
 
 # Parse arbitrary URLs — skip search, get clean content
 curl -s -X POST localhost:8080/v1/parse \
-  -H "Authorization: Bearer dev-key" \
+  -H "Authorization: Bearer $FM_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"urls":["https://example.com"],"query":"example"}' | jq
 ```
@@ -99,8 +108,11 @@ Both `/v1/search` and `/v1/parse` accept:
 Authorization: Bearer <key>
 ```
 
-or the equivalent `X-API-Key: <key>` header. Admin-only fields (`proxy_url`,
-dashboard access) require a key listed in `FM_ADMIN_API_KEYS`.
+or the equivalent `X-API-Key: <key>` header. Generate API keys with
+`openssl rand -hex 32` and set them in `FM_API_KEYS` before starting the
+compose stack. Admin keys are optional; leave `FM_ADMIN_API_KEYS=` empty unless
+you need admin-only fields (`proxy_url`, dashboard access). If you do enable
+admin access, set `FM_ADMIN_API_KEYS` explicitly to one or more generated keys.
 
 ---
 
@@ -135,8 +147,8 @@ All config is environment-driven. Copy `.env.example` and edit.
 
 | Variable                     | Default                  | Purpose                               |
 | ---------------------------- | ------------------------ | ------------------------------------- |
-| `FM_API_KEYS`                | `dev-key`                | Comma-separated allowed API keys      |
-| `FM_ADMIN_API_KEYS`          | `dev-admin`              | Keys that can use admin-only fields   |
+| `FM_API_KEYS`                | required                 | Comma-separated allowed API keys      |
+| `FM_ADMIN_API_KEYS`          | empty                    | Optional admin-only keys; set explicitly when used |
 | `FM_SEARXNG_URL`             | `http://searxng:8080`    | Single SearXNG instance               |
 | `FM_SEARXNG_URLS`            | _(unset)_                | Comma-separated list for failover     |
 | `FM_SEARXNG_COOLDOWN`        | `30s`                    | Skip window after an instance fails   |
@@ -165,6 +177,7 @@ browser. Enable the `render` profile:
 
 ```bash
 FM_RENDERER_URL=http://chromium:3000/content \
+FM_RENDERER_TOKEN=$(openssl rand -hex 32) \
 docker compose -f deploy/docker-compose.yml --profile render up -d --build
 ```
 
@@ -286,10 +299,13 @@ FM_SUMMARIZE_DEFAULT_PROVIDER=openai          # "openai" or "anthropic"
 ```
 
 Per-request overrides (`provider`, `model`, `max_tokens`, `temperature`,
-`thinking`, `timeout_ms`) are supported on the POST body. Admins can also
-upsert providers at runtime via `/admin/summarize/providers` (see the
-OpenAPI spec); those overrides live in-process and revert to env on
-restart.
+`instructions`, `thinking`, `timeout_ms`) are supported on the POST body.
+For non-admin API keys, `provider`, `model`, and `thinking` overrides are
+disabled unless explicitly allowed by config. `max_tokens`, `timeout_ms`,
+`instructions`, and `thinking.budget_tokens` caps apply to all callers,
+including admins. Admins can also upsert providers at runtime via
+`/admin/summarize/providers` (see the OpenAPI spec); those overrides live
+in-process and revert to env on restart.
 
 **Docker compose + SubSandwich:** when running Fetchmark in the compose
 stack and SubSandwich on the host, point the base URL at

@@ -108,6 +108,10 @@ func adminSummarizeProviderPut(d Deps) http.HandlerFunc {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_config", "detail": err.Error()})
 			return
 		}
+		if err := validateSummarizeEffectiveCaps(merged.MaxTokens, merged.Timeout, merged.Thinking, d.Config); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_config", "detail": err.Error()})
+			return
+		}
 		if err := d.Summarizers.Set(merged); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_config", "detail": err.Error()})
 			return

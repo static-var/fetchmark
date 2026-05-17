@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/staticvar/fetchmark/internal/adapters/summarizer"
+	"github.com/staticvar/fetchmark/internal/api/middleware"
+	"github.com/staticvar/fetchmark/internal/config"
 	"github.com/staticvar/fetchmark/internal/core/model"
 	"github.com/staticvar/fetchmark/internal/obs"
 )
@@ -45,11 +47,11 @@ type summarizeResponse struct {
 }
 
 type summarizeSourceMeta struct {
-	Title      string `json:"title,omitempty"`
-	Author     string `json:"author,omitempty"`
-	SiteName   string `json:"site_name,omitempty"`
-	FromCache  bool   `json:"from_cache,omitempty"`
-	WordCount  int    `json:"word_count,omitempty"`
+	Title     string `json:"title,omitempty"`
+	Author    string `json:"author,omitempty"`
+	SiteName  string `json:"site_name,omitempty"`
+	FromCache bool   `json:"from_cache,omitempty"`
+	WordCount int    `json:"word_count,omitempty"`
 }
 
 const defaultSummarizeSystem = `You are a concise summarization assistant.
@@ -66,6 +68,10 @@ func summarizeHandler(d Deps) http.HandlerFunc {
 		}
 		if strings.TrimSpace(req.URL) == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url required"})
+			return
+		}
+		if err := validateSummarizeOverrides(req, d.Config, middleware.PrincipalFrom(r.Context()).Admin); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
 		if d.Summarizers == nil || d.Summarizers.Empty() {
@@ -136,6 +142,10 @@ func summarizeHandler(d Deps) http.HandlerFunc {
 		if timeout <= 0 {
 			timeout = summarizer.DefaultTimeout()
 		}
+		if err := validateSummarizeEffectiveCaps(providerReq.MaxTokens, timeout, providerReq.Thinking, d.Config); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
 
@@ -181,6 +191,53 @@ func summarizeHandler(d Deps) http.HandlerFunc {
 
 const summarizeMaxBodyChars = 60_000 // ~12-15k tokens for most tokenizers
 
+func validateSummarizeOverrides(req summarizeRequest, cfg config.Config, admin bool) error {
+	if strings.TrimSpace(req.Model) != "" && !admin && !cfg.SummarizeAllowModelOverride {
+		return errors.New("model override not allowed")
+	}
+	if strings.TrimSpace(req.Provider) != "" && !admin && !cfg.SummarizeAllowProviderOverride {
+		return errors.New("provider override not allowed")
+	}
+	if req.Thinking != nil && !admin && !cfg.SummarizeAllowThinkingOverride {
+		return errors.New("thinking override not allowed")
+	}
+	if req.MaxTokens > 0 && req.MaxTokens > cfg.SummarizeMaxTokensCap {
+		return errors.New("max_tokens over cap")
+	}
+	if req.Thinking != nil && req.Thinking.BudgetTokens > cfg.SummarizeMaxTokensCap {
+		return errors.New("thinking budget_tokens over cap")
+	}
+	if req.TimeoutMS < 0 {
+		return errors.New("timeout_ms must be >= 0")
+	}
+	maxTimeoutMS := int64(cfg.SummarizeMaxTimeout / time.Millisecond)
+	if req.TimeoutMS > 0 && int64(req.TimeoutMS) > maxTimeoutMS {
+		return errors.New("timeout_ms over cap")
+	}
+	if len(req.Instructions) > cfg.SummarizeMaxInstructionsLen {
+		return errors.New("instructions over cap")
+	}
+	return nil
+}
+
+func validateSummarizeEffectiveCaps(maxTokens int, timeout time.Duration, thinking summarizer.Thinking, cfg config.Config) error {
+	if cfg.SummarizeMaxTokensCap > 0 {
+		if maxTokens > cfg.SummarizeMaxTokensCap {
+			return errors.New("max_tokens over cap")
+		}
+		if thinking.BudgetTokens > cfg.SummarizeMaxTokensCap {
+			return errors.New("thinking budget_tokens over cap")
+		}
+	}
+	if timeout < 0 {
+		return errors.New("timeout_ms must be >= 0")
+	}
+	if cfg.SummarizeMaxTimeout > 0 && timeout > cfg.SummarizeMaxTimeout {
+		return errors.New("timeout_ms over cap")
+	}
+	return nil
+}
+
 // sanitizeForPageBlock neutralises any sequence that could close the
 // <page> delimiter early. A single pass replacing "</page" is enough
 // because we control the outer template; case-folding covers the
@@ -224,20 +281,22 @@ func pickSingleSummarizable(results []model.SearchResult) (model.SearchResult, *
 	if r.Unsupported != "" {
 		return r, &summarizeError{http.StatusUnprocessableEntity, "unsupported", r.Unsupported, "parse_unsupported"}
 	}
-	if r.Content == nil || strings.TrimSpace(r.Content.MainText)+strings.TrimSpace(r.Content.Markdown) == "" {
+	if summarizeBody(r) == "" {
 		return r, &summarizeError{http.StatusUnprocessableEntity, "empty_content", "no extractable text", "parse_empty"}
 	}
 	return r, nil
 }
 
 func summarizeBody(r model.SearchResult) string {
-	if r.Content == nil {
-		return ""
+	if r.Content != nil {
+		if s := strings.TrimSpace(r.Content.Markdown); s != "" {
+			return s
+		}
+		if s := strings.TrimSpace(r.Content.MainText); s != "" {
+			return s
+		}
 	}
-	if s := strings.TrimSpace(r.Content.Markdown); s != "" {
-		return s
-	}
-	return strings.TrimSpace(r.Content.MainText)
+	return strings.TrimSpace(r.Markdown)
 }
 
 func buildSummarizePrompt(req summarizeRequest, body string) string {

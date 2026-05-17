@@ -84,10 +84,22 @@ func (c *Checker) get(ctx context.Context, origin string) (*robotstxt.RobotsData
 
 	data, err := c.fetch(ctx, origin)
 	// Cache even failures (as nil data) so we don't hammer broken hosts.
+	now := time.Now()
+	c.sweepExpired(now)
 	c.mu.Lock()
-	c.cache[origin] = entry{data: data, fetched: time.Now()}
+	c.cache[origin] = entry{data: data, fetched: now}
 	c.mu.Unlock()
 	return data, err
+}
+
+func (c *Checker) sweepExpired(now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for origin, e := range c.cache {
+		if now.Sub(e.fetched) >= c.ttl {
+			delete(c.cache, origin)
+		}
+	}
 }
 
 func (c *Checker) fetch(ctx context.Context, origin string) (*robotstxt.RobotsData, error) {

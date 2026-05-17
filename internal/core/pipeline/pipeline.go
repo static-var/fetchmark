@@ -109,7 +109,12 @@ func (p *Pipeline) Search(ctx context.Context, o Options) ([]model.SearchResult,
 	if err != nil {
 		return nil, err
 	}
-	return p.process(ctx, o, hitsToResults(hits), o.Query), nil
+	if o.MaxResults > 0 && len(hits) > o.MaxResults {
+		hits = hits[:o.MaxResults]
+	}
+	results := p.process(ctx, o, hitsToResults(hits), o.Query)
+	filterResultsByFormats(results, o.Formats)
+	return results, nil
 }
 
 // Parse runs the fetch+extract+rank portion on a caller-supplied URL
@@ -119,7 +124,9 @@ func (p *Pipeline) Parse(ctx context.Context, o Options) []model.SearchResult {
 	for _, u := range o.URLs {
 		seed = append(seed, model.SearchResult{URL: u})
 	}
-	return p.process(ctx, o, seed, o.Query)
+	results := p.process(ctx, o, seed, o.Query)
+	filterResultsByFormats(results, o.Formats)
+	return results
 }
 
 func hitsToResults(hits []search.Hit) []model.SearchResult {
@@ -209,6 +216,44 @@ func (p *Pipeline) process(ctx context.Context, o Options, seed []model.SearchRe
 	return results
 }
 
+func filterResultsByFormats(results []model.SearchResult, formats []string) {
+	if len(formats) == 0 {
+		return
+	}
+
+	requested := map[string]bool{}
+	for _, format := range formats {
+		format = strings.ToLower(strings.TrimSpace(format))
+		switch format {
+		case "markdown", "html", "json":
+			requested[format] = true
+		}
+	}
+	if len(requested) == 0 {
+		return
+	}
+
+	keepMarkdown := requested["markdown"]
+	keepHTML := requested["html"]
+	keepJSON := requested["json"]
+
+	for i := range results {
+		if !keepMarkdown {
+			results[i].Markdown = ""
+		}
+		if !keepHTML {
+			results[i].HTML = ""
+		}
+		if results[i].Content != nil {
+			results[i].Content.Markdown = ""
+			results[i].Content.CleanedHTML = ""
+			if !keepJSON {
+				results[i].Content.MainText = ""
+			}
+		}
+	}
+}
+
 func applyContent(r *model.SearchResult, c *model.Content) {
 	r.Content = c
 	if c.Title != "" && r.Title == "" {
@@ -223,6 +268,13 @@ func applyContent(r *model.SearchResult, c *model.Content) {
 	if c.UnsupportedReason != "" && r.Unsupported == "" {
 		r.Unsupported = c.UnsupportedReason
 	}
+}
+
+type fetchOutcome struct {
+	raw         []byte
+	fromCache   bool
+	unsupported string
+	fetchMS     int64
 }
 
 // fetchAndExtract populates r by fetching, extracting, and caching a
@@ -335,13 +387,13 @@ func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.Sear
 	// Local singleflight by key suppresses duplicate in-flight workers
 	// inside this process. Cross-instance suppression happens inside
 	// doFetch via WithLock.
-	_, _, _ = p.Cache.Do(key, func() (any, error) {
+	v, _, _ := p.Cache.Do(key, func() (any, error) {
 		// Recheck cache once more — singleflight may have raced us.
 		if raw, _ := p.Cache.Get(ctx, key); raw != nil {
 			if err := applyRaw(r, raw); err == nil {
 				r.FromCache = true
 			}
-			return raw, nil
+			return fetchOutcome{raw: raw, fromCache: true}, nil
 		}
 		// Cross-process lock. LockTTL is generous relative to our
 		// fetch+extract budget so a slow fetcher doesn't lose the lock
@@ -352,7 +404,7 @@ func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.Sear
 			PollInterval: 100 * time.Millisecond,
 		}, doFetch)
 		if err != nil {
-			return nil, err
+			return fetchOutcome{unsupported: r.Unsupported, fetchMS: r.FetchMS}, nil
 		}
 		// If another worker/process populated the cache while we
 		// waited, the lock path returned that blob without calling our
@@ -362,8 +414,30 @@ func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.Sear
 				r.FromCache = true
 			}
 		}
-		return raw, nil
+		return fetchOutcome{raw: raw, fromCache: r.FromCache, unsupported: r.Unsupported, fetchMS: r.FetchMS}, nil
 	})
+	applyFetchOutcome(r, v)
+}
+
+func applyFetchOutcome(r *model.SearchResult, v any) {
+	out, ok := v.(fetchOutcome)
+	if !ok {
+		if raw, ok := v.([]byte); ok {
+			out.raw = raw
+		} else {
+			return
+		}
+	}
+	if out.unsupported != "" && r.Unsupported == "" && r.Content == nil {
+		r.Unsupported = out.unsupported
+		r.FetchMS = out.fetchMS
+		return
+	}
+	if out.raw != nil && r.Content == nil && r.Unsupported == "" {
+		if err := applyRaw(r, out.raw); err == nil {
+			r.FromCache = out.fromCache
+		}
+	}
 }
 
 // renderAndExtract runs the renderer as the primary source of HTML,

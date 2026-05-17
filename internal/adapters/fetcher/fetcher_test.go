@@ -164,15 +164,18 @@ func TestFetch_EgressBlockedByPolicy(t *testing.T) {
 
 func TestFetchMany_Parallelism(t *testing.T) {
 	var inflight, peak int32
+	entered := make(chan struct{}, 10)
+	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cur := atomic.AddInt32(&inflight, 1)
+		entered <- struct{}{}
 		for {
 			p := atomic.LoadInt32(&peak)
 			if cur <= p || atomic.CompareAndSwapInt32(&peak, p, cur) {
 				break
 			}
 		}
-		time.Sleep(50 * time.Millisecond)
+		<-release
 		atomic.AddInt32(&inflight, -1)
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = w.Write([]byte("<html>ok</html>"))
@@ -185,7 +188,34 @@ func TestFetchMany_Parallelism(t *testing.T) {
 	for i := range reqs {
 		reqs[i] = Request{URL: srv.URL + fmt.Sprintf("/p/%d", i)}
 	}
-	out := f.FetchMany(context.Background(), reqs)
+
+	done := make(chan []Result, 1)
+	go func() {
+		done <- f.FetchMany(context.Background(), reqs)
+	}()
+
+	for i := 0; i < 3; i++ {
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			close(release)
+			t.Fatalf("timed out waiting for request %d to enter handler", i+1)
+		}
+	}
+	select {
+	case <-entered:
+		close(release)
+		t.Fatalf("observed more than 3 concurrent requests; peak inflight = %d", atomic.LoadInt32(&peak))
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	var out []Result
+	select {
+	case out = <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for FetchMany to complete")
+	}
 	for i, r := range out {
 		if r.Err != nil || r.Status != 200 {
 			t.Fatalf("res[%d] err=%v status=%d", i, r.Err, r.Status)
@@ -201,5 +231,85 @@ func TestClientFor_BadProxy(t *testing.T) {
 	_, err := f.clientFor(":::not a url")
 	if err == nil {
 		t.Fatal("expected parse error")
+	}
+}
+
+func TestGateFor_BoundsHostGateGrowth(t *testing.T) {
+	f := newFetcher(t, Budgets{PerHostConcurrency: 1})
+
+	for i := 0; i < maxHostGates*2; i++ {
+		_ = f.gateFor(fmt.Sprintf("host-%d.example", i))
+	}
+
+	if got := f.hostGateCount(); got > maxHostGates {
+		t.Fatalf("host gate count = %d, want <= %d", got, maxHostGates)
+	}
+}
+
+func TestGateFor_UsesOverflowWhenAllGatesBusyAtCap(t *testing.T) {
+	f := newFetcher(t, Budgets{PerHostConcurrency: 1})
+
+	for i := 0; i < maxHostGates; i++ {
+		release, err := f.acquireHostGate(context.Background(), fmt.Sprintf("busy-%d.example", i))
+		if err != nil {
+			t.Fatalf("acquireHostGate: %v", err)
+		}
+		defer release()
+	}
+
+	release, err := f.acquireHostGate(context.Background(), "overflow.example")
+	if err != nil {
+		t.Fatalf("acquireHostGate overflow: %v", err)
+	}
+	defer release()
+	if got := f.hostGateCount(); got != maxHostGates {
+		t.Fatalf("host gate count = %d, want %d", got, maxHostGates)
+	}
+}
+
+func TestAcquireHostGate_DoesNotEvictReservedGate(t *testing.T) {
+	f := newFetcher(t, Budgets{PerHostConcurrency: 1})
+
+	releaseHeld, err := f.acquireHostGate(context.Background(), "reserved.example")
+	if err != nil {
+		t.Fatalf("acquire held gate: %v", err)
+	}
+
+	reservedStarted := make(chan struct{})
+	reservedAcquired := make(chan func())
+	go func() {
+		close(reservedStarted)
+		release, err := f.acquireHostGate(context.Background(), "reserved.example")
+		if err != nil {
+			t.Errorf("reserve second gate: %v", err)
+			close(reservedAcquired)
+			return
+		}
+		reservedAcquired <- release
+	}()
+	<-reservedStarted
+	requireEventually(t, time.Second, func() bool {
+		f.hostsMu.Lock()
+		active := f.hosts["reserved.example"].active
+		f.hostsMu.Unlock()
+		return active == 2
+	})
+
+	for i := 0; i < maxHostGates-1; i++ {
+		_ = f.gateFor(fmt.Sprintf("idle-%d.example", i))
+	}
+	_ = f.gateFor("new.example")
+
+	f.hostsMu.Lock()
+	_, ok := f.hosts["reserved.example"]
+	f.hostsMu.Unlock()
+	if !ok {
+		t.Fatal("reserved gate was evicted while an acquire was blocked on its semaphore")
+	}
+
+	releaseHeld()
+	releaseSecond := <-reservedAcquired
+	if releaseSecond != nil {
+		releaseSecond()
 	}
 }
