@@ -86,14 +86,22 @@ See [`docs/openapi.yaml`](docs/openapi.yaml) for the full contract.
 
 ### Request knobs
 
-Both `/v1/search` and `/v1/parse` accept:
+`/v1/search` accepts:
 
 ```jsonc
 {
   "query": "...",              // required on /v1/search
-  "urls":  ["..."],            // required on /v1/parse
   "max_results": 10,           // caps returned list
   "engines": ["google","duckduckgo"],
+  "categories": ["general","news"],
+  "language": "en",
+  "time_range": "year",        // SearXNG supports day, month, year
+  "safesearch": 1,             // 0 off, 1 moderate, 2 strict
+  "include_domains": ["go.dev"],
+  "exclude_domains": ["reddit.com"],
+  "exact_match": false,
+  "search_depth": "basic",     // fast, ultra-fast, basic, advanced
+  "chunks_per_source": 2,       // return up to 3 query-focused chunks/result
   "formats": ["markdown","json","html"],
   "render":  false,            // force headless render path (opt-in)
   "respect_robots": true,
@@ -101,6 +109,9 @@ Both `/v1/search` and `/v1/parse` accept:
   "proxy_url": "http://..."    // admin API key required
 }
 ```
+
+`/v1/parse` accepts `urls`, `query`, `formats`, `render`,
+`respect_robots`, `timeout_ms`, and admin-only `proxy_url`.
 
 ### Authentication
 

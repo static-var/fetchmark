@@ -49,8 +49,34 @@ components:
           example: en
         time_range:
           type: string
-          enum: [day, week, month, year]
-          description: "Optional SearXNG freshness filter."
+          enum: [day, month, year]
+          description: "Optional SearXNG freshness filter. SearXNG supports day, month, and year."
+        safesearch:
+          type: integer
+          enum: [0, 1, 2]
+          description: "SearXNG safe-search level: 0 off, 1 moderate, 2 strict."
+        include_domains:
+          type: array
+          items: { type: string }
+          description: "Restrict results to these hosts or host/path prefixes. Fetchmark also adds site: hints upstream where possible."
+          example: [docs.python.org, go.dev/doc]
+        exclude_domains:
+          type: array
+          items: { type: string }
+          description: "Remove results from these hosts or host/path prefixes. Fetchmark also adds -site: hints upstream where possible."
+          example: [reddit.com, pinterest.com]
+        exact_match:
+          type: boolean
+          description: "Wrap the search query as an exact phrase before sending it upstream."
+        search_depth:
+          type: string
+          enum: [fast, ultra-fast, basic, advanced]
+          description: "Controls internal candidate breadth. fast/ultra-fast fetch fewer candidates, basic is the default, and advanced over-fetches more before re-ranking."
+        chunks_per_source:
+          type: integer
+          minimum: 0
+          maximum: 3
+          description: "Return up to this many query-focused chunks per result. Chunks are selected from extracted page text and sorted by local relevance score."
         render:
           type: boolean
           description: "When true, fetch pages with the configured rendering path for JavaScript-heavy content."
@@ -71,6 +97,7 @@ components:
         urls:            { type: array, items: { type: string, format: uri } }
         query:           { type: string, description: "Optional — enables ranking." }
         formats:         { type: array, items: { type: string, enum: [json, markdown, html] } }
+        render:          { type: boolean, description: "When true, fetch pages with the configured rendering path for JavaScript-heavy content." }
         timeout_ms:      { type: integer }
         respect_robots:  { type: boolean, description: "Admin only when false." }
         proxy_url:       { type: string,  description: "Admin only." }
@@ -96,8 +123,22 @@ components:
               original_rank: "3"
               date: "2025-01-02"
               published_at: "2025-01-02T03:04:05Z"
+        chunks:
+          type: array
+          items: { $ref: "#/components/schemas/ContentChunk" }
         content:        { $ref: "#/components/schemas/Content" }
         unsupported_reason: { type: string, description: "Reason if parsing could not complete: non_html, js_required, robots_disallowed, egress_blocked, fetch_failed, extract_failed." }
+
+    ContentChunk:
+      type: object
+      properties:
+        text:
+          type: string
+          description: "Query-focused excerpt from the extracted page text."
+        score:
+          type: number
+          format: float
+          description: "Local chunk relevance score within this response."
 
     Content:
       type: object
