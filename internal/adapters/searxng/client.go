@@ -96,64 +96,93 @@ func (c *Client) Search(ctx context.Context, q search.Query) ([]search.Hit, erro
 	if q.TimeRange != "" {
 		vals.Set("time_range", q.TimeRange)
 	}
-	if q.MaxResults > 0 {
-		// SearXNG paginates via pageno; request only page 1 and rely on
-		// the server's default page size. Consumers downstream trim to
-		// MaxResults after dedupe.
-		vals.Set("pageno", strconv.Itoa(1))
-	}
-	u.RawQuery = vals.Encode()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("searxng: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("searxng: status %d", resp.StatusCode)
-	}
-
-	var body response
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return nil, fmt.Errorf("searxng: decode: %w", err)
-	}
-
-	out := make([]search.Hit, 0, len(body.Results))
-	for i, r := range body.Results {
-		engines := r.Engines
-		if len(engines) == 0 && r.Engine != "" {
-			engines = []string{r.Engine}
+	out := make([]search.Hit, 0, q.MaxResults)
+	var allResults []apiResult
+	var allUnresponsive [][]any
+	for page := 1; ; page++ {
+		pageVals := cloneValues(vals)
+		if q.MaxResults > 0 {
+			pageVals.Set("pageno", strconv.Itoa(page))
 		}
-		metadata := map[string]string{"original_rank": strconv.Itoa(i + 1)}
-		if r.Category != "" {
-			metadata["category"] = r.Category
+		u.RawQuery = pageVals.Encode()
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+		if err != nil {
+			return nil, err
 		}
-		publishedAt, rawPublished := decodePublishedAt(r)
-		if rawDate, ok := decodeDateString(r.Date); ok && rawDate != "" {
-			metadata["date"] = rawDate
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("searxng: %w", err)
 		}
-		if rawPublished != "" {
-			metadata["published_at"] = rawPublished
+
+		var body response
+		decodeErr := json.NewDecoder(resp.Body).Decode(&body)
+		closeErr := resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, fmt.Errorf("searxng: status %d", resp.StatusCode)
 		}
-		out = append(out, search.Hit{
-			URL:         r.URL,
-			Title:       r.Title,
-			Snippet:     r.Content,
-			Engines:     engines,
-			PublishedAt: publishedAt,
-			Metadata:    metadata,
-		})
+		if decodeErr != nil {
+			return nil, fmt.Errorf("searxng: decode: %w", decodeErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("searxng: close response: %w", closeErr)
+		}
+
+		if len(body.Results) == 0 {
+			break
+		}
+		allResults = append(allResults, body.Results...)
+		allUnresponsive = append(allUnresponsive, body.UnresponsiveEngines...)
+		for _, r := range body.Results {
+			out = append(out, hitFromAPIResult(r, len(out)+1))
+			if q.MaxResults > 0 && len(out) >= q.MaxResults {
+				c.updateEngineHealth(allResults, allUnresponsive)
+				return out[:q.MaxResults], nil
+			}
+		}
+		if q.MaxResults <= 0 {
+			break
+		}
 	}
 
-	c.updateEngineHealth(body.Results, body.UnresponsiveEngines)
+	c.updateEngineHealth(allResults, allUnresponsive)
 	return out, nil
+}
+
+func cloneValues(vals url.Values) url.Values {
+	out := make(url.Values, len(vals))
+	for k, v := range vals {
+		out[k] = append([]string(nil), v...)
+	}
+	return out
+}
+
+func hitFromAPIResult(r apiResult, rank int) search.Hit {
+	engines := r.Engines
+	if len(engines) == 0 && r.Engine != "" {
+		engines = []string{r.Engine}
+	}
+	metadata := map[string]string{"original_rank": strconv.Itoa(rank)}
+	if r.Category != "" {
+		metadata["category"] = r.Category
+	}
+	publishedAt, rawPublished := decodePublishedAt(r)
+	if rawDate, ok := decodeDateString(r.Date); ok && rawDate != "" {
+		metadata["date"] = rawDate
+	}
+	if rawPublished != "" {
+		metadata["published_at"] = rawPublished
+	}
+	return search.Hit{
+		URL:         r.URL,
+		Title:       r.Title,
+		Snippet:     r.Content,
+		Engines:     engines,
+		PublishedAt: publishedAt,
+		Metadata:    metadata,
+	}
 }
 
 func decodePublishedAt(r apiResult) (*time.Time, string) {

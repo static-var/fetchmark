@@ -63,6 +63,39 @@ func TestSearch_ControlsAndMetadata(t *testing.T) {
 	}
 }
 
+func TestSearch_FetchesAdditionalPagesUntilMaxResults(t *testing.T) {
+	var pages []string
+	c := newStub(t, func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("pageno")
+		pages = append(pages, page)
+		w.Header().Set("Content-Type", "application/json")
+		switch page {
+		case "1":
+			_, _ = w.Write([]byte(`{"results":[{"url":"https://a.example","title":"A"},{"url":"https://b.example","title":"B"}]}`))
+		case "2":
+			_, _ = w.Write([]byte(`{"results":[{"url":"https://c.example","title":"C"},{"url":"https://d.example","title":"D"}]}`))
+		case "3":
+			_, _ = w.Write([]byte(`{"results":[{"url":"https://e.example","title":"E"}]}`))
+		default:
+			t.Fatalf("unexpected page %q", page)
+		}
+	})
+
+	hits, err := c.Search(context.Background(), search.Query{Q: "bird species", MaxResults: 5})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if got, want := strings.Join(pages, ","), "1,2,3"; got != want {
+		t.Fatalf("pages = %q, want %q", got, want)
+	}
+	if len(hits) != 5 {
+		t.Fatalf("hits = %d, want 5", len(hits))
+	}
+	if hits[4].URL != "https://e.example" || hits[4].Metadata["original_rank"] != "5" {
+		t.Fatalf("last hit = %+v", hits[4])
+	}
+}
+
 func TestSearch_PreservesPublishedAtMetadata(t *testing.T) {
 	c := newStub(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
