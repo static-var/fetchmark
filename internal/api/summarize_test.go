@@ -269,6 +269,57 @@ func TestSummarize_ProviderAndThinkingOverridesAllowedByConfig(t *testing.T) {
 	}
 }
 
+func TestSummarize_ProviderDefaultsAreCapped(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  summarizer.ProviderConfig
+	}{
+		{name: "max_tokens over cap", cfg: summarizer.ProviderConfig{Name: "openai", Kind: summarizer.KindOpenAI, BaseURL: "https://api.test/v1/", APIKey: "sk-test-1234", Model: "test-model", MaxTokens: 4097}},
+		{name: "timeout over cap", cfg: summarizer.ProviderConfig{Name: "openai", Kind: summarizer.KindOpenAI, BaseURL: "https://api.test/v1/", APIKey: "sk-test-1234", Model: "test-model", Timeout: 121 * time.Second}},
+		{name: "thinking budget over cap", cfg: summarizer.ProviderConfig{Name: "openai", Kind: summarizer.KindOpenAI, BaseURL: "https://api.test/v1/", APIKey: "sk-test-1234", Model: "test-model", Thinking: summarizer.Thinking{Enabled: true, BudgetTokens: 4097}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &stubProvider{name: "openai", kind: summarizer.KindOpenAI, resp: summarizer.Response{Summary: "ok"}}
+			r, _, reg := withSummarizer(t, stub)
+			if err := reg.Set(tc.cfg); err != nil {
+				t.Fatalf("reg.Set: %v", err)
+			}
+			req := httptest.NewRequest("POST", "/v1/summarize", strings.NewReader(`{"url":"https://example.com/a"}`))
+			req.Header.Set("X-API-Key", "k1")
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestAdminSummarize_RejectsProviderConfigOverCaps(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{name: "max_tokens over cap", body: `{"name":"openai","kind":"openai","base_url":"https://api.test/v1/","model":"test-model","max_tokens":4097}`},
+		{name: "timeout over cap", body: `{"name":"openai","kind":"openai","base_url":"https://api.test/v1/","model":"test-model","timeout_ms":121000}`},
+		{name: "thinking budget over cap", body: `{"name":"openai","kind":"openai","base_url":"https://api.test/v1/","model":"test-model","thinking":{"enabled":true,"budget_tokens":4097}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &stubProvider{name: "openai", kind: summarizer.KindOpenAI, resp: summarizer.Response{Summary: "ok"}}
+			r, _, _ := withSummarizer(t, stub)
+			req := httptest.NewRequest("PUT", "/admin/summarize/providers", strings.NewReader(tc.body))
+			req.Header.Set("X-API-Key", "admin1")
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestSummarize_AdminStillCappedForCostAndPromptControls(t *testing.T) {
 	cases := []struct {
 		name string

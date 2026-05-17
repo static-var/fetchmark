@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync/atomic"
 	"testing"
@@ -69,6 +70,39 @@ type countingExtractor struct {
 func (e *countingExtractor) Extract(raw []byte, url string) (*model.Content, error) {
 	e.calls.Add(1)
 	return &model.Content{URL: url, Title: "T", MainText: string(raw), Markdown: string(raw)}, nil
+}
+
+type sharedRawCache struct {
+	raw []byte
+}
+
+func (c sharedRawCache) Get(context.Context, string) ([]byte, error) { return nil, nil }
+func (c sharedRawCache) Set(context.Context, string, []byte) error   { return nil }
+func (c sharedRawCache) Do(string, func() (any, error)) (any, error, bool) {
+	return c.raw, nil, true
+}
+func (c sharedRawCache) WithLock(ctx context.Context, _ string, _ cache.LockOptions, fn func(context.Context) ([]byte, error)) ([]byte, error) {
+	return fn(ctx)
+}
+
+func TestFetchAndExtractAppliesSharedSingleflightRaw(t *testing.T) {
+	content := model.Content{URL: "https://a.example/x", Title: "Shared", MainText: "shared body", Markdown: "# shared"}
+	raw, err := json.Marshal(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Pipeline{
+		Fetcher:   stubFetcher{resp: map[string]fetcher.Result{}},
+		Extractor: stubExtractor{},
+		Cache:     sharedRawCache{raw: raw},
+	}
+	r := &model.SearchResult{URL: "https://a.example/x"}
+
+	p.fetchAndExtract(context.Background(), Options{}, r, false)
+
+	if r.Title != "Shared" || r.Content == nil || r.Content.MainText != "shared body" || r.Markdown != "# shared" || !r.FromCache {
+		t.Fatalf("shared singleflight raw was not applied to result: %+v", r)
+	}
 }
 
 func TestSearchCapsCandidatesBeforeFetch(t *testing.T) {

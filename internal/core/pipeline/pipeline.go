@@ -380,7 +380,7 @@ func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.Sear
 	// Local singleflight by key suppresses duplicate in-flight workers
 	// inside this process. Cross-instance suppression happens inside
 	// doFetch via WithLock.
-	_, _, _ = p.Cache.Do(key, func() (any, error) {
+	v, _, _ := p.Cache.Do(key, func() (any, error) {
 		// Recheck cache once more — singleflight may have raced us.
 		if raw, _ := p.Cache.Get(ctx, key); raw != nil {
 			if err := applyRaw(r, raw); err == nil {
@@ -409,6 +409,11 @@ func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.Sear
 		}
 		return raw, nil
 	})
+	if raw, ok := v.([]byte); ok && raw != nil && r.Content == nil && r.Unsupported == "" {
+		if err := applyRaw(r, raw); err == nil {
+			r.FromCache = true
+		}
+	}
 }
 
 // renderAndExtract runs the renderer as the primary source of HTML,

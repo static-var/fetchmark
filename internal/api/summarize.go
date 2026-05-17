@@ -142,6 +142,10 @@ func summarizeHandler(d Deps) http.HandlerFunc {
 		if timeout <= 0 {
 			timeout = summarizer.DefaultTimeout()
 		}
+		if err := validateSummarizeEffectiveCaps(providerReq.MaxTokens, timeout, providerReq.Thinking, d.Config); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
 
@@ -212,6 +216,24 @@ func validateSummarizeOverrides(req summarizeRequest, cfg config.Config, admin b
 	}
 	if len(req.Instructions) > cfg.SummarizeMaxInstructionsLen {
 		return errors.New("instructions over cap")
+	}
+	return nil
+}
+
+func validateSummarizeEffectiveCaps(maxTokens int, timeout time.Duration, thinking summarizer.Thinking, cfg config.Config) error {
+	if cfg.SummarizeMaxTokensCap > 0 {
+		if maxTokens > cfg.SummarizeMaxTokensCap {
+			return errors.New("max_tokens over cap")
+		}
+		if thinking.BudgetTokens > cfg.SummarizeMaxTokensCap {
+			return errors.New("thinking budget_tokens over cap")
+		}
+	}
+	if timeout < 0 {
+		return errors.New("timeout_ms must be >= 0")
+	}
+	if cfg.SummarizeMaxTimeout > 0 && timeout > cfg.SummarizeMaxTimeout {
+		return errors.New("timeout_ms over cap")
 	}
 	return nil
 }
