@@ -115,18 +115,7 @@ func (p *Pipeline) Search(ctx context.Context, o Options) ([]model.SearchResult,
 	if candidateCap <= 0 {
 		candidateCap = o.MaxResults
 	}
-	hits, err := p.Searcher.Search(ctx, search.Query{
-		Q:              o.Query,
-		Engines:        o.Engines,
-		Categories:     o.Categories,
-		Language:       o.Language,
-		TimeRange:      o.TimeRange,
-		SafeSearch:     o.SafeSearch,
-		IncludeDomains: o.IncludeDomains,
-		ExcludeDomains: o.ExcludeDomains,
-		ExactMatch:     o.ExactMatch,
-		MaxResults:     candidateCap,
-	})
+	hits, err := p.searchCandidates(ctx, o, candidateCap)
 	if err != nil {
 		return nil, err
 	}
