@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -27,11 +29,73 @@ import (
 	"github.com/staticvar/fetchmark/internal/core/rank"
 )
 
+var version = "dev"
+
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		if err := runHealthcheck(context.Background(), os.Getenv("FM_LISTEN_ADDR"), http.DefaultClient); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if err := run(); err != nil {
 		slog.Error("fatal", "err", err)
 		os.Exit(1)
 	}
+}
+
+func runHealthcheck(parent context.Context, listenAddr string, client *http.Client) error {
+	if client == nil {
+		client = http.DefaultClient
+	}
+
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthcheckEndpoint(listenAddr), nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("healthcheck returned HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func healthcheckEndpoint(listenAddr string) string {
+	addr := strings.TrimSpace(listenAddr)
+	if addr == "" {
+		addr = ":8080"
+	}
+	if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
+		return strings.TrimRight(addr, "/") + "/healthz"
+	}
+
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		if strings.HasPrefix(addr, ":") {
+			host = ""
+			port = strings.TrimPrefix(addr, ":")
+		} else {
+			return "http://" + strings.TrimRight(addr, "/") + "/healthz"
+		}
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	if port == "" {
+		port = "8080"
+	}
+	return "http://" + net.JoinHostPort(host, port) + "/healthz"
 }
 
 func run() error {
@@ -141,6 +205,7 @@ func run() error {
 		Log:         log,
 		Config:      cfg,
 		Pipeline:    pipe,
+		Version:     version,
 		Redis:       rdb,
 		Summarizers: buildSummarizerRegistry(cfg, log),
 		ReadyCheck: func() error {
