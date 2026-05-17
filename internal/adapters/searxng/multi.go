@@ -81,8 +81,10 @@ func NewMultiWithCooldown(bases []string, httpc *http.Client, cooldown time.Dura
 }
 
 // Search tries healthy instances in round-robin order, marking an
-// instance unhealthy on transport error or a context-deadline-exceeded
-// from inside Search. The first non-error response wins. If every
+// instance unhealthy on transport/retryable upstream errors. Non-retryable
+// client errors are returned immediately without cooling down the instance,
+// because they usually reflect the query shape rather than backend health.
+// The first non-error response wins. If every
 // instance fails we return the last error so the caller sees a real
 // upstream message rather than a synthetic one.
 func (m *MultiClient) Search(ctx context.Context, q search.Query) ([]search.Hit, error) {
@@ -103,12 +105,24 @@ func (m *MultiClient) Search(ctx context.Context, q search.Query) ([]search.Hit,
 			return hits, nil
 		}
 		lastErr = err
+		if !retryableSearchError(err) {
+			m.markUp(idx)
+			return nil, err
+		}
 		m.markDown(idx)
 	}
 	if lastErr == nil {
 		lastErr = errors.New("searxng: no instances available")
 	}
 	return nil, lastErr
+}
+
+func retryableSearchError(err error) bool {
+	var status *StatusError
+	if errors.As(err, &status) {
+		return status.Retryable()
+	}
+	return true
 }
 
 // Ping passes if any instance answers. The readiness probe is meant to

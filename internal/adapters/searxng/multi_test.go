@@ -93,6 +93,41 @@ func TestMultiClient_RoundRobinsBetweenHealthy(t *testing.T) {
 	}
 }
 
+func TestMultiClient_DoesNotCooldownOnClientSearchError(t *testing.T) {
+	var badRequestHits int64
+	badRequest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&badRequestHits, 1)
+		http.Error(w, "bad engine", http.StatusBadRequest)
+	}))
+	t.Cleanup(badRequest.Close)
+
+	var healthyHits int64
+	healthy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&healthyHits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(fixture))
+	}))
+	t.Cleanup(healthy.Close)
+
+	mc, err := NewMultiWithCooldown([]string{badRequest.URL, healthy.URL}, badRequest.Client(), time.Minute)
+	if err != nil {
+		t.Fatalf("NewMultiWithCooldown: %v", err)
+	}
+
+	if _, err := mc.Search(context.Background(), search.Query{Q: "golang"}); err == nil {
+		t.Fatal("expected client error from first SearXNG instance")
+	}
+	if got := atomic.LoadInt64(&healthyHits); got != 0 {
+		t.Fatalf("non-retryable client error should not fail over; healthy hits = %d", got)
+	}
+
+	_, _ = mc.Search(context.Background(), search.Query{Q: "golang"})
+	_, _ = mc.Search(context.Background(), search.Query{Q: "golang"})
+	if got := atomic.LoadInt64(&badRequestHits); got != 2 {
+		t.Fatalf("client-error instance should not be cooled down; hits = %d, want 2", got)
+	}
+}
+
 func TestMultiClient_PingAnyHealthy(t *testing.T) {
 	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nope", http.StatusInternalServerError)

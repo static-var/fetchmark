@@ -67,6 +67,25 @@ type apiResult struct {
 	Category string   `json:"category"`
 }
 
+// StatusError reports a non-2xx SearXNG response and whether another
+// instance is worth trying. Most 4xx responses come from request shape
+// problems, so failing over would cool down healthy instances for no benefit.
+type StatusError struct {
+	Code int
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("searxng: status %d", e.Code)
+}
+
+func (e *StatusError) StatusCode() int {
+	return e.Code
+}
+
+func (e *StatusError) Retryable() bool {
+	return e.Code == http.StatusRequestTimeout || e.Code == http.StatusTooManyRequests || e.Code >= 500
+}
+
 // Search runs a SearXNG query and returns hits in the order SearXNG
 // provided them. Ordering is not relevance-ranked.
 func (c *Client) Search(ctx context.Context, q search.Query) ([]search.Hit, error) {
@@ -110,7 +129,7 @@ func (c *Client) Search(ctx context.Context, q search.Query) ([]search.Hit, erro
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("searxng: status %d", resp.StatusCode)
+		return nil, &StatusError{Code: resp.StatusCode}
 	}
 
 	var body response

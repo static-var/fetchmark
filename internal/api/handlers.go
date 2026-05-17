@@ -37,6 +37,12 @@ type parseRequest struct {
 // errBadRequest is used by decodeJSON to signal client-side failures.
 var errBadRequest = errors.New("bad_request")
 
+type upstreamStatusError interface {
+	error
+	StatusCode() int
+	Retryable() bool
+}
+
 func decodeJSON(r *http.Request, v any) error {
 	r.Body = http.MaxBytesReader(nil, r.Body, 1<<20)
 	dec := json.NewDecoder(r.Body)
@@ -115,6 +121,12 @@ func searchHandler(d Deps) http.HandlerFunc {
 
 		out, err := d.Pipeline.Search(r.Context(), opts)
 		if err != nil {
+			if status, payload, ok := clientSearchError(err); ok {
+				obs.SearchQueryTotal.WithLabelValues("client_error").Inc()
+				d.Log.Warn("search rejected by upstream", "err", err, "status", status)
+				writeJSON(w, status, payload)
+				return
+			}
 			obs.SearchQueryTotal.WithLabelValues("upstream_error").Inc()
 			d.Log.Error("search failed", "err", err)
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "search_failed"})
@@ -131,6 +143,21 @@ func searchHandler(d Deps) http.HandlerFunc {
 			"results": out,
 		})
 	}
+}
+
+func clientSearchError(err error) (int, map[string]any, bool) {
+	var statusErr upstreamStatusError
+	if !errors.As(err, &statusErr) || statusErr.Retryable() {
+		return 0, nil, false
+	}
+	code := statusErr.StatusCode()
+	if code < http.StatusBadRequest || code >= http.StatusInternalServerError {
+		return 0, nil, false
+	}
+	return http.StatusBadRequest, map[string]any{
+		"error":           "search_bad_request",
+		"upstream_status": code,
+	}, true
 }
 
 func parseHandler(d Deps) http.HandlerFunc {
