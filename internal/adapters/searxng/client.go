@@ -136,6 +136,9 @@ func (c *Client) Search(ctx context.Context, q search.Query) ([]search.Hit, erro
 			metadata["category"] = r.Category
 		}
 		publishedAt, rawPublished := decodePublishedAt(r)
+		if rawDate, ok := decodeDateString(r.Date); ok && rawDate != "" {
+			metadata["date"] = rawDate
+		}
 		if rawPublished != "" {
 			metadata["published_at"] = rawPublished
 		}

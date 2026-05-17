@@ -66,7 +66,7 @@ func TestSearch_ControlsAndMetadata(t *testing.T) {
 func TestSearch_PreservesPublishedAtMetadata(t *testing.T) {
 	c := newStub(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"results":[{"url":"https://a.example","title":"A","content":"one","publishedDate":"2025-01-02T03:04:05Z"},{"url":"https://b.example","title":"B","content":"two","date":"not a date"}]}`))
+		_, _ = w.Write([]byte(`{"results":[{"url":"https://a.example","title":"A","content":"one","publishedDate":"2025-01-02T03:04:05Z","date":"2025-01-02"},{"url":"https://b.example","title":"B","content":"two","date":"not a date"}]}`))
 	})
 
 	hits, err := c.Search(context.Background(), search.Query{Q: "birds"})
@@ -80,10 +80,10 @@ func TestSearch_PreservesPublishedAtMetadata(t *testing.T) {
 	if hits[0].PublishedAt == nil || !hits[0].PublishedAt.Equal(want) {
 		t.Fatalf("publishedAt = %+v, want %s", hits[0].PublishedAt, want)
 	}
-	if hits[0].Metadata["published_at"] != "2025-01-02T03:04:05Z" {
+	if hits[0].Metadata["published_at"] != "2025-01-02T03:04:05Z" || hits[0].Metadata["date"] != "2025-01-02" {
 		t.Fatalf("published metadata = %#v", hits[0].Metadata)
 	}
-	if hits[1].PublishedAt != nil || hits[1].Metadata["published_at"] != "not a date" {
+	if hits[1].PublishedAt != nil || hits[1].Metadata["published_at"] != "not a date" || hits[1].Metadata["date"] != "not a date" {
 		t.Fatalf("invalid date should be preserved as metadata only: %+v", hits[1])
 	}
 }
