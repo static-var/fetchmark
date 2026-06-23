@@ -26,7 +26,8 @@ _(none)_
 - P7 — Read-only ops dashboard (html/template + HTMX).
 - P8 / P8a / P8b — Prometheus metrics, SearXNG engine-health,
   request-ID propagation.
-- P9 — `/v1/summarize` stub (501) + OpenAPI spec.
+- P9 — Initial `/v1/summarize` placeholder (later replaced in v2-R3) +
+  OpenAPI spec.
 - P10 — `docs/` mirror scaffolded.
 - P11 — GHCR multi-arch release workflow.
 - Review round 1 — GPT-5.4 security/perf fixes (`7f78d2a`): egress
@@ -89,7 +90,7 @@ _(none)_
 - R3-b — Env-authoritative config with per-provider profiles
   (`FM_SUMMARIZE_{OPENAI,ANTHROPIC}_*`). [`9977399`]
 - R3-c — Prometheus metrics:
-  `fetchmark_summarize_outcome_total{provider,outcome}`,
+  `fetchmark_summarize_total{provider,outcome}`,
   `fetchmark_summarize_duration_seconds{provider}`,
   `fetchmark_summarize_tokens_total{provider,class}`. [`cbb15a7`]
 - R3-d — `/v1/summarize` wired: parses URL through the pipeline,

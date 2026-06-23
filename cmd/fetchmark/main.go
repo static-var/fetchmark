@@ -27,6 +27,8 @@ import (
 	"github.com/staticvar/fetchmark/internal/core/rank"
 )
 
+var version = "dev"
+
 func main() {
 	if err := run(); err != nil {
 		slog.Error("fatal", "err", err)
@@ -141,6 +143,7 @@ func run() error {
 		Log:         log,
 		Config:      cfg,
 		Pipeline:    pipe,
+		Version:     version,
 		Redis:       rdb,
 		Summarizers: buildSummarizerRegistry(cfg, log),
 		ReadyCheck: func() error {
@@ -172,7 +175,7 @@ func run() error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Info("starting", "addr", cfg.ListenAddr, "dashboard", cfg.DashboardEnabled())
+		log.Info("starting", "addr", cfg.ListenAddr, "dashboard", cfg.DashboardEnabled(), "version", version)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}

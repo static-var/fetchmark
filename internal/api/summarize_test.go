@@ -123,6 +123,61 @@ func TestSummarize_HappyPath(t *testing.T) {
 	}
 }
 
+func TestSummarize_RejectsUnsupportedFormat(t *testing.T) {
+	stub := &stubProvider{
+		name: "openai", kind: summarizer.KindOpenAI,
+		resp: summarizer.Response{Summary: "ok"},
+	}
+	r, _, _ := withSummarizer(t, stub)
+	req := httptest.NewRequest("POST", "/v1/summarize", strings.NewReader(`{"url":"https://example.com/a","format":"json"}`))
+	req.Header.Set("X-API-Key", "k1")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSummarize_ResponseReportsTruncatedSource(t *testing.T) {
+	stub := &stubProvider{
+		name: "openai", kind: summarizer.KindOpenAI,
+		resp: summarizer.Response{Summary: "ok"},
+	}
+	r, pipe, _ := withSummarizer(t, stub)
+	longBody := strings.Repeat("alpha ", 12_500)
+	pipe.results = []model.SearchResult{{
+		URL:     "https://example.com/long",
+		Content: &model.Content{Markdown: longBody},
+	}}
+
+	req := httptest.NewRequest("POST", "/v1/summarize", strings.NewReader(`{"url":"https://example.com/long"}`))
+	req.Header.Set("X-API-Key", "k1")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	source, ok := out["source"].(map[string]any)
+	if !ok {
+		t.Fatalf("source missing or wrong type: %+v", out)
+	}
+	if source["truncated"] != true {
+		t.Fatalf("source truncation not reported: %+v", source)
+	}
+	original, _ := source["original_chars"].(float64)
+	included, _ := source["included_chars"].(float64)
+	if original <= included || included <= 0 {
+		t.Fatalf("source sizes not reported correctly: %+v", source)
+	}
+	if len(stub.last.UserPrompt) >= len(longBody) {
+		t.Fatalf("prompt was not truncated")
+	}
+}
+
 func TestSummarize_UsesTopLevelMarkdownFromParseFormats(t *testing.T) {
 	stub := &stubProvider{
 		name: "openai", kind: summarizer.KindOpenAI,

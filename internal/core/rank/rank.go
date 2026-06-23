@@ -11,12 +11,15 @@ package rank
 import (
 	"math"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
 
 	"github.com/staticvar/fetchmark/internal/core/model"
 )
+
+var twentyXXYearPattern = regexp.MustCompile(`\b20[0-9]{2}\b`)
 
 // BM25 parameters (Okapi defaults).
 const (
@@ -173,16 +176,13 @@ func isFreshnessQuery(query string) bool {
 		"new":    {},
 		"news":   {},
 		"today":  {},
-		"2024":   {},
-		"2025":   {},
-		"2026":   {},
 	}
 	for _, token := range tokens {
 		if _, ok := markers[token]; ok {
 			return true
 		}
 	}
-	return false
+	return twentyXXYearPattern.MatchString(q)
 }
 
 func isSocialHost(host string) bool {

@@ -2,6 +2,7 @@ package searxng
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -200,6 +201,67 @@ func TestSearch_UpstreamError(t *testing.T) {
 	_, err := c.Search(context.Background(), search.Query{Q: "x"})
 	if err == nil || !strings.Contains(err.Error(), "502") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestSearch_ReturnsTypedStatusError(t *testing.T) {
+	c := newStub(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+	})
+
+	_, err := c.Search(context.Background(), search.Query{Q: "x"})
+	var statusErr *StatusError
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("err = %T %v, want *StatusError", err, err)
+	}
+	if statusErr.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", statusErr.StatusCode)
+	}
+	if !statusErr.Retryable() {
+		t.Fatal("429 status should be retryable")
+	}
+}
+
+func TestSearch_Non2xxStatusSkipsOversizedJSONDecode(t *testing.T) {
+	c := newStub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"results":[{"content":"` + strings.Repeat("x", maxResponseBytes+1) + `"}]}`))
+	})
+
+	_, err := c.Search(context.Background(), search.Query{Q: "x"})
+	var statusErr *StatusError
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("err = %T %v, want *StatusError", err, err)
+	}
+	if statusErr.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", statusErr.StatusCode)
+	}
+	if errors.Is(err, errResponseTooLarge) {
+		t.Fatalf("non-2xx response should not decode oversized JSON: %v", err)
+	}
+}
+
+func TestSearch_OversizedJSONResponse(t *testing.T) {
+	c := newStub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"results":[{"content":"` + strings.Repeat("x", maxResponseBytes+1) + `"}]}`))
+	})
+
+	_, err := c.Search(context.Background(), search.Query{Q: "x"})
+	if !errors.Is(err, errResponseTooLarge) {
+		t.Fatalf("err = %v, want errResponseTooLarge", err)
+	}
+}
+
+func TestPing_Non2xxStatusIsUnready(t *testing.T) {
+	c := newStub(t, func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	})
+
+	err := c.Ping(context.Background())
+	if err == nil {
+		t.Fatal("expected ping error for 404")
 	}
 }
 

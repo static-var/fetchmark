@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -21,6 +22,27 @@ import (
 	"github.com/staticvar/fetchmark/internal/core/search"
 	"github.com/staticvar/fetchmark/internal/obs"
 )
+
+const maxResponseBytes = 10 << 20
+
+var errResponseTooLarge = errors.New("searxng: response too large")
+
+// StatusError reports a non-2xx response from a SearXNG search request.
+type StatusError struct {
+	StatusCode int
+	Status     string
+}
+
+func (e *StatusError) Error() string {
+	if e.Status != "" {
+		return "searxng: status " + e.Status
+	}
+	return fmt.Sprintf("searxng: status %d", e.StatusCode)
+}
+
+func (e *StatusError) Retryable() bool {
+	return e.StatusCode == http.StatusTooManyRequests || e.StatusCode >= 500
+}
 
 // Client is a thin typed wrapper around a SearXNG instance.
 type Client struct {
@@ -120,12 +142,16 @@ func (c *Client) Search(ctx context.Context, q search.Query) ([]search.Hit, erro
 			return nil, fmt.Errorf("searxng: %w", err)
 		}
 
-		var body response
-		decodeErr := json.NewDecoder(resp.Body).Decode(&body)
-		closeErr := resp.Body.Close()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil, fmt.Errorf("searxng: status %d", resp.StatusCode)
+			closeErr := resp.Body.Close()
+			if closeErr != nil {
+				return nil, fmt.Errorf("searxng: close response: %w", closeErr)
+			}
+			return nil, &StatusError{StatusCode: resp.StatusCode, Status: resp.Status}
 		}
+		var body response
+		decodeErr := json.NewDecoder(&maxBytesReader{r: resp.Body, n: maxResponseBytes}).Decode(&body)
+		closeErr := resp.Body.Close()
 		if decodeErr != nil {
 			return nil, fmt.Errorf("searxng: decode: %w", decodeErr)
 		}
@@ -152,6 +178,31 @@ func (c *Client) Search(ctx context.Context, q search.Query) ([]search.Hit, erro
 
 	c.updateEngineHealth(allResults, allUnresponsive)
 	return out, nil
+}
+
+type maxBytesReader struct {
+	r io.Reader
+	n int
+}
+
+func (r *maxBytesReader) Read(p []byte) (int, error) {
+	if r.n <= 0 {
+		return 0, errResponseTooLarge
+	}
+	if len(p) > r.n {
+		p = p[:r.n]
+	}
+	n, err := r.r.Read(p)
+	r.n -= n
+	if err == io.EOF && r.n == 0 {
+		var probe [1]byte
+		if more, probeErr := r.r.Read(probe[:]); more > 0 {
+			return n, errResponseTooLarge
+		} else if probeErr != nil && probeErr != io.EOF {
+			return n, probeErr
+		}
+	}
+	return n, err
 }
 
 func queryText(q search.Query) string {
@@ -334,7 +385,7 @@ func (c *Client) Ping(ctx context.Context) error {
 		return fmt.Errorf("searxng: ping: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 500 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
 		return fmt.Errorf("searxng: ping status %d", resp.StatusCode)
 	}
 	return nil

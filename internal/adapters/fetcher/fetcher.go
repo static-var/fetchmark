@@ -76,7 +76,8 @@ const (
 	ReasonDecompressLarge = "decompressed_too_large"
 	ReasonEgress          = "egress_blocked"
 
-	maxHostGates = 1024
+	maxHostGates    = 1024
+	maxProxyClients = 32
 )
 
 // Fetcher is the concurrency-bounded HTTP worker pool. Safe for
@@ -91,6 +92,7 @@ type Fetcher struct {
 
 	clientMu sync.Mutex
 	clients  map[string]*http.Client // keyed by proxy URL, "" = default
+	proxies  []string
 
 	globalSem chan struct{}
 
@@ -286,11 +288,12 @@ func (f *Fetcher) doWithRetry(ctx context.Context, client *http.Client, rawURL, 
 		if err == nil && reason == "" && status >= 200 && status < 300 {
 			return body, status, ctype, "", nil
 		}
-		if reason != "" {
+		retryableStatus := isRetryableStatus(status)
+		if reason != "" && !retryableStatus {
 			return nil, status, ctype, reason, nil
 		}
 		// Only retry on transient conditions (5xx, 429, network).
-		if err == nil && !(status == 429 || status >= 500) {
+		if err == nil && !retryableStatus {
 			return body, status, ctype, "", nil
 		}
 		lastErr = err
@@ -304,6 +307,10 @@ func (f *Fetcher) doWithRetry(ctx context.Context, client *http.Client, rawURL, 
 		lastErr = fmt.Errorf("upstream returned %d after %d retries", lastStatus, retries)
 	}
 	return nil, lastStatus, lastCtype, "", lastErr
+}
+
+func isRetryableStatus(status int) bool {
+	return status == http.StatusTooManyRequests || status >= 500
 }
 
 func (f *Fetcher) doOnce(ctx context.Context, client *http.Client, rawURL, ua string) ([]byte, int, string, string, error) {
@@ -484,7 +491,7 @@ func (f *Fetcher) clientFor(proxyURL string) (*http.Client, error) {
 	if c, ok := f.clients[proxyURL]; ok {
 		return c, nil
 	}
-	client := f.policy.HTTPClient(f.budgets.FetchTimeout)
+	client := f.policy.HTTPClient(0)
 	if proxyURL != "" {
 		pu, err := url.Parse(proxyURL)
 		if err != nil {
@@ -499,6 +506,19 @@ func (f *Fetcher) clientFor(proxyURL string) (*http.Client, error) {
 		tr.Proxy = http.ProxyURL(pu)
 		client.Transport = tr
 	}
+	if proxyURL != "" {
+		f.rememberProxyClient(proxyURL)
+	}
 	f.clients[proxyURL] = client
 	return client, nil
+}
+
+func (f *Fetcher) rememberProxyClient(proxyURL string) {
+	if len(f.proxies) >= maxProxyClients {
+		evict := f.proxies[0]
+		copy(f.proxies, f.proxies[1:])
+		f.proxies = f.proxies[:len(f.proxies)-1]
+		delete(f.clients, evict)
+	}
+	f.proxies = append(f.proxies, proxyURL)
 }

@@ -26,6 +26,7 @@ type Deps struct {
 	Log      *slog.Logger
 	Config   config.Config
 	Pipeline PipelineRunner
+	Version  string
 	// Redis is optional; when set it backs cross-instance rate limiting.
 	Redis *redis.Client
 	// ReadyCheck reports whether hard dependencies (Redis, SearXNG) are
@@ -82,11 +83,19 @@ func NewRouter(d Deps) http.Handler {
 		})
 	}
 
+	version := d.Version
+	if version == "" {
+		version = "dev"
+	}
+	redisMode := redactRedis(d.Config.RedisURL)
+	if d.Redis == nil {
+		redisMode = "in-memory fallback"
+	}
 	dashboard.Mount(r, d.Config.DashboardUser, d.Config.DashboardPassword, dashboard.Deps{
 		Gatherer:    prometheus.DefaultGatherer,
 		SearxngURL:  d.Config.SearxngURL,
-		RedisURL:    redactRedis(d.Config.RedisURL),
-		Version:     "0.1",
+		RedisURL:    redisMode,
+		Version:     version,
 		Summarizers: summarizerDashboardView(d.Summarizers),
 	})
 

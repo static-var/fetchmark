@@ -63,6 +63,63 @@ func TestMultiClient_FailsOverToHealthyInstance(t *testing.T) {
 	}
 }
 
+func TestMultiClient_DoesNotCooldownNonRetryableSearchStatus(t *testing.T) {
+	var badHits int64
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&badHits, 1)
+		http.Error(w, "bad query", http.StatusBadRequest)
+	}))
+	t.Cleanup(bad.Close)
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(fixture))
+	}))
+	t.Cleanup(good.Close)
+
+	mc, err := NewMultiWithCooldown([]string{bad.URL, good.URL}, bad.Client(), time.Minute)
+	if err != nil {
+		t.Fatalf("NewMultiWithCooldown: %v", err)
+	}
+
+	hits, err := mc.Search(context.Background(), search.Query{Q: "golang"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) == 0 {
+		t.Fatal("want hits from fallback instance")
+	}
+	if atomic.LoadInt64(&badHits) != 1 {
+		t.Fatalf("bad instance hits = %d, want 1", badHits)
+	}
+	if !mc.cooldown[0].IsZero() {
+		t.Fatalf("4xx search status set cooldown until %s", mc.cooldown[0])
+	}
+}
+
+func TestMultiClient_CooldownsRetryableSearchStatus(t *testing.T) {
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusBadGateway)
+	}))
+	t.Cleanup(bad.Close)
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(fixture))
+	}))
+	t.Cleanup(good.Close)
+
+	mc, err := NewMultiWithCooldown([]string{bad.URL, good.URL}, bad.Client(), time.Minute)
+	if err != nil {
+		t.Fatalf("NewMultiWithCooldown: %v", err)
+	}
+
+	if _, err := mc.Search(context.Background(), search.Query{Q: "golang"}); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if !mc.cooldown[0].After(time.Now()) {
+		t.Fatalf("5xx search status did not set a future cooldown: %s", mc.cooldown[0])
+	}
+}
+
 func TestMultiClient_RoundRobinsBetweenHealthy(t *testing.T) {
 	var a, b int64
 	srvA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

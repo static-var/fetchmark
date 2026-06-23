@@ -100,3 +100,21 @@ func TestAttachQueryChunksPhraseBoostRequiresTokenBoundaries(t *testing.T) {
 		t.Fatalf("phrase boost should require exact token boundaries: %+v", results[0].Chunks)
 	}
 }
+
+func TestSplitChunksDoesNotBreakUTF8(t *testing.T) {
+	text := strings.Repeat("界", maxChunkChars+10)
+
+	chunks := splitChunks(text)
+
+	if len(chunks) < 2 {
+		t.Fatalf("chunks = %+v, want split text", chunks)
+	}
+	for _, chunk := range chunks {
+		if strings.ContainsRune(chunk, '\uFFFD') {
+			t.Fatalf("chunk contains replacement rune after byte split: %q", chunk)
+		}
+	}
+	if strings.Join(chunks, "") != text {
+		t.Fatalf("chunks did not preserve original text")
+	}
+}

@@ -17,6 +17,18 @@ jobs:
       - run: make fmt-check
       - run: go mod tidy
       - run: git diff --exit-code go.mod go.sum
+      - name: Validate OpenAPI
+        run: go run github.com/getkin/kin-openapi/cmd/validate@v0.140.0 docs/openapi.yaml
+      - name: Validate compose configs
+        env:
+          FM_API_KEYS: ci-api-key
+          FM_ADMIN_API_KEYS: ""
+          FM_SEARXNG_URL: https://searxng.example.invalid
+        run: |
+          docker compose -f deploy/docker-compose.yml config --quiet
+          FM_RENDERER_TOKEN=ci-render-token docker compose -f deploy/docker-compose.yml --profile render config --quiet
+          docker compose -f deploy/docker-compose.external.yml config --quiet
+          FM_RENDERER_TOKEN=ci-render-token docker compose -f deploy/docker-compose.external.yml --profile render config --quiet
       - run: go vet ./...
       - run: go test -race -coverprofile=coverage.out -count=1 ./...
       - run: go build ./cmd/fetchmark
