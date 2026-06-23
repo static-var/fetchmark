@@ -47,11 +47,14 @@ type summarizeResponse struct {
 }
 
 type summarizeSourceMeta struct {
-	Title     string `json:"title,omitempty"`
-	Author    string `json:"author,omitempty"`
-	SiteName  string `json:"site_name,omitempty"`
-	FromCache bool   `json:"from_cache,omitempty"`
-	WordCount int    `json:"word_count,omitempty"`
+	Title         string `json:"title,omitempty"`
+	Author        string `json:"author,omitempty"`
+	SiteName      string `json:"site_name,omitempty"`
+	FromCache     bool   `json:"from_cache,omitempty"`
+	WordCount     int    `json:"word_count,omitempty"`
+	Truncated     bool   `json:"truncated,omitempty"`
+	OriginalChars int    `json:"original_chars,omitempty"`
+	IncludedChars int    `json:"included_chars,omitempty"`
 }
 
 const defaultSummarizeSystem = `You are a concise summarization assistant.
@@ -118,9 +121,9 @@ func summarizeHandler(d Deps) http.HandlerFunc {
 		//    explicitly delimited and the model is instructed to treat
 		//    it as untrusted per the system prompt above.
 		body := summarizeBody(result)
-		if len(body) > summarizeMaxBodyChars {
-			body = body[:summarizeMaxBodyChars]
-		}
+		originalChars := runeCount(body)
+		body, truncated := truncateRunes(body, summarizeMaxBodyChars)
+		includedChars := runeCount(body)
 		body = sanitizeForPageBlock(body)
 		userPrompt := buildSummarizePrompt(req, body)
 
@@ -178,11 +181,14 @@ func summarizeHandler(d Deps) http.HandlerFunc {
 			Title:    titleOf(result),
 			Usage:    pr.Usage,
 			Source: summarizeSourceMeta{
-				Title:     titleOf(result),
-				Author:    authorOf(result),
-				SiteName:  siteOf(result),
-				FromCache: result.FromCache,
-				WordCount: wordCount(body),
+				Title:         titleOf(result),
+				Author:        authorOf(result),
+				SiteName:      siteOf(result),
+				FromCache:     result.FromCache,
+				WordCount:     wordCount(body),
+				Truncated:     truncated,
+				OriginalChars: originalChars,
+				IncludedChars: includedChars,
 			},
 		}
 		writeJSON(w, http.StatusOK, out)
@@ -192,6 +198,11 @@ func summarizeHandler(d Deps) http.HandlerFunc {
 const summarizeMaxBodyChars = 60_000 // ~12-15k tokens for most tokenizers
 
 func validateSummarizeOverrides(req summarizeRequest, cfg config.Config, admin bool) error {
+	switch strings.ToLower(strings.TrimSpace(req.Format)) {
+	case "", "markdown", "plain", "bullets":
+	default:
+		return errors.New("format must be one of markdown, plain, or bullets")
+	}
 	if strings.TrimSpace(req.Model) != "" && !admin && !cfg.SummarizeAllowModelOverride {
 		return errors.New("model override not allowed")
 	}
@@ -300,14 +311,19 @@ func summarizeBody(r model.SearchResult) string {
 }
 
 func buildSummarizePrompt(req summarizeRequest, body string) string {
-	format := strings.TrimSpace(req.Format)
+	format := strings.ToLower(strings.TrimSpace(req.Format))
 	if format == "" {
 		format = "markdown"
 	}
 	var b strings.Builder
-	b.WriteString("Summarize the page below as ")
-	b.WriteString(format)
-	b.WriteString(".")
+	switch format {
+	case "plain":
+		b.WriteString("Summarize the page below as concise plain text. Do not use Markdown formatting.")
+	case "bullets":
+		b.WriteString("Summarize the page below as concise Markdown bullets.")
+	default:
+		b.WriteString("Summarize the page below as concise Markdown.")
+	}
 	if ins := strings.TrimSpace(req.Instructions); ins != "" {
 		b.WriteString(" Extra instructions: ")
 		b.WriteString(ins)
@@ -403,6 +419,28 @@ func siteOf(r model.SearchResult) string {
 
 func wordCount(s string) int {
 	return len(strings.Fields(s))
+}
+
+func truncateRunes(s string, limit int) (string, bool) {
+	if limit <= 0 {
+		return "", s != ""
+	}
+	count := 0
+	for i := range s {
+		if count == limit {
+			return s[:i], true
+		}
+		count++
+	}
+	return s, false
+}
+
+func runeCount(s string) int {
+	n := 0
+	for range s {
+		n++
+	}
+	return n
 }
 
 // Compile-time sanity check so fmt remains imported even if the handler

@@ -7,7 +7,7 @@ pipeline, and a BM25 re-ranker into one small Go binary. Point it at a query,
 get back ranked results with clean Markdown, structured JSON, and cleaned
 HTML — ready for RAG, LLM context, or downstream processing.
 
-[![Go](https://img.shields.io/badge/go-1.22-00ADD8)](go.mod)
+[![Go](https://img.shields.io/badge/go-1.26.3-00ADD8)](go.mod)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Docker](https://img.shields.io/badge/docker-ready-2496ED)](deploy/docker-compose.yml)
 
@@ -19,12 +19,12 @@ HTML — ready for RAG, LLM context, or downstream processing.
   risk. Run it on your laptop, in a homelab, or in your VPC.
 - **Small and boring.** Single Go binary. Redis + SearXNG are the only
   runtime dependencies. Distroless image, ~25 MB.
-- **Batteries included.** SSRF-safe egress, per-key rate limits, on-disk
-  artifact cache with cross-instance stampede protection, Prometheus
-  metrics, a read-only ops dashboard, OpenAPI spec.
-- **LLM-friendly output.** Clean Markdown, structured metadata
-  (author, published_at, main_text), and a `js_required` flag so you
-  know when a page needs a headless renderer.
+- **Batteries included.** SSRF-safe egress, per-key rate limits, Redis-backed
+  artifact cache with in-memory fallback, cross-instance stampede protection,
+  Prometheus metrics, a read-only ops dashboard, OpenAPI spec.
+- **LLM-friendly output.** Clean Markdown, cleaned HTML, structured
+  extraction metadata (`content.main_text`, author, published_at), and a
+  `js_required` flag so you know when a page needs a headless renderer.
 
 ---
 
@@ -64,9 +64,9 @@ curl -s -X POST localhost:8080/v1/parse \
   -d '{"urls":["https://example.com"],"query":"example"}' | jq
 ```
 
-A successful response contains `results[]` with `title`, `markdown`,
-`cleaned_html`, `main_text`, `author`, `published_at`, BM25 `score`, and a
-`from_cache` flag.
+A successful response contains `results[]` with `title`, top-level
+`markdown`/`html`, nested `content.main_text`/`content.cleaned_html`,
+`author`, `published_at`, BM25 `score`, and a `from_cache` flag.
 
 ---
 
@@ -78,7 +78,7 @@ A successful response contains `results[]` with `title`, `markdown`,
 | POST   | `/v1/parse`       | Fetch + extract arbitrary URLs; ranks if `query` set |
 | POST   | `/v1/summarize`   | Parse + LLM summary (OpenAI-/Anthropic-compatible)   |
 | GET    | `/healthz`        | Liveness probe                                       |
-| GET    | `/readyz`         | Deep-check: SearXNG + Redis reachable                |
+| GET    | `/readyz`         | Deep-check: SearXNG, plus Redis when in Redis mode   |
 | GET    | `/metrics`        | Prometheus exposition                                |
 | GET    | `/dashboard/`     | Read-only ops view (Basic Auth, opt-in)              |
 
@@ -147,7 +147,7 @@ admin access, set `FM_ADMIN_API_KEYS` explicitly to one or more generated keys.
 | Ops dashboard (HTMX, read-only)         |   ✅   |
 | Headless rendering (opt-in)             |   ✅   |
 | Proxy URL passthrough (admin)           |   ✅   |
-| LLM summarisation endpoint              |  🧪 (stub) |
+| LLM summarisation endpoint              |   ✅   |
 | SSE streaming                           |  ⏳    |
 
 ---
@@ -163,8 +163,8 @@ All config is environment-driven. Copy `.env.example` and edit.
 | `FM_SEARXNG_URL`             | `http://searxng:8080`    | Single SearXNG instance               |
 | `FM_SEARXNG_URLS`            | _(unset)_                | Comma-separated list for failover     |
 | `FM_SEARXNG_COOLDOWN`        | `30s`                    | Skip window after an instance fails   |
-| `FM_REDIS_URL`               | `redis://redis:6379/0`   | Cache + rate-limit state              |
-| `FM_RATE_PER_SEC` / `_BURST` | `5` / `20`               | Default per-key token bucket          |
+| `FM_REDIS_URL`               | `redis://redis:6379/0`   | Redis cache/rate-limit state; falls back to in-memory when unreachable |
+| `FM_RATE_LIMIT_PER_SEC` / `_BURST` | `5` / `20`         | Default per-key token bucket          |
 | `FM_RENDERER_URL`            | _(unset)_                | Enable headless render path           |
 | `FM_RENDERER_AUTO`           | `false`                  | Auto-upgrade js_required pages        |
 | `FM_DASHBOARD_USER` / `_PASSWORD` | _(unset)_           | Enable `/dashboard/` when both set    |
@@ -249,10 +249,13 @@ for patterns (stub adapters, table-driven cases).
 - **Metrics.** Prometheus exposition at `/metrics`. Key series:
   `fetchmark_fetch_outcome_total`, `fetchmark_extract_outcome_total`,
   `fetchmark_cache_events_total`, `fetchmark_searxng_instance_up`,
-  `fetchmark_renderer_outcome_total`, HTTP latency histograms.
+  `fetchmark_renderer_outcome_total`, `fetchmark_summarize_total`,
+  `fetchmark_summarize_duration_seconds`,
+  `fetchmark_summarize_tokens_total`, HTTP latency histograms.
 - **Dashboard.** Set `FM_DASHBOARD_USER` + `FM_DASHBOARD_PASSWORD` to enable
-  `/dashboard/`. Shows recent requests, cache hit-rate, SearXNG instance
-  health, and per-engine outcomes. Read-only; no mutating actions.
+  `/dashboard/`. Shows health, readiness, selected metrics, SearXNG health,
+  redacted runtime config, and summarize provider names. Read-only; no
+  mutating actions.
 - **Logs.** Structured JSON via `log/slog`, with a request ID on every line.
 - **Graceful shutdown.** `SIGTERM` drains in-flight requests, flushes
   metrics, and closes Redis.

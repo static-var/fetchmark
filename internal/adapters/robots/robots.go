@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/temoto/robotstxt"
+	"golang.org/x/sync/singleflight"
 )
 
 // Checker resolves whether a given URL may be fetched by our user agent
@@ -30,6 +31,7 @@ type Checker struct {
 
 	mu    sync.Mutex
 	cache map[string]entry
+	sf    singleflight.Group
 }
 
 type entry struct {
@@ -82,13 +84,27 @@ func (c *Checker) get(ctx context.Context, origin string) (*robotstxt.RobotsData
 	}
 	c.mu.Unlock()
 
-	data, err := c.fetch(ctx, origin)
-	// Cache even failures (as nil data) so we don't hammer broken hosts.
-	now := time.Now()
-	c.sweepExpired(now)
-	c.mu.Lock()
-	c.cache[origin] = entry{data: data, fetched: now}
-	c.mu.Unlock()
+	v, err, _ := c.sf.Do(origin, func() (any, error) {
+		c.mu.Lock()
+		if e, ok := c.cache[origin]; ok && time.Since(e.fetched) < c.ttl {
+			c.mu.Unlock()
+			return e.data, nil
+		}
+		c.mu.Unlock()
+
+		data, err := c.fetch(ctx, origin)
+		// Cache even failures (as nil data) so we don't hammer broken hosts.
+		now := time.Now()
+		c.sweepExpired(now)
+		c.mu.Lock()
+		c.cache[origin] = entry{data: data, fetched: now}
+		c.mu.Unlock()
+		return data, err
+	})
+	if v == nil {
+		return nil, err
+	}
+	data, _ := v.(*robotstxt.RobotsData)
 	return data, err
 }
 
@@ -122,9 +138,12 @@ func (c *Checker) fetch(ctx context.Context, origin string) (*robotstxt.RobotsDa
 		return nil, nil // caller treats nil-data as allow
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, c.maxSize))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, c.maxSize+1))
 	if err != nil {
 		return nil, err
+	}
+	if int64(len(body)) > c.maxSize {
+		return nil, errors.New("robots: too large")
 	}
 	return robotstxt.FromBytes(body)
 }

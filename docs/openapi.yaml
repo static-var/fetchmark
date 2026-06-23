@@ -98,7 +98,7 @@ components:
         query:           { type: string, description: "Optional — enables ranking." }
         formats:         { type: array, items: { type: string, enum: [json, markdown, html] } }
         render:          { type: boolean, description: "When true, fetch pages with the configured rendering path for JavaScript-heavy content." }
-        timeout_ms:      { type: integer }
+        timeout_ms:      { type: integer, minimum: 1, maximum: 60000 }
         respect_robots:  { type: boolean, description: "Admin only when false." }
         proxy_url:       { type: string,  description: "Admin only." }
 
@@ -108,6 +108,9 @@ components:
         url:            { type: string, format: uri }
         title:          { type: string }
         snippet:        { type: string }
+        author:         { type: string }
+        markdown:       { type: string, description: "Top-level Markdown rendition. Present unless formats excludes markdown." }
+        html:           { type: string, description: "Top-level cleaned HTML rendition. Present unless formats excludes html." }
         engines:        { type: array, items: { type: string } }
         from_cache:     { type: boolean }
         fetch_ms:       { type: integer }
@@ -173,7 +176,7 @@ paths:
 
   /readyz:
     get:
-      summary: Readiness — verifies SearXNG and Redis reachability.
+      summary: Readiness — verifies SearXNG, plus Redis when Redis mode is active.
       security: []
       responses:
         "200": { description: ok }
@@ -291,6 +294,17 @@ paths:
                       completion_tokens: { type: integer }
                       reasoning_tokens:  { type: integer }
                       total_tokens:      { type: integer }
+                  source:
+                    type: object
+                    properties:
+                      title:          { type: string }
+                      author:         { type: string }
+                      site_name:      { type: string }
+                      from_cache:     { type: boolean }
+                      word_count:     { type: integer, description: "Word count of the included source body sent for summarization." }
+                      truncated:      { type: boolean, description: "True when Fetchmark truncated extracted content before sending it to the provider." }
+                      original_chars: { type: integer, description: "Rune count of the extracted source body before truncation." }
+                      included_chars: { type: integer, description: "Rune count included in the summarization prompt." }
         "400": { description: bad_request }
         "401": { description: missing_or_invalid_api_key }
         "422": { description: unsupported_or_empty_content }

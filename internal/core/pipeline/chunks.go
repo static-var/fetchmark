@@ -89,11 +89,8 @@ func splitChunks(text string) []string {
 		if paragraph == "" {
 			continue
 		}
-		for len(paragraph) > maxChunkChars {
-			cut := strings.LastIndexAny(paragraph[:maxChunkChars], ".!? ")
-			if cut < maxChunkChars/2 {
-				cut = maxChunkChars
-			}
+		for runeLen(paragraph) > maxChunkChars {
+			cut := chunkCutIndex(paragraph, maxChunkChars)
 			chunks = append(chunks, strings.TrimSpace(paragraph[:cut]))
 			paragraph = strings.TrimSpace(paragraph[cut:])
 		}
@@ -102,6 +99,33 @@ func splitChunks(text string) []string {
 		}
 	}
 	return chunks
+}
+
+func chunkCutIndex(s string, maxRunes int) int {
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return len(s)
+	}
+	cutRunes := maxRunes
+	for i := maxRunes - 1; i >= maxRunes/2; i-- {
+		switch runes[i] {
+		case '.', '!', '?', ' ':
+			cutRunes = i
+			i = -1
+		}
+	}
+	if cutRunes <= 0 {
+		cutRunes = maxRunes
+	}
+	return len(string(runes[:cutRunes]))
+}
+
+func runeLen(s string) int {
+	n := 0
+	for range s {
+		n++
+	}
+	return n
 }
 
 func scoreChunk(query chunkQuery, text, context string) float64 {

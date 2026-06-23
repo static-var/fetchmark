@@ -13,6 +13,31 @@ services:
       FM_REDIS_URL: "redis://redis:6379/0"
       FM_API_KEYS: "${FM_API_KEYS:?set FM_API_KEYS}"
       FM_ADMIN_API_KEYS: "${FM_ADMIN_API_KEYS:-}"
+      FM_DASHBOARD_USER: "${FM_DASHBOARD_USER:-}"
+      FM_DASHBOARD_PASSWORD: "${FM_DASHBOARD_PASSWORD:-}"
+      FM_RESPECT_ROBOTS: "true"
+      FM_LOG_LEVEL: "${FM_LOG_LEVEL:-info}"
+      FM_RENDERER_URL: "${FM_RENDERER_URL:-}"
+      FM_RENDERER_AUTO: "${FM_RENDERER_AUTO:-false}"
+      FM_RENDERER_TIMEOUT: "${FM_RENDERER_TIMEOUT:-20s}"
+      FM_RENDERER_TOKEN: "${FM_RENDERER_TOKEN:-}"
+      FM_SUMMARIZE_DEFAULT_PROVIDER: "${FM_SUMMARIZE_DEFAULT_PROVIDER:-}"
+      FM_SUMMARIZE_OPENAI_BASE_URL: "${FM_SUMMARIZE_OPENAI_BASE_URL:-}"
+      FM_SUMMARIZE_OPENAI_API_KEY: "${FM_SUMMARIZE_OPENAI_API_KEY:-}"
+      FM_SUMMARIZE_OPENAI_MODEL: "${FM_SUMMARIZE_OPENAI_MODEL:-}"
+      FM_SUMMARIZE_OPENAI_MAX_TOKENS: "${FM_SUMMARIZE_OPENAI_MAX_TOKENS:-}"
+      FM_SUMMARIZE_OPENAI_TIMEOUT: "${FM_SUMMARIZE_OPENAI_TIMEOUT:-}"
+      FM_SUMMARIZE_OPENAI_THINKING: "${FM_SUMMARIZE_OPENAI_THINKING:-}"
+      FM_SUMMARIZE_OPENAI_THINK_EFFORT: "${FM_SUMMARIZE_OPENAI_THINK_EFFORT:-}"
+      FM_SUMMARIZE_ANTHROPIC_BASE_URL: "${FM_SUMMARIZE_ANTHROPIC_BASE_URL:-}"
+      FM_SUMMARIZE_ANTHROPIC_API_KEY: "${FM_SUMMARIZE_ANTHROPIC_API_KEY:-}"
+      FM_SUMMARIZE_ANTHROPIC_MODEL: "${FM_SUMMARIZE_ANTHROPIC_MODEL:-}"
+      FM_SUMMARIZE_ANTHROPIC_MAX_TOKENS: "${FM_SUMMARIZE_ANTHROPIC_MAX_TOKENS:-}"
+      FM_SUMMARIZE_ANTHROPIC_TIMEOUT: "${FM_SUMMARIZE_ANTHROPIC_TIMEOUT:-}"
+      FM_SUMMARIZE_ANTHROPIC_THINKING: "${FM_SUMMARIZE_ANTHROPIC_THINKING:-}"
+      FM_SUMMARIZE_ANTHROPIC_THINK_BUDGET: "${FM_SUMMARIZE_ANTHROPIC_THINK_BUDGET:-}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       redis:
         condition: service_healthy
@@ -28,3 +53,18 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  chromium:
+    image: ghcr.io/browserless/chromium:v2.24.3
+    profiles: ["render"]
+    restart: unless-stopped
+    environment:
+      CONCURRENT: "4"
+      TIMEOUT: "30000"
+      TOKEN: "${FM_RENDERER_TOKEN:-}"
+    command:
+      - /bin/sh
+      - -lc
+      - ': "$${TOKEN:?set FM_RENDERER_TOKEN when renderer is enabled}" && exec /usr/src/app/start.sh'
+    expose:
+      - "3000"

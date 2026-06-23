@@ -1,8 +1,8 @@
 # dashboard
 
-Static-asset dashboard mounted at `/dashboard`. Read-only health view
-over the same `/healthz`, `/readyz`, and `/metrics` endpoints the API
-already exposes.
+Static-asset dashboard mounted at `/dashboard`. Read-only ops view over
+the same `/healthz`, `/readyz`, and `/metrics` data the API already
+exposes, plus redacted runtime config and summarize provider names.
 
 ## Entry points
 
@@ -11,6 +11,7 @@ already exposes.
 
 ## Invariants
 
-- No privileged data on this surface. It hits the public health
-  endpoints, never admin-gated routes or Redis directly.
+- No privileged data on this surface. It uses public health/metrics data
+  and redacted config only; it never calls admin-gated routes or Redis
+  directly.
 - Assets are embedded at build time; do not read from disk at runtime.

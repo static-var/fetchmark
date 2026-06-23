@@ -1,13 +1,14 @@
 # cache
 
-Two-layer cache (Redis + in-process LRU) for raw artifacts, rendered
-artifacts, and per-format derived blobs. Also hosts the cross-instance
-stampede lock.
+Two-layer cache for raw artifacts, rendered artifacts, and per-format
+derived blobs. Redis is used when reachable; otherwise the process falls
+back to its in-memory map. Redis also hosts the cross-instance stampede
+lock, so fallback mode is local to one process.
 
 ## Entry points
 
 - `cache.go` — `New(redisClient, ttl)` → `*Cache` with `Get`, `Set`,
-  `WithLock(key, ttl, wait, fn)`.
+  `WithLock(key, opts, fn)`.
 - Key helpers: `CanonicalURL`, `ArtifactKey`, `RenderedArtifactKey`,
   `FormatKey`.
 - `ExtractorVersion` — bump to invalidate all keys on shape changes.
@@ -19,14 +20,15 @@ stampede lock.
   keys.
 - **Keys are versioned** with `ExtractorVersion`. Do not read
   unversioned legacy keys.
-- `WithLock` is a Redis SETNX lock with a bounded-wait poller. TTL
-  must cover the critical-section budget; `pipeline.lockTTL` sizes it
-  from the renderer timeout when render is on.
+- `WithLock` is a Redis SETNX lock with a bounded-wait poller when Redis
+  is active. In in-memory mode it runs `fn` directly; local
+  `singleflight` still coalesces same-process callers, but there is no
+  cross-instance lock.
 - `RenderedArtifactKey` is a distinct key from `ArtifactKey` so the
   rendered stampede lock (Q-d) doesn't collide with the plain-fetch
   one.
 
 ## Tests
 
-- `cache_test.go` — versioned keys, canonical-URL collapse, WithLock
-  serialisation, TTL expiry under miniredis.
+- `cache_test.go` — versioned keys, canonical-URL collapse, Redis
+  WithLock serialisation, no-Redis fallback, TTL expiry under miniredis.

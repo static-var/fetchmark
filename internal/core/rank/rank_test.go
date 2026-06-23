@@ -69,6 +69,15 @@ func TestRankerDoesNotTreatFreshnessSubstringsAsFreshnessQueries(t *testing.T) {
 	}
 }
 
+func TestRankerTreatsAnyTwentyXXYearAsFreshnessQuery(t *testing.T) {
+	social := model.SearchResult{URL: "https://x.com/birder/status/123", Title: "Bird species discovery 2027"}
+	article := model.SearchResult{URL: "https://news.example.org/birds/species-discovery-2027", Title: "Bird species discovery 2027"}
+
+	if qualityAdjustment("bird species discovery 2027", social) >= qualityAdjustment("bird species discovery 2027", article) {
+		t.Fatal("20xx year query should use freshness penalties consistently")
+	}
+}
+
 func TestRankerPenalizesHomepagesForFreshnessQueries(t *testing.T) {
 	results := []model.SearchResult{
 		{URL: "https://birds.example.org/", Title: "Recent bird species discovery", Snippet: "recent bird species discovery"},

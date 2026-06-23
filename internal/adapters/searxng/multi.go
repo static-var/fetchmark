@@ -103,12 +103,22 @@ func (m *MultiClient) Search(ctx context.Context, q search.Query) ([]search.Hit,
 			return hits, nil
 		}
 		lastErr = err
-		m.markDown(idx)
+		if isRetryableSearchError(err) {
+			m.markDown(idx)
+		}
 	}
 	if lastErr == nil {
 		lastErr = errors.New("searxng: no instances available")
 	}
 	return nil, lastErr
+}
+
+func isRetryableSearchError(err error) bool {
+	var statusErr *StatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.Retryable()
+	}
+	return true
 }
 
 // Ping passes if any instance answers. The readiness probe is meant to

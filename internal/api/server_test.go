@@ -70,6 +70,32 @@ func TestReadyz_Unready(t *testing.T) {
 	}
 }
 
+func TestDashboardUsesConfiguredVersion(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := config.Config{
+		DashboardUser:     "u",
+		DashboardPassword: "p",
+		RedisURL:          "redis://:secret@redis:6379/0",
+	}
+	r := NewRouter(Deps{Log: log, Config: cfg, Version: "test-version"})
+	req := httptest.NewRequest("GET", "/dashboard", nil)
+	req.SetBasicAuth("u", "p")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "version test-version") {
+		t.Fatalf("dashboard did not render configured version: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "in-memory fallback") {
+		t.Fatalf("dashboard did not show in-memory cache mode: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "secret") {
+		t.Fatalf("dashboard leaked redis secret while in fallback mode: %s", rec.Body.String())
+	}
+}
+
 func TestV1RequiresAPIKey(t *testing.T) {
 	r, _ := newTestRouter(nil)
 	req := httptest.NewRequest("POST", "/v1/search", strings.NewReader("{}"))
@@ -123,11 +149,39 @@ func TestSearch_InvalidSearchControlsReturn400(t *testing.T) {
 		{name: "unsupported chunks per source", body: `{"query":"birds","chunks_per_source":4}`},
 		{name: "malformed include domain", body: `{"query":"birds","include_domains":["%"]}`},
 		{name: "malformed exclude domain", body: `{"query":"birds","exclude_domains":["https://"]}`},
+		{name: "unsupported format", body: `{"query":"birds","formats":["markdown","pdf"]}`},
+		{name: "negative timeout", body: `{"query":"birds","timeout_ms":-1}`},
+		{name: "timeout over cap", body: `{"query":"birds","timeout_ms":60001}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r, _ := newTestRouter(nil)
 			req := httptest.NewRequest("POST", "/v1/search", strings.NewReader(tc.body))
+			req.Header.Set("X-API-Key", "k1")
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestParse_InvalidRequestValuesReturn400(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{name: "unsupported format", body: `{"urls":["https://x/y"],"formats":["pdf"]}`},
+		{name: "invalid url", body: `{"urls":["not-a-url"]}`},
+		{name: "mixed invalid url", body: `{"urls":["https://x/y","file:///etc/passwd"]}`},
+		{name: "negative timeout", body: `{"urls":["https://x/y"],"timeout_ms":-1}`},
+		{name: "timeout over cap", body: `{"urls":["https://x/y"],"timeout_ms":60001}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, _ := newTestRouter(nil)
+			req := httptest.NewRequest("POST", "/v1/parse", strings.NewReader(tc.body))
 			req.Header.Set("X-API-Key", "k1")
 			rec := httptest.NewRecorder()
 			r.ServeHTTP(rec, req)

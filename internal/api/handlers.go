@@ -48,6 +48,8 @@ type parseRequest struct {
 // errBadRequest is used by decodeJSON to signal client-side failures.
 var errBadRequest = errors.New("bad_request")
 
+const maxRequestTimeoutMS = 60_000
+
 func decodeJSON(r *http.Request, v any) error {
 	r.Body = http.MaxBytesReader(nil, r.Body, 1<<20)
 	dec := json.NewDecoder(r.Body)
@@ -177,6 +179,18 @@ func parseHandler(d Deps) http.HandlerFunc {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "urls required"})
 			return
 		}
+		if err := validateFormats(req.Formats); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := validateRequestTimeout(req.TimeoutMS); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := validateParseURLs(req.URLs); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 		if cap := d.Config.ResultsCap; cap > 0 && len(req.URLs) > cap {
 			writeJSON(w, http.StatusBadRequest, map[string]any{
 				"error":       "too_many_urls",
@@ -205,6 +219,12 @@ func parseHandler(d Deps) http.HandlerFunc {
 }
 
 func validateSearchControls(req searchRequest) error {
+	if err := validateFormats(req.Formats); err != nil {
+		return err
+	}
+	if err := validateRequestTimeout(req.TimeoutMS); err != nil {
+		return err
+	}
 	switch strings.ToLower(strings.TrimSpace(req.TimeRange)) {
 	case "", "day", "month", "year":
 	default:
@@ -226,6 +246,43 @@ func validateSearchControls(req searchRequest) error {
 	case "", "fast", "ultra-fast", "basic", "advanced":
 	default:
 		return errors.New("search_depth must be one of fast, ultra-fast, basic, advanced")
+	}
+	return nil
+}
+
+func validateRequestTimeout(timeoutMS int) error {
+	switch {
+	case timeoutMS < 0:
+		return errors.New("timeout_ms must be >= 0")
+	case timeoutMS > maxRequestTimeoutMS:
+		return errors.New("timeout_ms over cap")
+	default:
+		return nil
+	}
+}
+
+func validateFormats(formats []string) error {
+	for _, format := range formats {
+		switch strings.ToLower(strings.TrimSpace(format)) {
+		case "json", "markdown", "html":
+		default:
+			return errors.New("formats must contain only json, markdown, or html")
+		}
+	}
+	return nil
+}
+
+func validateParseURLs(urls []string) error {
+	for _, raw := range urls {
+		u, err := url.Parse(raw)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return errors.New("urls contains an invalid url")
+		}
+		switch strings.ToLower(u.Scheme) {
+		case "http", "https":
+		default:
+			return errors.New("urls contains an invalid url")
+		}
 	}
 	return nil
 }

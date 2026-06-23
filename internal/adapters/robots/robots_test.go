@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -42,6 +44,49 @@ func TestChecker_4xxAllowsAll(t *testing.T) {
 	ok, err := c.Allowed(context.Background(), "Fetchmark", srv.URL+"/anywhere")
 	if err != nil || !ok {
 		t.Fatalf("4xx should allow all, err=%v ok=%v", err, ok)
+	}
+}
+
+func TestChecker_CoalescesConcurrentColdFetchesPerOrigin(t *testing.T) {
+	var hits int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&hits, 1)
+		time.Sleep(50 * time.Millisecond)
+		_, _ = w.Write([]byte("User-agent: Fetchmark\nDisallow: /private\n"))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(srv.Client(), time.Hour, 0)
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ok, err := c.Allowed(context.Background(), "Fetchmark", srv.URL+"/public")
+			if err != nil || !ok {
+				t.Errorf("Allowed err=%v ok=%v", err, ok)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := atomic.LoadInt64(&hits); got != 1 {
+		t.Fatalf("robots fetches = %d, want 1", got)
+	}
+}
+
+func TestChecker_FetchReportsOversizedRobots(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("User-agent: Fetchmark\nDisallow: /private\n" + strings.Repeat("x", 64)))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(srv.Client(), time.Hour, 16)
+	data, err := c.fetch(context.Background(), srv.URL)
+	if err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("err = %v, want too-large error", err)
+	}
+	if data != nil {
+		t.Fatalf("oversized robots data should not be parsed: %+v", data)
 	}
 }
 

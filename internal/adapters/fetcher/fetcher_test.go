@@ -102,6 +102,33 @@ func TestFetch_Retries5xxThenSuccess(t *testing.T) {
 	}
 }
 
+func TestFetch_RetriesRetryableStatusBeforeMIMERejection(t *testing.T) {
+	var count int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&count, 1) == 1 {
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("temporary outage"))
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte("<html>ok</html>"))
+	}))
+	t.Cleanup(srv.Close)
+
+	f := newFetcher(t, Budgets{Retries: 1, AllowedMIME: []string{"text/html"}})
+	res := f.Fetch(context.Background(), Request{URL: srv.URL})
+	if res.Err != nil || res.Unsupported != "" {
+		t.Fatalf("err=%v unsupported=%q status=%d", res.Err, res.Unsupported, res.Status)
+	}
+	if res.Status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.Status)
+	}
+	if got := atomic.LoadInt32(&count); got != 2 {
+		t.Fatalf("attempts = %d, want 2", got)
+	}
+}
+
 func TestFetch_NonRetriedClientError(t *testing.T) {
 	var count int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -143,6 +170,24 @@ func TestFetch_RetriesExhausted_TerminalError(t *testing.T) {
 	}
 	if !strings.Contains(res.Err.Error(), "after 2 retries") {
 		t.Fatalf("error = %q; want mention of 'after 2 retries'", res.Err)
+	}
+}
+
+func TestFetch_PerRequestTimeoutCanExceedDefaultClientTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(30 * time.Millisecond)
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte("<html>slow ok</html>"))
+	}))
+	t.Cleanup(srv.Close)
+
+	f := newFetcher(t, Budgets{FetchTimeout: 5 * time.Millisecond})
+	res := f.Fetch(context.Background(), Request{URL: srv.URL, Timeout: 100 * time.Millisecond})
+	if res.Err != nil || res.Unsupported != "" {
+		t.Fatalf("per-request timeout should govern request: err=%v unsupported=%q", res.Err, res.Unsupported)
+	}
+	if res.Status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.Status)
 	}
 }
 
@@ -231,6 +276,18 @@ func TestClientFor_BadProxy(t *testing.T) {
 	_, err := f.clientFor(":::not a url")
 	if err == nil {
 		t.Fatal("expected parse error")
+	}
+}
+
+func TestClientFor_BoundsProxyClientCache(t *testing.T) {
+	f := newFetcher(t, Budgets{})
+	for i := 0; i < maxProxyClients*2; i++ {
+		if _, err := f.clientFor(fmt.Sprintf("http://127.0.0.1:1/?proxy=%d", i)); err != nil {
+			t.Fatalf("clientFor(%d): %v", i, err)
+		}
+	}
+	if got := len(f.clients); got > maxProxyClients+1 {
+		t.Fatalf("client cache size = %d, want <= %d", got, maxProxyClients+1)
 	}
 }
 
