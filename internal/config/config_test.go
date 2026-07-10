@@ -73,6 +73,24 @@ func TestLoad_InvalidSummarizeCaps(t *testing.T) {
 	}
 }
 
+func TestLoad_DisabledRendererDoesNotConsumeSourceBudget(t *testing.T) {
+	t.Setenv("FM_RENDERER_URL", "")
+	t.Setenv("FM_RENDERER_MAX_BODY", "1073741824")
+	if _, err := Load(); err != nil {
+		t.Fatalf("disabled renderer should not affect source budget validation: %v", err)
+	}
+}
+
+func TestLoad_SourceBudgetIncludesLargerPlainBodyLimit(t *testing.T) {
+	t.Setenv("FM_ARTIFACT_CONCURRENCY", "2")
+	t.Setenv("FM_MAX_BODY_BYTES", "32")
+	t.Setenv("FM_MAX_DECOMPRESSED_BYTES", "16")
+	t.Setenv("FM_MAX_REQUEST_SOURCE_BYTES", "63")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected source budget below 2 * max body bytes to fail")
+	}
+}
+
 func TestLoad_RendererRequiresEgressProxy(t *testing.T) {
 	t.Setenv("FM_RENDERER_URL", "http://browserless:3000/content")
 	t.Setenv("FM_RENDERER_EGRESS_PROXY_URL", "")

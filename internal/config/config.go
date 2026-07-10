@@ -153,7 +153,10 @@ func (c Config) validate() error {
 		return errors.New("request byte budgets must be > 0")
 	}
 	maxArtifactSource := c.MaxDecompressedBytes
-	if c.RendererMaxBody > maxArtifactSource {
+	if c.MaxBodyBytes > maxArtifactSource {
+		maxArtifactSource = c.MaxBodyBytes
+	}
+	if c.RendererURL != "" && c.RendererMaxBody > maxArtifactSource {
 		maxArtifactSource = c.RendererMaxBody
 	}
 	if int64(c.ArtifactConcurrency)*maxArtifactSource > c.MaxRequestSourceBytes {

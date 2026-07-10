@@ -157,6 +157,25 @@ func TestPipelineEnforcesAggregateSourceBudget(t *testing.T) {
 	}
 }
 
+func TestPipelineSourceClaimUsesLargerPlainBodyLimit(t *testing.T) {
+	u := "https://a.example/"
+	p := &Pipeline{
+		Fetcher: stubFetcher{resp: map[string]fetcher.Result{
+			u: {Status: 200, Body: []byte("123456"), BytesRead: 6},
+		}},
+		Extractor:                    stubExtractor{},
+		ArtifactConcurrency:          1,
+		MaxArtifactBodyBytes:         8,
+		MaxArtifactDecompressedBytes: 4,
+		MaxRequestSourceBytes:        8,
+		MaxRequestOutputBytes:        1024,
+	}
+	results := p.Parse(context.Background(), Options{URLs: []string{u}})
+	if len(results) != 1 || results[0].Unsupported == ReasonRequestByteBudget || results[0].Content == nil {
+		t.Fatalf("plain body within configured limit was rejected: %+v", results)
+	}
+}
+
 func TestPipelineChargesFetcherRetryBytesOnSuccess(t *testing.T) {
 	urls := []string{"https://a.example/", "https://b.example/"}
 	responses := map[string]fetcher.Result{}
@@ -537,6 +556,22 @@ func TestPipeline_ParseFormatsMarkdownOnlyClearsDuplicateAndUnrequestedFields(t 
 	}
 	if out[0].Content.MainText != "" {
 		t.Fatalf("structured main text was not cleared: %+v", out[0].Content)
+	}
+}
+
+func TestPipeline_OutputBudgetCountsOnlyRequestedFormats(t *testing.T) {
+	u := "https://a.example/x"
+	p := &Pipeline{
+		Fetcher: stubFetcher{resp: map[string]fetcher.Result{
+			u: {Status: 200, Body: []byte("1234")},
+		}},
+		Extractor:             formattedExtractor{},
+		MaxRequestSourceBytes: 1024,
+		MaxRequestOutputBytes: 8,
+	}
+	out := p.Parse(context.Background(), Options{URLs: []string{u}, Formats: []string{"markdown"}})
+	if len(out) != 1 || out[0].Unsupported == ReasonRequestByteBudget || out[0].Markdown == "" {
+		t.Fatalf("requested markdown that fits budget was rejected: %+v", out)
 	}
 }
 

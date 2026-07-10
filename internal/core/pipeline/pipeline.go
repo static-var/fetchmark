@@ -219,16 +219,36 @@ func minPositive(a, b int64) int64 {
 	return b
 }
 
-func contentBytes(c *model.Content) int64 {
+func contentBytes(c *model.Content, formats []string) int64 {
 	if c == nil {
 		return 0
 	}
-	return int64(len(c.MainText) + len(c.Markdown) + len(c.CleanedHTML))
+	requested := map[string]bool{}
+	for _, format := range formats {
+		switch strings.ToLower(strings.TrimSpace(format)) {
+		case "markdown", "html", "json":
+			requested[strings.ToLower(strings.TrimSpace(format))] = true
+		}
+	}
+	if len(requested) == 0 {
+		return int64(len(c.MainText) + len(c.Markdown) + len(c.CleanedHTML))
+	}
+	var size int
+	if requested["json"] {
+		size += len(c.MainText)
+	}
+	if requested["markdown"] {
+		size += len(c.Markdown)
+	}
+	if requested["html"] {
+		size += len(c.CleanedHTML)
+	}
+	return int64(size)
 }
 
-func reserveContent(ctx context.Context, c *model.Content) bool {
+func reserveContent(ctx context.Context, c *model.Content, formats []string) bool {
 	budget := budgetFromContext(ctx)
-	return budget == nil || budget.addOutput(contentBytes(c))
+	return budget == nil || budget.addOutput(contentBytes(c, formats))
 }
 
 func (p *Pipeline) acquireArtifact(ctx context.Context) (func(), error) {
@@ -391,7 +411,7 @@ func (p *Pipeline) process(ctx context.Context, o Options, seed []model.SearchRe
 	// shared cache/singleflight work, so concurrent requests never share budget
 	// decisions and completion timing cannot change which results are retained.
 	for i := range results {
-		if results[i].Content != nil && !reserveContent(ctx, results[i].Content) {
+		if results[i].Content != nil && !reserveContent(ctx, results[i].Content, o.Formats) {
 			results[i].Content = nil
 			results[i].Markdown = ""
 			results[i].HTML = ""
@@ -519,6 +539,9 @@ func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.Sear
 		}
 
 		sourceLimit := p.MaxArtifactDecompressedBytes
+		if p.MaxArtifactBodyBytes > sourceLimit {
+			sourceLimit = p.MaxArtifactBodyBytes
+		}
 		if sourceLimit <= 0 {
 			sourceLimit = p.MaxRequestSourceBytes
 		}
