@@ -7,7 +7,7 @@ pipeline, and a BM25 re-ranker into one small Go binary. Point it at a query,
 get back ranked results with clean Markdown, structured JSON, and cleaned
 HTML — ready for RAG, LLM context, or downstream processing.
 
-[![Go](https://img.shields.io/badge/go-1.26.4-00ADD8)](go.mod)
+[![Go](https://img.shields.io/badge/go-1.26.5-00ADD8)](go.mod)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Docker](https://img.shields.io/badge/docker-ready-2496ED)](deploy/docker-compose.yml)
 
