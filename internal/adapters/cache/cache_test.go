@@ -62,6 +62,58 @@ func TestMemoryCache_RoundTrip(t *testing.T) {
 	})
 }
 
+func TestMemoryCache_EvictsToEntryAndByteLimits(t *testing.T) {
+	c := NewWithMemoryLimits(nil, time.Minute, MemoryLimits{MaxEntries: 2, MaxBytes: 4, MaxValueBytes: 4})
+	defer c.Close()
+	ctx := context.Background()
+
+	if err := c.Set(ctx, "a", []byte("aa")); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Set(ctx, "b", []byte("bbb")); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Set(ctx, "c", []byte("cc")); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := c.Get(ctx, "a"); got != nil {
+		t.Fatalf("oldest entry was not evicted: %q", got)
+	}
+	if got, _ := c.Get(ctx, "b"); got != nil {
+		t.Fatalf("byte limit did not evict second-oldest entry: %q", got)
+	}
+	if got, _ := c.Get(ctx, "c"); string(got) != "cc" {
+		t.Fatalf("newest entry = %q", got)
+	}
+	entries, bytes := c.MemoryUsage()
+	if entries != 1 || bytes != 2 {
+		t.Fatalf("usage = (%d entries, %d bytes), want (1, 2)", entries, bytes)
+	}
+
+	if err := c.Set(ctx, "oversized", []byte("12345")); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := c.Get(ctx, "oversized"); got != nil {
+		t.Fatalf("oversized value was admitted: %q", got)
+	}
+}
+
+func TestMemoryCache_ReplacementAndExpiryUpdateByteAccounting(t *testing.T) {
+	c := NewWithMemoryLimits(nil, 20*time.Millisecond, MemoryLimits{MaxEntries: 10, MaxBytes: 10})
+	defer c.Close()
+	ctx := context.Background()
+	_ = c.Set(ctx, "k", []byte("1234"))
+	_ = c.Set(ctx, "k", []byte("12"))
+	if entries, bytes := c.MemoryUsage(); entries != 1 || bytes != 2 {
+		t.Fatalf("replacement usage = (%d, %d), want (1, 2)", entries, bytes)
+	}
+	time.Sleep(25 * time.Millisecond)
+	_, _ = c.Get(ctx, "k")
+	if entries, bytes := c.MemoryUsage(); entries != 0 || bytes != 0 {
+		t.Fatalf("expired usage = (%d, %d), want (0, 0)", entries, bytes)
+	}
+}
+
 func TestSingleflight_Suppression(t *testing.T) {
 	c := New(nil, time.Minute)
 	var calls int32

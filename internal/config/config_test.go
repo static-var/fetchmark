@@ -40,6 +40,15 @@ func TestLoad_Defaults(t *testing.T) {
 	if c.SummarizeAllowThinkingOverride {
 		t.Error("SummarizeAllowThinkingOverride should default to false")
 	}
+	if c.ArtifactConcurrency != 3 {
+		t.Errorf("ArtifactConcurrency default = %d", c.ArtifactConcurrency)
+	}
+	if c.MaxRequestSourceBytes != 64<<20 || c.MaxRequestOutputBytes != 128<<20 {
+		t.Errorf("request byte budgets = (%d, %d)", c.MaxRequestSourceBytes, c.MaxRequestOutputBytes)
+	}
+	if c.MemoryCacheEntries != 512 || c.MemoryCacheBytes != 128<<20 || c.CacheMaxValueBytes != 8<<20 {
+		t.Errorf("memory cache limits = (%d, %d, %d)", c.MemoryCacheEntries, c.MemoryCacheBytes, c.CacheMaxValueBytes)
+	}
 }
 
 func TestLoad_InvalidSummarizeCaps(t *testing.T) {
@@ -59,6 +68,53 @@ func TestLoad_InvalidSummarizeCaps(t *testing.T) {
 			_, err := Load()
 			if err == nil || err.Error() != tc.want {
 				t.Fatalf("Load error = %v want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoad_DisabledRendererDoesNotConsumeSourceBudget(t *testing.T) {
+	t.Setenv("FM_RENDERER_URL", "")
+	t.Setenv("FM_RENDERER_MAX_BODY", "1073741824")
+	if _, err := Load(); err != nil {
+		t.Fatalf("disabled renderer should not affect source budget validation: %v", err)
+	}
+}
+
+func TestLoad_SourceBudgetIncludesLargerPlainBodyLimit(t *testing.T) {
+	t.Setenv("FM_ARTIFACT_CONCURRENCY", "2")
+	t.Setenv("FM_MAX_BODY_BYTES", "32")
+	t.Setenv("FM_MAX_DECOMPRESSED_BYTES", "16")
+	t.Setenv("FM_MAX_REQUEST_SOURCE_BYTES", "63")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected source budget below 2 * max body bytes to fail")
+	}
+}
+
+func TestLoad_RendererRequiresEgressProxy(t *testing.T) {
+	t.Setenv("FM_RENDERER_URL", "http://browserless:3000/content")
+	t.Setenv("FM_RENDERER_EGRESS_PROXY_URL", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected renderer without enforced egress proxy to fail")
+	}
+}
+
+func TestLoad_InvalidMemoryLimits(t *testing.T) {
+	cases := []struct {
+		env, value string
+	}{
+		{"FM_ARTIFACT_CONCURRENCY", "0"},
+		{"FM_MAX_REQUEST_SOURCE_BYTES", "0"},
+		{"FM_MAX_REQUEST_OUTPUT_BYTES", "0"},
+		{"FM_MEMORY_CACHE_ENTRIES", "0"},
+		{"FM_MEMORY_CACHE_BYTES", "0"},
+		{"FM_CACHE_MAX_VALUE_BYTES", "0"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.env, func(t *testing.T) {
+			t.Setenv(tc.env, tc.value)
+			if _, err := Load(); err == nil {
+				t.Fatalf("expected %s=%s to fail validation", tc.env, tc.value)
 			}
 		})
 	}

@@ -52,8 +52,11 @@ type Cache struct {
 	rdb *redis.Client
 	ttl time.Duration
 
-	mu  sync.RWMutex
-	mem map[string]memEntry
+	mu           sync.RWMutex
+	mem          map[string]memEntry
+	memoryLimits MemoryLimits
+	memoryBytes  int64
+	nextSequence uint64
 
 	stop      chan struct{}
 	closeOnce sync.Once
@@ -61,18 +64,34 @@ type Cache struct {
 }
 
 type memEntry struct {
-	value   []byte
-	expires time.Time
+	value    []byte
+	expires  time.Time
+	sequence uint64
 }
 
-// New constructs a Cache. If rdb is nil, an in-memory fallback is used.
+// MemoryLimits bound the in-process fallback cache. Zero values disable the
+// corresponding limit. MaxValueBytes applies before either memory or Redis
+// admission so one pathological artifact cannot dominate the cache.
+type MemoryLimits struct {
+	MaxEntries    int
+	MaxBytes      int64
+	MaxValueBytes int64
+}
+
+// New constructs a Cache without capacity limits. Production callers should
+// use NewWithMemoryLimits so Redis fallback cannot grow without bound.
 // The in-memory map is periodically swept of expired entries so that
 // long-running processes without Redis do not leak memory.
 func New(rdb *redis.Client, ttl time.Duration) *Cache {
+	return NewWithMemoryLimits(rdb, ttl, MemoryLimits{})
+}
+
+// NewWithMemoryLimits constructs a Cache with bounded in-memory fallback.
+func NewWithMemoryLimits(rdb *redis.Client, ttl time.Duration, limits MemoryLimits) *Cache {
 	if ttl <= 0 {
 		ttl = time.Hour
 	}
-	c := &Cache{rdb: rdb, ttl: ttl, mem: map[string]memEntry{}}
+	c := &Cache{rdb: rdb, ttl: ttl, mem: map[string]memEntry{}, memoryLimits: limits}
 	if rdb == nil {
 		c.stop = make(chan struct{})
 		go c.sweeper()
@@ -116,8 +135,16 @@ func (c *Cache) sweepExpired() {
 	defer c.mu.Unlock()
 	for k, e := range c.mem {
 		if now.After(e.expires) {
-			delete(c.mem, k)
+			c.deleteMemoryEntry(k, e)
 		}
+	}
+}
+
+func (c *Cache) deleteMemoryEntry(key string, entry memEntry) {
+	delete(c.mem, key)
+	c.memoryBytes -= int64(len(entry.value))
+	if c.memoryBytes < 0 {
+		c.memoryBytes = 0
 	}
 }
 
@@ -227,7 +254,7 @@ func (c *Cache) Get(ctx context.Context, key string) ([]byte, error) {
 	if expired {
 		c.mu.Lock()
 		if cur, still := c.mem[key]; still && time.Now().After(cur.expires) {
-			delete(c.mem, key)
+			c.deleteMemoryEntry(key, cur)
 		}
 		c.mu.Unlock()
 		return nil, nil
@@ -235,15 +262,55 @@ func (c *Cache) Get(ctx context.Context, key string) ([]byte, error) {
 	return e.value, nil
 }
 
-// Set writes a value with the cache TTL.
+// Set writes a value with the cache TTL. Values over MaxValueBytes are not
+// admitted; skipping cache admission is not a request failure.
 func (c *Cache) Set(ctx context.Context, key string, val []byte) error {
+	if max := c.memoryLimits.MaxValueBytes; max > 0 && int64(len(val)) > max {
+		return nil
+	}
 	if c.rdb != nil {
 		return c.rdb.Set(ctx, key, val, c.ttl).Err()
 	}
+	value := append([]byte(nil), val...)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.mem[key] = memEntry{value: val, expires: time.Now().Add(c.ttl)}
+	if old, ok := c.mem[key]; ok {
+		c.deleteMemoryEntry(key, old)
+	}
+	c.nextSequence++
+	c.mem[key] = memEntry{value: value, expires: time.Now().Add(c.ttl), sequence: c.nextSequence}
+	c.memoryBytes += int64(len(value))
+	c.evictMemoryEntries()
 	return nil
+}
+
+func (c *Cache) evictMemoryEntries() {
+	for (c.memoryLimits.MaxEntries > 0 && len(c.mem) > c.memoryLimits.MaxEntries) ||
+		(c.memoryLimits.MaxBytes > 0 && c.memoryBytes > c.memoryLimits.MaxBytes) {
+		var oldestKey string
+		var oldest memEntry
+		first := true
+		for key, entry := range c.mem {
+			if first || entry.sequence < oldest.sequence {
+				oldestKey, oldest, first = key, entry, false
+			}
+		}
+		if first {
+			return
+		}
+		c.deleteMemoryEntry(oldestKey, oldest)
+	}
+}
+
+// MemoryUsage reports in-memory fallback occupancy. Redis-backed caches return
+// zero because Redis capacity is managed externally.
+func (c *Cache) MemoryUsage() (entries int, bytes int64) {
+	if c.rdb != nil {
+		return 0, 0
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return len(c.mem), c.memoryBytes
 }
 
 // Do memoises concurrent callers of the same key onto a single fn call.

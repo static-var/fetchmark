@@ -17,6 +17,7 @@ func TestIsPublicIP(t *testing.T) {
 		"8.8.8.8":              true,
 		"127.0.0.1":            false,
 		"0.0.0.0":              false,
+		"0.1.2.3":              false,
 		"10.0.0.1":             false,
 		"172.16.5.5":           false,
 		"192.168.0.1":          false,

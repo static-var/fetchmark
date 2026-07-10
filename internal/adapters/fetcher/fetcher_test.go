@@ -68,6 +68,19 @@ func TestFetch_MIMEBlocked(t *testing.T) {
 	}
 }
 
+func TestFetch_RequestBodyLimitOverridesConfiguredMaximum(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte("<html>" + strings.Repeat("x", 100) + "</html>"))
+	}))
+	t.Cleanup(srv.Close)
+	f := newFetcher(t, Budgets{MaxBodyBytes: 1000, MaxDecompressedBytes: 1000})
+	res := f.Fetch(context.Background(), Request{URL: srv.URL, MaxBodyBytes: 16, MaxDecompressedBytes: 16})
+	if res.Unsupported != ReasonTooLarge {
+		t.Fatalf("unsupported = %q, want %q", res.Unsupported, ReasonTooLarge)
+	}
+}
+
 func TestFetch_BodyTooLarge(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
@@ -78,6 +91,25 @@ func TestFetch_BodyTooLarge(t *testing.T) {
 	res := f.Fetch(context.Background(), Request{URL: srv.URL})
 	if res.Unsupported != ReasonTooLarge {
 		t.Fatalf("unsup = %q err=%v", res.Unsupported, res.Err)
+	}
+}
+
+func TestFetch_RetryWorkStopsAtTotalByteBudget(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("12345678"))
+	}))
+	t.Cleanup(srv.Close)
+	f := newFetcher(t, Budgets{Retries: 5, MaxBodyBytes: 100, MaxDecompressedBytes: 100})
+	res := f.Fetch(context.Background(), Request{URL: srv.URL, MaxTotalBytes: 16})
+	if res.Unsupported != ReasonRequestBudget {
+		t.Fatalf("unsupported = %q, want %q (err=%v)", res.Unsupported, ReasonRequestBudget, res.Err)
+	}
+	if res.BytesRead != 16 || hits.Load() != 2 {
+		t.Fatalf("bytes=%d hits=%d, want 16 bytes and 2 attempts", res.BytesRead, hits.Load())
 	}
 }
 

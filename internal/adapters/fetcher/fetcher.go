@@ -45,11 +45,14 @@ type Budgets struct {
 // Request describes a single fetch. ProxyURL/UserAgent are admin-only in
 // the HTTP layer; at this layer we accept them unconditionally.
 type Request struct {
-	URL           string
-	ProxyURL      string
-	UserAgent     string
-	RespectRobots bool
-	Timeout       time.Duration
+	URL                  string
+	ProxyURL             string
+	UserAgent            string
+	RespectRobots        bool
+	Timeout              time.Duration
+	MaxBodyBytes         int64
+	MaxDecompressedBytes int64
+	MaxTotalBytes        int64
 }
 
 // Result is the fetcher's output. A non-empty Unsupported or non-nil Err
@@ -62,6 +65,7 @@ type Result struct {
 	Body        []byte
 	FromCache   bool
 	FetchMS     int64
+	BytesRead   int64
 	UAUsed      string
 	ProxyUsed   string
 	Unsupported string
@@ -75,6 +79,7 @@ const (
 	ReasonTooLarge        = "too_large"
 	ReasonDecompressLarge = "decompressed_too_large"
 	ReasonEgress          = "egress_blocked"
+	ReasonRequestBudget   = "request_byte_budget"
 
 	maxHostGates    = 1024
 	maxProxyClients = 32
@@ -229,7 +234,7 @@ func (f *Fetcher) Fetch(ctx context.Context, r Request) Result {
 	}
 	defer releaseHostGate()
 
-	ua := f.chooseUA(r.UserAgent)
+	ua := f.chooseUA(r.UserAgent, r.RespectRobots)
 	res.UAUsed = ua
 
 	if f.respectRbt && r.RespectRobots && f.robots != nil {
@@ -256,45 +261,50 @@ func (f *Fetcher) Fetch(ctx context.Context, r Request) Result {
 	fctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	body, status, ctype, reason, err := f.doWithRetry(fctx, client, r.URL, ua)
+	body, status, ctype, reason, bytesRead, err := f.doWithRetry(fctx, client, r.URL, ua, r.MaxBodyBytes, r.MaxDecompressedBytes, r.MaxTotalBytes)
 	res.Status = status
 	res.ContentType = ctype
 	res.Unsupported = reason
 	res.Err = err
 	res.Body = body
+	res.BytesRead = bytesRead
 	res.FetchMS = time.Since(start).Milliseconds()
 	return res
 }
 
-func (f *Fetcher) doWithRetry(ctx context.Context, client *http.Client, rawURL, ua string) ([]byte, int, string, string, error) {
+func (f *Fetcher) doWithRetry(ctx context.Context, client *http.Client, rawURL, ua string, maxBodyBytes, maxDecompressedBytes, maxTotalBytes int64) ([]byte, int, string, string, int64, error) {
 	var lastErr error
 	var lastStatus int
 	var lastCtype string
+	var bytesRead int64
 	retries := f.budgets.Retries
 	if retries < 0 {
 		retries = 0
 	}
 	for attempt := 0; attempt <= retries; attempt++ {
+		if maxTotalBytes > 0 && bytesRead >= maxTotalBytes {
+			return nil, lastStatus, lastCtype, ReasonRequestBudget, bytesRead, nil
+		}
 		if attempt > 0 {
 			backoff := time.Duration(1<<attempt)*200*time.Millisecond +
 				time.Duration(rand.Intn(100))*time.Millisecond
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
-				return nil, lastStatus, lastCtype, "", ctx.Err()
+				return nil, lastStatus, lastCtype, "", bytesRead, ctx.Err()
 			}
 		}
-		body, status, ctype, reason, err := f.doOnce(ctx, client, rawURL, ua)
+		body, status, ctype, reason, err := f.doOnce(ctx, client, rawURL, ua, maxBodyBytes, maxDecompressedBytes, maxTotalBytes, &bytesRead)
 		if err == nil && reason == "" && status >= 200 && status < 300 {
-			return body, status, ctype, "", nil
+			return body, status, ctype, "", bytesRead, nil
 		}
 		retryableStatus := isRetryableStatus(status)
 		if reason != "" && !retryableStatus {
-			return nil, status, ctype, reason, nil
+			return nil, status, ctype, reason, bytesRead, nil
 		}
 		// Only retry on transient conditions (5xx, 429, network).
 		if err == nil && !retryableStatus {
-			return body, status, ctype, "", nil
+			return body, status, ctype, "", bytesRead, nil
 		}
 		lastErr = err
 		lastStatus = status
@@ -306,14 +316,14 @@ func (f *Fetcher) doWithRetry(ctx context.Context, client *http.Client, rawURL, 
 		// than silently falling through to a non-2xx "success".
 		lastErr = fmt.Errorf("upstream returned %d after %d retries", lastStatus, retries)
 	}
-	return nil, lastStatus, lastCtype, "", lastErr
+	return nil, lastStatus, lastCtype, "", bytesRead, lastErr
 }
 
 func isRetryableStatus(status int) bool {
 	return status == http.StatusTooManyRequests || status >= 500
 }
 
-func (f *Fetcher) doOnce(ctx context.Context, client *http.Client, rawURL, ua string) ([]byte, int, string, string, error) {
+func (f *Fetcher) doOnce(ctx context.Context, client *http.Client, rawURL, ua string, requestMaxBody, requestMaxDecompressed, requestMaxTotal int64, bytesRead *int64) ([]byte, int, string, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, 0, "", "", err
@@ -328,13 +338,37 @@ func (f *Fetcher) doOnce(ctx context.Context, client *http.Client, rawURL, ua st
 	}
 	defer resp.Body.Close()
 
+	maxBody := f.budgets.MaxBodyBytes
+	if requestMaxBody > 0 && requestMaxBody < maxBody {
+		maxBody = requestMaxBody
+	}
+	maxDecompressed := f.budgets.MaxDecompressedBytes
+	if requestMaxDecompressed > 0 && requestMaxDecompressed < maxDecompressed {
+		maxDecompressed = requestMaxDecompressed
+	}
+	bodyLimitedByRequest := false
+	if requestMaxTotal > 0 {
+		remaining := requestMaxTotal - *bytesRead
+		if remaining <= 0 {
+			return nil, resp.StatusCode, resp.Header.Get("Content-Type"), ReasonRequestBudget, nil
+		}
+		if remaining < maxBody {
+			maxBody = remaining
+			bodyLimitedByRequest = true
+		}
+	}
 	// Enforce max compressed body size via LimitReader before decompression.
-	limited := io.LimitReader(resp.Body, f.budgets.MaxBodyBytes+1)
+	limited := io.LimitReader(resp.Body, maxBody+1)
 	raw, err := io.ReadAll(limited)
+	consumedRaw := minInt64(int64(len(raw)), maxBody)
+	*bytesRead += consumedRaw
 	if err != nil {
 		return nil, resp.StatusCode, resp.Header.Get("Content-Type"), "", err
 	}
-	if int64(len(raw)) > f.budgets.MaxBodyBytes {
+	if int64(len(raw)) > maxBody {
+		if bodyLimitedByRequest {
+			return nil, resp.StatusCode, resp.Header.Get("Content-Type"), ReasonRequestBudget, nil
+		}
 		return nil, resp.StatusCode, resp.Header.Get("Content-Type"), ReasonTooLarge, nil
 	}
 
@@ -346,11 +380,26 @@ func (f *Fetcher) doOnce(ctx context.Context, client *http.Client, rawURL, ua st
 			return nil, resp.StatusCode, resp.Header.Get("Content-Type"), "", gerr
 		}
 		defer gr.Close()
-		decompressed, derr := io.ReadAll(io.LimitReader(gr, f.budgets.MaxDecompressedBytes+1))
+		decompressedLimitedByRequest := false
+		if requestMaxTotal > 0 {
+			remaining := requestMaxTotal - *bytesRead
+			if remaining <= 0 {
+				return nil, resp.StatusCode, resp.Header.Get("Content-Type"), ReasonRequestBudget, nil
+			}
+			if remaining < maxDecompressed {
+				maxDecompressed = remaining
+				decompressedLimitedByRequest = true
+			}
+		}
+		decompressed, derr := io.ReadAll(io.LimitReader(gr, maxDecompressed+1))
+		*bytesRead += minInt64(int64(len(decompressed)), maxDecompressed)
 		if derr != nil {
 			return nil, resp.StatusCode, resp.Header.Get("Content-Type"), "", derr
 		}
-		if int64(len(decompressed)) > f.budgets.MaxDecompressedBytes {
+		if int64(len(decompressed)) > maxDecompressed {
+			if decompressedLimitedByRequest {
+				return nil, resp.StatusCode, resp.Header.Get("Content-Type"), ReasonRequestBudget, nil
+			}
 			return nil, resp.StatusCode, resp.Header.Get("Content-Type"), ReasonDecompressLarge, nil
 		}
 		body = decompressed
@@ -380,6 +429,13 @@ func (f *Fetcher) mimeAllowed(detected string) bool {
 	return false
 }
 
+func minInt64(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func pickCT(header, sniffed string) string {
 	if header != "" {
 		return header
@@ -387,14 +443,14 @@ func pickCT(header, sniffed string) string {
 	return sniffed
 }
 
-func (f *Fetcher) chooseUA(override string) string {
+func (f *Fetcher) chooseUA(override string, respectRobots bool) string {
 	if override != "" {
 		return override
 	}
 	// When robots is respected, use a stable declared UA so site owners
 	// can pattern-match reliably. The UA pool is only engaged when the
 	// operator has explicitly turned robots off.
-	if f.respectRbt || len(f.userAgents) == 0 {
+	if respectRobots || f.respectRbt || len(f.userAgents) == 0 {
 		return f.defaultUA
 	}
 	return f.userAgents[rand.Intn(len(f.userAgents))]

@@ -74,10 +74,9 @@ func (k *keyLimiter) allow(ctx context.Context, key string) bool {
 	if k.rdb != nil {
 		ok, err := k.redisAllow(ctx, key)
 		if err != nil {
-			// Redis errors should fail open, but still burn a local token so
-			// the local bucket reflects outage traffic if Redis recovers later.
-			k.local(key).Allow()
-			return true
+			// Preserve per-instance protection while shared state is degraded.
+			// The local bucket is already kept warm on successful Redis calls.
+			return k.local(key).Allow()
 		}
 		if !ok {
 			return false

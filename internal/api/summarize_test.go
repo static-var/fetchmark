@@ -19,16 +19,19 @@ import (
 // stubProvider implements summarizer.Provider for API-layer tests
 // without touching the real OpenAI/Anthropic SDKs.
 type stubProvider struct {
-	name string
-	kind summarizer.Kind
-	resp summarizer.Response
-	err  error
-	last summarizer.Request
+	name        string
+	kind        summarizer.Kind
+	resp        summarizer.Response
+	err         error
+	last        summarizer.Request
+	deadline    time.Time
+	hasDeadline bool
 }
 
 func (s *stubProvider) Kind() summarizer.Kind { return s.kind }
 func (s *stubProvider) Name() string          { return s.name }
-func (s *stubProvider) Summarize(_ context.Context, r summarizer.Request) (summarizer.Response, error) {
+func (s *stubProvider) Summarize(ctx context.Context, r summarizer.Request) (summarizer.Response, error) {
+	s.deadline, s.hasDeadline = ctx.Deadline()
 	s.last = r
 	if s.err != nil {
 		return summarizer.Response{}, s.err
@@ -120,6 +123,25 @@ func TestSummarize_HappyPath(t *testing.T) {
 	}
 	if !strings.Contains(stub.last.UserPrompt, "bullets") {
 		t.Fatalf("format not propagated: %q", stub.last.UserPrompt)
+	}
+}
+
+func TestSummarize_UsesOneDeadlineAcrossParseAndProvider(t *testing.T) {
+	stub := &stubProvider{name: "openai", kind: summarizer.KindOpenAI, resp: summarizer.Response{Summary: "ok"}}
+	r, pipe, _ := withSummarizer(t, stub)
+	req := httptest.NewRequest("POST", "/v1/summarize", strings.NewReader(`{"url":"https://example.com/a","timeout_ms":1000}`))
+	req.Header.Set("X-API-Key", "k1")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !pipe.parseHasDeadline || !stub.hasDeadline {
+		t.Fatalf("deadlines: parse=%v provider=%v", pipe.parseHasDeadline, stub.hasDeadline)
+	}
+	delta := pipe.parseDeadline.Sub(stub.deadline)
+	if delta < -time.Millisecond || delta > time.Millisecond {
+		t.Fatalf("parse/provider deadlines differ by %v", delta)
 	}
 }
 

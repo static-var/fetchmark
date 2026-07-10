@@ -26,9 +26,9 @@ jobs:
           FM_SEARXNG_URL: https://searxng.example.invalid
         run: |
           docker compose -f deploy/docker-compose.yml config --quiet
-          FM_RENDERER_TOKEN=ci-render-token docker compose -f deploy/docker-compose.yml --profile render config --quiet
+          FM_RENDERER_TOKEN=ci-render-token FM_RENDERER_URL=http://chromium:3000/content docker compose -f deploy/docker-compose.yml --profile render config --quiet
           docker compose -f deploy/docker-compose.external.yml config --quiet
-          FM_RENDERER_TOKEN=ci-render-token docker compose -f deploy/docker-compose.external.yml --profile render config --quiet
+          FM_RENDERER_TOKEN=ci-render-token FM_RENDERER_URL=http://chromium:3000/content docker compose -f deploy/docker-compose.external.yml --profile render config --quiet
       - run: go vet ./...
       - run: go test -race -coverprofile=coverage.out -count=1 ./...
       - run: go build ./cmd/fetchmark

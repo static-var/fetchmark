@@ -3,14 +3,15 @@
 // The checker fetches /robots.txt per host (via the caller-supplied
 // http.Client, which MUST already be subject to an egress policy), parses
 // it with github.com/temoto/robotstxt, and caches the result with a TTL.
-// A fetch failure is cached as "allow all" — we deliberately fail open
-// on unreachable robots.txt so a dead host doesn't also block its pages.
+// Fetch failures fail open for the current request but are not cached, so a
+// transient outage or cancellation cannot poison policy for the full TTL.
 // Conversely, a 4xx robots.txt is treated per the spec (4xx => allowed).
 package robots
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -69,14 +70,14 @@ func (c *Checker) Allowed(ctx context.Context, ua, rawURL string) (bool, error) 
 	if u.Scheme == "" || u.Host == "" {
 		return false, errors.New("robots: url missing scheme/host")
 	}
-	data, err := c.get(ctx, u.Scheme+"://"+u.Host)
+	data, err := c.get(ctx, u.Scheme+"://"+u.Host, ua)
 	if err != nil || data == nil {
 		return true, nil
 	}
 	return data.TestAgent(u.EscapedPath(), ua), nil
 }
 
-func (c *Checker) get(ctx context.Context, origin string) (*robotstxt.RobotsData, error) {
+func (c *Checker) get(ctx context.Context, origin, ua string) (*robotstxt.RobotsData, error) {
 	c.mu.Lock()
 	if e, ok := c.cache[origin]; ok && time.Since(e.fetched) < c.ttl {
 		c.mu.Unlock()
@@ -92,13 +93,16 @@ func (c *Checker) get(ctx context.Context, origin string) (*robotstxt.RobotsData
 		}
 		c.mu.Unlock()
 
-		data, err := c.fetch(ctx, origin)
-		// Cache even failures (as nil data) so we don't hammer broken hosts.
-		now := time.Now()
-		c.sweepExpired(now)
-		c.mu.Lock()
-		c.cache[origin] = entry{data: data, fetched: now}
-		c.mu.Unlock()
+		data, err := c.fetch(ctx, origin, ua)
+		// Do not turn transient failures or caller cancellation into a cached
+		// allow decision. singleflight still coalesces concurrent attempts.
+		if err == nil {
+			now := time.Now()
+			c.sweepExpired(now)
+			c.mu.Lock()
+			c.cache[origin] = entry{data: data, fetched: now}
+			c.mu.Unlock()
+		}
 		return data, err
 	})
 	if v == nil {
@@ -118,10 +122,13 @@ func (c *Checker) sweepExpired(now time.Time) {
 	}
 }
 
-func (c *Checker) fetch(ctx context.Context, origin string) (*robotstxt.RobotsData, error) {
+func (c *Checker) fetch(ctx context.Context, origin, ua string) (*robotstxt.RobotsData, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, origin+"/robots.txt", nil)
 	if err != nil {
 		return nil, err
+	}
+	if ua != "" {
+		req.Header.Set("User-Agent", ua)
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -135,7 +142,7 @@ func (c *Checker) fetch(ctx context.Context, origin string) (*robotstxt.RobotsDa
 	case resp.StatusCode >= 400 && resp.StatusCode < 500:
 		return robotstxt.FromString("")
 	case resp.StatusCode >= 500:
-		return nil, nil // caller treats nil-data as allow
+		return nil, fmt.Errorf("robots: upstream status %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, c.maxSize+1))
