@@ -96,6 +96,25 @@ func summarizeHandler(d Deps) http.HandlerFunc {
 		}
 		cfg, _ := d.Summarizers.Config(prov.Name())
 
+		// One deadline owns the complete parse + provider operation. Starting a
+		// second timeout after parsing can double work beyond the response life.
+		timeout := time.Duration(req.TimeoutMS) * time.Millisecond
+		if timeout <= 0 {
+			timeout = cfg.Timeout
+		}
+		if timeout <= 0 {
+			timeout = summarizer.DefaultTimeout()
+		}
+		effectiveMaxTokens := chooseInt(req.MaxTokens, cfg.MaxTokens)
+		effectiveThinking := mergeThinking(req.Thinking, cfg.Thinking)
+		if err := validateSummarizeEffectiveCaps(effectiveMaxTokens, timeout, effectiveThinking, d.Config); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		requestCtx, cancel := context.WithTimeout(r.Context(), timeout)
+		defer cancel()
+		r = r.WithContext(requestCtx)
+
 		// 1) Parse the URL through the existing pipeline. This uses the
 		//    production egress policy, robots enforcement, cache, and
 		//    extractor — none of which the LLM adapter should know about.
@@ -131,29 +150,12 @@ func summarizeHandler(d Deps) http.HandlerFunc {
 			Model:        chooseModel(req.Model, cfg.Model),
 			SystemPrompt: defaultSummarizeSystem,
 			UserPrompt:   userPrompt,
-			MaxTokens:    chooseInt(req.MaxTokens, cfg.MaxTokens),
+			MaxTokens:    effectiveMaxTokens,
 			Temperature:  chooseFloat(req.Temperature, cfg.Temperature),
-			Thinking:     mergeThinking(req.Thinking, cfg.Thinking),
+			Thinking:     effectiveThinking,
 		}
-
-		// 3) Apply a request-specific deadline so a hung upstream
-		//    cannot pin a handler goroutine indefinitely.
-		timeout := time.Duration(req.TimeoutMS) * time.Millisecond
-		if timeout <= 0 {
-			timeout = cfg.Timeout
-		}
-		if timeout <= 0 {
-			timeout = summarizer.DefaultTimeout()
-		}
-		if err := validateSummarizeEffectiveCaps(providerReq.MaxTokens, timeout, providerReq.Thinking, d.Config); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		ctx, cancel := context.WithTimeout(r.Context(), timeout)
-		defer cancel()
-
 		start := time.Now()
-		pr, err := prov.Summarize(ctx, providerReq)
+		pr, err := prov.Summarize(requestCtx, providerReq)
 		if err != nil {
 			status, outcome := summarizeErrToStatus(err)
 			obs.SummarizeOutcome.WithLabelValues(prov.Name(), outcome).Inc()

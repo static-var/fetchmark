@@ -160,11 +160,11 @@ func searchHandler(d Deps) http.HandlerFunc {
 		} else {
 			obs.SearchQueryTotal.WithLabelValues("ok").Inc()
 		}
-		writeJSON(w, http.StatusOK, map[string]any{
+		writeJSONBounded(w, http.StatusOK, map[string]any{
 			"query":   req.Query,
 			"count":   len(out),
 			"results": out,
-		})
+		}, d.Config.MaxRequestOutputBytes)
 	}
 }
 
@@ -211,10 +211,10 @@ func parseHandler(d Deps) http.HandlerFunc {
 			return
 		}
 		out := d.Pipeline.Parse(r.Context(), opts)
-		writeJSON(w, http.StatusOK, map[string]any{
+		writeJSONBounded(w, http.StatusOK, map[string]any{
 			"count":   len(out),
 			"results": out,
-		})
+		}, d.Config.MaxRequestOutputBytes)
 	}
 }
 

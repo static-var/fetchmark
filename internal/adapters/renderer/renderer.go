@@ -1,19 +1,20 @@
 // Package renderer exposes a small contract for turning a URL into
 // post-JavaScript HTML by delegating to a headless browser service.
-// The implementation intentionally stays thin: Fetchmark's own egress
-// policy has already validated the URL before we get here, so the
-// renderer's job is just to talk to the external service, enforce
-// budgets, and hand back bytes the extractor can chew on.
+// The implementation configures Browserless to send browser traffic through
+// Fetchmark's connection-time egress proxy. Initial URL validation alone is
+// not sufficient because redirects and DNS resolution happen in Chromium.
 package renderer
 
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -44,6 +45,12 @@ type Options struct {
 	// Token is an optional shared secret sent as
 	// Authorization: Bearer <token>.
 	Token string
+	// EgressProxyURL is injected into Browserless launch arguments. The proxy
+	// must validate every dial; this closes redirect and DNS-rebinding gaps.
+	EgressProxyURL string
+	// UserAgent is applied to Chromium so robots checks and retrieval use the
+	// same stable service identity.
+	UserAgent string
 }
 
 // HTTPRenderer is the default Renderer implementation. It POSTs to a
@@ -60,6 +67,13 @@ func NewHTTP(opts Options) (*HTTPRenderer, error) {
 	if opts.Endpoint == "" {
 		return nil, errors.New("renderer: endpoint is required")
 	}
+	if opts.EgressProxyURL != "" {
+		endpoint, err := endpointWithEgressProxy(opts.Endpoint, opts.EgressProxyURL, opts.UserAgent)
+		if err != nil {
+			return nil, err
+		}
+		opts.Endpoint = endpoint
+	}
 	if opts.Timeout <= 0 {
 		opts.Timeout = 20 * time.Second
 	}
@@ -73,6 +87,36 @@ func NewHTTP(opts Options) (*HTTPRenderer, error) {
 	return &HTTPRenderer{opts: opts, client: c}, nil
 }
 
+func endpointWithEgressProxy(endpoint, proxyURL, userAgent string) (string, error) {
+	proxy, err := url.Parse(proxyURL)
+	if err != nil || (proxy.Scheme != "http" && proxy.Scheme != "https") ||
+		proxy.Hostname() == "" || proxy.Port() == "" || proxy.User != nil ||
+		(proxy.Path != "" && proxy.Path != "/") || proxy.RawQuery != "" || proxy.Fragment != "" {
+		return "", errors.New("renderer: egress proxy must be an http(s) URL with host and port")
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("renderer: invalid endpoint: %w", err)
+	}
+	args := []string{
+		"--proxy-server=" + proxyURL,
+		"--proxy-bypass-list=<-loopback>",
+		"--disable-quic",
+		"--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+	}
+	if userAgent != "" {
+		args = append(args, "--user-agent="+userAgent)
+	}
+	launch, err := json.Marshal(map[string][]string{"args": args})
+	if err != nil {
+		return "", err
+	}
+	query := u.Query()
+	query.Set("launch", base64.StdEncoding.EncodeToString(launch))
+	u.RawQuery = query.Encode()
+	return u.String(), nil
+}
+
 type renderRequest struct {
 	URL string `json:"url"`
 }
@@ -82,6 +126,19 @@ type renderRequest struct {
 // otherwise the raw body is treated as HTML. Anything beyond MaxBody
 // is refused so a pathological renderer can't blow our memory budget.
 func (h *HTTPRenderer) Render(ctx context.Context, url string) ([]byte, error) {
+	return h.render(ctx, url, h.opts.MaxBody)
+}
+
+// RenderBounded applies a stricter per-call body limit for aggregate request
+// accounting while retaining the configured adapter ceiling.
+func (h *HTTPRenderer) RenderBounded(ctx context.Context, url string, maxBody int64) ([]byte, error) {
+	if maxBody <= 0 || maxBody > h.opts.MaxBody {
+		maxBody = h.opts.MaxBody
+	}
+	return h.render(ctx, url, maxBody)
+}
+
+func (h *HTTPRenderer) render(ctx context.Context, url string, maxBody int64) ([]byte, error) {
 	if url == "" {
 		return nil, errors.New("renderer: empty url")
 	}
@@ -114,13 +171,13 @@ func (h *HTTPRenderer) Render(ctx context.Context, url string) ([]byte, error) {
 		return nil, fmt.Errorf("renderer: status %d: %s", resp.StatusCode, bytes.TrimSpace(snippet))
 	}
 
-	lim := io.LimitReader(resp.Body, h.opts.MaxBody+1)
+	lim := io.LimitReader(resp.Body, maxBody+1)
 	raw, err := io.ReadAll(lim)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: read: %w", err)
 	}
-	if int64(len(raw)) > h.opts.MaxBody {
-		return nil, fmt.Errorf("renderer: response exceeds max body %d", h.opts.MaxBody)
+	if int64(len(raw)) > maxBody {
+		return nil, fmt.Errorf("renderer: response exceeds max body %d", maxBody)
 	}
 
 	// Unwrap common JSON shape {"html": "..."} if present. We gate this

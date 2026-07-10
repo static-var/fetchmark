@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -31,10 +32,14 @@ func (s stubSearcher) Search(_ context.Context, q search.Query) ([]search.Hit, e
 func (s stubSearcher) Ping(_ context.Context) error { return nil }
 
 type stubFetcher struct {
-	resp map[string]fetcher.Result
+	resp  map[string]fetcher.Result
+	calls *atomic.Int64
 }
 
 func (f stubFetcher) Fetch(_ context.Context, r fetcher.Request) fetcher.Result {
+	if f.calls != nil {
+		f.calls.Add(1)
+	}
 	if v, ok := f.resp[r.URL]; ok {
 		v.URL = r.URL
 		return v
@@ -84,6 +89,27 @@ func (e *countingExtractor) Extract(raw []byte, url string) (*model.Content, err
 	return &model.Content{URL: url, Title: "T", MainText: string(raw), Markdown: string(raw)}, nil
 }
 
+type blockingExtractor struct {
+	active atomic.Int64
+	peak   atomic.Int64
+	start  chan struct{}
+	block  <-chan struct{}
+}
+
+func (e *blockingExtractor) Extract(raw []byte, url string) (*model.Content, error) {
+	active := e.active.Add(1)
+	for {
+		peak := e.peak.Load()
+		if active <= peak || e.peak.CompareAndSwap(peak, active) {
+			break
+		}
+	}
+	e.start <- struct{}{}
+	<-e.block
+	e.active.Add(-1)
+	return &model.Content{URL: url, MainText: string(raw)}, nil
+}
+
 type sharedOutcomeCache struct {
 	out any
 }
@@ -95,6 +121,106 @@ func (c sharedOutcomeCache) Do(string, func() (any, error)) (any, error, bool) {
 }
 func (c sharedOutcomeCache) WithLock(ctx context.Context, _ string, _ cache.LockOptions, fn func(context.Context) ([]byte, error)) ([]byte, error) {
 	return fn(ctx)
+}
+
+func TestPipelineEnforcesAggregateSourceBudget(t *testing.T) {
+	urls := []string{"https://a.example/", "https://b.example/", "https://c.example/"}
+	responses := map[string]fetcher.Result{}
+	for _, u := range urls {
+		responses[u] = fetcher.Result{Status: 200, Body: []byte("1234")}
+	}
+	ex := &countingExtractor{}
+	var fetchCalls atomic.Int64
+	p := &Pipeline{
+		Fetcher:               stubFetcher{resp: responses, calls: &fetchCalls},
+		Extractor:             ex,
+		ArtifactConcurrency:   1,
+		MaxRequestSourceBytes: 8,
+		MaxRequestOutputBytes: 1024,
+	}
+
+	results := p.Parse(context.Background(), Options{URLs: urls})
+	if calls := ex.calls.Load(); calls != 2 {
+		t.Fatalf("extractor calls = %d, want 2", calls)
+	}
+	if calls := fetchCalls.Load(); calls != 2 {
+		t.Fatalf("fetch calls = %d, want 2", calls)
+	}
+	var rejected int
+	for _, result := range results {
+		if result.Unsupported == ReasonRequestByteBudget {
+			rejected++
+		}
+	}
+	if rejected != 1 {
+		t.Fatalf("budget-rejected results = %d, want 1: %+v", rejected, results)
+	}
+}
+
+func TestPipelineChargesFetcherRetryBytesOnSuccess(t *testing.T) {
+	urls := []string{"https://a.example/", "https://b.example/"}
+	responses := map[string]fetcher.Result{}
+	for _, u := range urls {
+		responses[u] = fetcher.Result{Status: 200, Body: []byte("1234"), BytesRead: 8}
+	}
+	ex := &countingExtractor{}
+	p := &Pipeline{
+		Fetcher:                      stubFetcher{resp: responses},
+		Extractor:                    ex,
+		ArtifactConcurrency:          1,
+		MaxArtifactDecompressedBytes: 8,
+		MaxRequestSourceBytes:        12,
+		MaxRequestOutputBytes:        1024,
+	}
+	results := p.Parse(context.Background(), Options{URLs: urls})
+	if calls := ex.calls.Load(); calls != 1 {
+		t.Fatalf("extractor calls = %d, want 1", calls)
+	}
+	var rejected int
+	for _, result := range results {
+		if result.Unsupported == ReasonRequestByteBudget {
+			rejected++
+		}
+	}
+	if rejected != 1 {
+		t.Fatalf("budget-rejected results = %d, want 1: %+v", rejected, results)
+	}
+}
+
+func TestPipelineLimitsColdArtifactConcurrency(t *testing.T) {
+	const total = 8
+	responses := make(map[string]fetcher.Result, total)
+	urls := make([]string, 0, total)
+	for i := 0; i < total; i++ {
+		u := "https://example.com/" + string(rune('a'+i))
+		urls = append(urls, u)
+		responses[u] = fetcher.Result{Status: 200, Body: []byte("body")}
+	}
+	release := make(chan struct{})
+	ex := &blockingExtractor{start: make(chan struct{}, total), block: release}
+	p := &Pipeline{
+		Fetcher:             stubFetcher{resp: responses},
+		Extractor:           ex,
+		ArtifactConcurrency: 2,
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		p.Parse(context.Background(), Options{URLs: urls})
+	}()
+	waitForReceive(t, ex.start, time.Second, "first extractor")
+	waitForReceive(t, ex.start, time.Second, "second extractor")
+	assertNoReceive(t, ex.start, 50*time.Millisecond, "third extractor started before a slot was released")
+	if peak := ex.peak.Load(); peak != 2 {
+		t.Fatalf("peak extractors = %d, want 2", peak)
+	}
+	close(release)
+	waitForWaitGroup(t, &wg, time.Second, "pipeline completion")
+	if peak := ex.peak.Load(); peak != 2 {
+		t.Fatalf("final peak extractors = %d, want 2", peak)
+	}
 }
 
 func TestFetchAndExtractAppliesSharedSingleflightRaw(t *testing.T) {

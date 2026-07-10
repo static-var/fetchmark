@@ -133,7 +133,7 @@ components:
           type: array
           items: { $ref: "#/components/schemas/ContentChunk" }
         content:        { $ref: "#/components/schemas/Content" }
-        unsupported_reason: { type: string, description: "Reason if parsing could not complete: non_html, js_required, robots_disallowed, egress_blocked, fetch_failed, extract_failed." }
+        unsupported_reason: { type: string, description: "Reason if parsing could not complete: non_html, js_required, robots_disallowed, egress_blocked, fetch_failed, extract_failed, request_byte_budget." }
 
     ContentChunk:
       type: object
@@ -213,6 +213,7 @@ paths:
         "403": { description: admin_only_flag_used_with_non_admin_key }
         "429": { description: rate_limited }
         "502": { description: search_failed }
+        "507": { description: serialized response exceeds FM_MAX_REQUEST_OUTPUT_BYTES }
 
   /v1/parse:
     post:
@@ -236,6 +237,7 @@ paths:
         "401": { description: missing_or_invalid_api_key }
         "403": { description: admin_only_flag_used_with_non_admin_key }
         "429": { description: rate_limited }
+        "507": { description: serialized response exceeds FM_MAX_REQUEST_OUTPUT_BYTES }
 
   /v1/summarize:
     post:

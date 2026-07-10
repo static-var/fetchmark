@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/staticvar/fetchmark/internal/adapters/cache"
 	"github.com/staticvar/fetchmark/internal/adapters/egress"
+	"github.com/staticvar/fetchmark/internal/adapters/egressproxy"
 	"github.com/staticvar/fetchmark/internal/adapters/extractor"
 	"github.com/staticvar/fetchmark/internal/adapters/fetcher"
 	"github.com/staticvar/fetchmark/internal/adapters/renderer"
@@ -88,17 +90,25 @@ func run() error {
 	// Cache: Redis when reachable, in-memory fallback otherwise so the
 	// binary remains usable without a backing store in dev.
 	var rdb *redis.Client
-	if opt, perr := redis.ParseURL(cfg.RedisURL); perr == nil {
-		rdb = redis.NewClient(opt)
-		if cerr := rdb.Ping(context.Background()).Err(); cerr != nil {
-			log.Warn("redis unreachable; falling back to in-memory cache", "err", cerr)
-			if err := rdb.Close(); err != nil {
-				log.Warn("redis close failed", "err", err)
-			}
-			rdb = nil
-		}
+	opt, err := parseRedisOptions(cfg.RedisURL)
+	if err != nil {
+		return fmt.Errorf("invalid FM_REDIS_URL: %w", err)
 	}
-	c := cache.New(rdb, cfg.CacheTTL)
+	rdb = redis.NewClient(opt)
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer pingCancel()
+	if cerr := rdb.Ping(pingCtx).Err(); cerr != nil {
+		log.Warn("redis unreachable; falling back to in-memory cache", "err", cerr)
+		if err := rdb.Close(); err != nil {
+			log.Warn("redis close failed", "err", err)
+		}
+		rdb = nil
+	}
+	c := cache.NewWithMemoryLimits(rdb, cfg.CacheTTL, cache.MemoryLimits{
+		MaxEntries:    cfg.MemoryCacheEntries,
+		MaxBytes:      cfg.MemoryCacheBytes,
+		MaxValueBytes: cfg.CacheMaxValueBytes,
+	})
 	defer c.Close()
 	if rdb != nil {
 		defer func() {
@@ -109,26 +119,36 @@ func run() error {
 	}
 
 	pipe := &pipeline.Pipeline{
-		Searcher:  sx,
-		Fetcher:   fx,
-		Extractor: extractor.New(true),
-		Cache:     c,
-		Ranker:    rank.New(),
-		// Close the SSRF gap on the render path: the fetcher's
-		// DialControl doesn't run when the renderer is called
-		// directly, so the pipeline validates the URL itself.
-		EgressValidate: external.Validate,
+		Searcher:        sx,
+		Fetcher:         fx,
+		Extractor:       extractor.New(true),
+		Cache:           c,
+		Ranker:          rank.New(),
+		Robots:          rchk,
+		RobotsUserAgent: cfg.UserAgent,
+		// Initial validation is defense in depth. Renderer redirects and
+		// subresources are enforced by the connection-time egress proxy.
+		EgressValidate:               external.Validate,
+		ArtifactConcurrency:          cfg.ArtifactConcurrency,
+		MaxArtifactBodyBytes:         cfg.MaxBodyBytes,
+		MaxArtifactDecompressedBytes: cfg.MaxDecompressedBytes,
+		MaxRendererSourceBytes:       cfg.RendererMaxBody,
+		MaxRequestSourceBytes:        cfg.MaxRequestSourceBytes,
+		MaxRequestOutputBytes:        cfg.MaxRequestOutputBytes,
 	}
 
 	// Optional headless renderer. A dedicated HTTP client is used so
 	// the renderer's timeout and body budgets are isolated from the
 	// outbound user-URL fetch path.
+	var rendererProxySrv *http.Server
 	if cfg.RendererURL != "" {
 		rend, rerr := renderer.NewHTTP(renderer.Options{
-			Endpoint: cfg.RendererURL,
-			Timeout:  cfg.RendererTimeout,
-			MaxBody:  cfg.RendererMaxBody,
-			Token:    cfg.RendererToken,
+			Endpoint:       cfg.RendererURL,
+			Timeout:        cfg.RendererTimeout,
+			MaxBody:        cfg.RendererMaxBody,
+			Token:          cfg.RendererToken,
+			EgressProxyURL: cfg.RendererEgressProxyURL,
+			UserAgent:      cfg.UserAgent,
 		})
 		if rerr != nil {
 			return rerr
@@ -136,7 +156,15 @@ func run() error {
 		pipe.Renderer = rend
 		pipe.RendererAuto = cfg.RendererAuto
 		pipe.RendererTimeout = cfg.RendererTimeout
-		log.Info("headless renderer enabled", "endpoint", cfg.RendererURL, "auto", cfg.RendererAuto)
+		if cfg.RendererProxyListenAddr != "" {
+			rendererProxySrv = &http.Server{
+				Addr:              cfg.RendererProxyListenAddr,
+				Handler:           egressproxy.New(external),
+				ReadHeaderTimeout: 5 * time.Second,
+				IdleTimeout:       60 * time.Second,
+			}
+		}
+		log.Info("headless renderer enabled", "endpoint", cfg.RendererURL, "auto", cfg.RendererAuto, "egress_proxy", cfg.RendererEgressProxyURL)
 	}
 
 	handler := api.NewRouter(api.Deps{
@@ -161,25 +189,37 @@ func run() error {
 		},
 	})
 
+	writeTimeout := 90 * time.Second
+	if needed := cfg.SummarizeMaxTimeout + 10*time.Second; needed > writeTimeout {
+		writeTimeout = needed
+	}
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      90 * time.Second,
+		WriteTimeout:      writeTimeout,
 		IdleTimeout:       60 * time.Second,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
 	go func() {
 		log.Info("starting", "addr", cfg.ListenAddr, "dashboard", cfg.DashboardEnabled(), "version", version)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()
+	if rendererProxySrv != nil {
+		go func() {
+			log.Info("starting renderer egress proxy", "addr", rendererProxySrv.Addr)
+			if err := rendererProxySrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- fmt.Errorf("renderer egress proxy: %w", err)
+			}
+		}()
+	}
 
 	select {
 	case <-ctx.Done():
@@ -190,7 +230,16 @@ func run() error {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	if rendererProxySrv != nil {
+		if err := rendererProxySrv.Shutdown(shutdownCtx); err != nil {
+			log.Warn("renderer egress proxy shutdown failed", "err", err)
+		}
+	}
 	return srv.Shutdown(shutdownCtx)
+}
+
+func parseRedisOptions(raw string) (*redis.Options, error) {
+	return redis.ParseURL(raw)
 }
 
 func newLogger(level string) *slog.Logger {

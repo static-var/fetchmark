@@ -113,6 +113,26 @@ func TestSearch_FetchesAdditionalPagesUntilMaxResults(t *testing.T) {
 	}
 }
 
+func TestSearch_StopsOnRepeatedPage(t *testing.T) {
+	requests := 0
+	c := newStub(t, func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"results":[{"url":"https://same.example","title":"Same"}]}`))
+	})
+
+	hits, err := c.Search(context.Background(), search.Query{Q: "birds", MaxResults: 5})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2 (first page plus repeated-page detection)", requests)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("hits = %d, want one unique page", len(hits))
+	}
+}
+
 func TestSearch_RecordsUnresponsiveEnginesFromEmptyPage(t *testing.T) {
 	c := newStub(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

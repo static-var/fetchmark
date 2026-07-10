@@ -15,6 +15,9 @@ func TestChecker_AllowDisallow(t *testing.T) {
 	var hits int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&hits, 1)
+		if got := r.Header.Get("User-Agent"); got != "Fetchmark" {
+			t.Errorf("robots User-Agent = %q", got)
+		}
 		_, _ = w.Write([]byte("User-agent: Fetchmark\nDisallow: /private\n"))
 	}))
 	t.Cleanup(srv.Close)
@@ -81,12 +84,35 @@ func TestChecker_FetchReportsOversizedRobots(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := New(srv.Client(), time.Hour, 16)
-	data, err := c.fetch(context.Background(), srv.URL)
+	data, err := c.fetch(context.Background(), srv.URL, "Fetchmark")
 	if err == nil || !strings.Contains(err.Error(), "too large") {
 		t.Fatalf("err = %v, want too-large error", err)
 	}
 	if data != nil {
 		t.Fatalf("oversized robots data should not be parsed: %+v", data)
+	}
+}
+
+func TestChecker_FetchFailureIsNotCachedAsAllow(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if hits.Add(1) == 1 {
+			http.Error(w, "temporary", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte("User-agent: Fetchmark\nDisallow: /private\n"))
+	}))
+	t.Cleanup(srv.Close)
+	c := New(srv.Client(), time.Hour, 0)
+
+	if ok, _ := c.Allowed(context.Background(), "Fetchmark", srv.URL+"/private"); !ok {
+		t.Fatal("first transient failure should fail open")
+	}
+	if ok, _ := c.Allowed(context.Background(), "Fetchmark", srv.URL+"/private"); ok {
+		t.Fatal("second request should retry robots and observe disallow")
+	}
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("robots hits = %d, want 2", got)
 	}
 }
 

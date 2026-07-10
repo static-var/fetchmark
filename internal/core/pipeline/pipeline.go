@@ -10,8 +10,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/staticvar/fetchmark/internal/adapters/cache"
@@ -32,6 +34,11 @@ type Extractor interface {
 	Extract(raw []byte, pageURL string) (*model.Content, error)
 }
 
+// RobotsChecker decides whether a user agent may fetch a URL.
+type RobotsChecker interface {
+	Allowed(ctx context.Context, userAgent, rawURL string) (bool, error)
+}
+
 // Ranker scores and orders results.
 type Ranker interface {
 	Score(query string, results []model.SearchResult) []model.SearchResult
@@ -43,6 +50,10 @@ type Ranker interface {
 // RendererAuto. A nil Renderer means the feature is disabled.
 type Renderer interface {
 	Render(ctx context.Context, url string) ([]byte, error)
+}
+
+type boundedRenderer interface {
+	RenderBounded(ctx context.Context, url string, maxBody int64) ([]byte, error)
 }
 
 // Cache is the subset of cache.Cache the pipeline uses. The three
@@ -87,13 +98,15 @@ type Options struct {
 
 // Pipeline wires search, fetch, extract, cache, rank.
 type Pipeline struct {
-	Searcher     search.Searcher
-	Fetcher      Fetcher
-	Extractor    Extractor
-	Cache        Cache
-	Ranker       Ranker
-	Renderer     Renderer
-	RendererAuto bool
+	Searcher        search.Searcher
+	Fetcher         Fetcher
+	Extractor       Extractor
+	Cache           Cache
+	Ranker          Ranker
+	Renderer        Renderer
+	RendererAuto    bool
+	Robots          RobotsChecker
+	RobotsUserAgent string
 	// RendererTimeout is the worst-case wall time a single renderer call
 	// can take. Used to size the Redis stampede-lock TTL and wait budget
 	// on the render path so a slow headless fetch doesn't lose the lock
@@ -106,6 +119,131 @@ type Pipeline struct {
 	// closes the SSRF hole on the render path, which would otherwise
 	// bypass the fetcher's dial-time validation.
 	EgressValidate func(ctx context.Context, rawURL string) error
+
+	// ArtifactConcurrency bounds the complete cold artifact lifecycle across
+	// concurrent requests: fetch/render, extract, marshal, and cache admission.
+	// Zero preserves the historical unbounded behavior for custom/test callers.
+	ArtifactConcurrency          int
+	MaxArtifactBodyBytes         int64
+	MaxArtifactDecompressedBytes int64
+	MaxRendererSourceBytes       int64
+	MaxRequestSourceBytes        int64
+	MaxRequestOutputBytes        int64
+	artifactOnce                 sync.Once
+	artifactSem                  chan struct{}
+}
+
+// ReasonRequestByteBudget marks an artifact omitted because retaining or
+// processing it would exceed the aggregate per-request byte ceiling.
+const ReasonRequestByteBudget = "request_byte_budget"
+
+type requestBudgetKey struct{}
+
+var nextRequestBudgetID atomic.Uint64
+
+type requestBudget struct {
+	mu        sync.Mutex
+	id        uint64
+	source    int64
+	output    int64
+	maxSource int64
+	maxOutput int64
+	exhausted bool
+}
+
+func (b *requestBudget) claimSource(max int64) int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if max <= 0 || b.exhausted {
+		return 0
+	}
+	if b.maxSource > 0 {
+		remaining := b.maxSource - b.source
+		if remaining <= 0 {
+			return 0
+		}
+		if max > remaining {
+			max = remaining
+		}
+	}
+	b.source += max
+	return max
+}
+
+func (b *requestBudget) finishSource(claimed, actual int64) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if actual > claimed {
+		return false
+	}
+	b.source -= claimed - actual
+	return true
+}
+
+func (b *requestBudget) addOutput(n int64) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.maxOutput > 0 && n > b.maxOutput-b.output {
+		b.exhausted = true
+		return false
+	}
+	b.output += n
+	return true
+}
+
+func budgetFromContext(ctx context.Context) *requestBudget {
+	budget, _ := ctx.Value(requestBudgetKey{}).(*requestBudget)
+	return budget
+}
+
+func claimSource(ctx context.Context, max int64) int64 {
+	budget := budgetFromContext(ctx)
+	if budget == nil {
+		return max
+	}
+	return budget.claimSource(max)
+}
+
+func finishSource(ctx context.Context, claimed int64, actual int) bool {
+	budget := budgetFromContext(ctx)
+	return budget == nil || budget.finishSource(claimed, int64(actual))
+}
+
+func minPositive(a, b int64) int64 {
+	if a <= 0 {
+		return b
+	}
+	if b <= 0 || a < b {
+		return a
+	}
+	return b
+}
+
+func contentBytes(c *model.Content) int64 {
+	if c == nil {
+		return 0
+	}
+	return int64(len(c.MainText) + len(c.Markdown) + len(c.CleanedHTML))
+}
+
+func reserveContent(ctx context.Context, c *model.Content) bool {
+	budget := budgetFromContext(ctx)
+	return budget == nil || budget.addOutput(contentBytes(c))
+}
+
+func (p *Pipeline) acquireArtifact(ctx context.Context) (func(), error) {
+	if p.ArtifactConcurrency <= 0 {
+		return func() {}, nil
+	}
+	p.artifactOnce.Do(func() {
+		p.artifactSem = make(chan struct{}, p.ArtifactConcurrency)
+	})
+	select {
+	case p.artifactSem <- struct{}{}:
+		return func() { <-p.artifactSem }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // Search runs the full search pipeline: hit SearXNG, parallel fetch,
@@ -155,6 +293,13 @@ func hitsToResults(hits []search.Hit) []model.SearchResult {
 }
 
 func (p *Pipeline) process(ctx context.Context, o Options, seed []model.SearchResult, query string) []model.SearchResult {
+	if p.MaxRequestSourceBytes > 0 || p.MaxRequestOutputBytes > 0 {
+		ctx = context.WithValue(ctx, requestBudgetKey{}, &requestBudget{
+			id:        nextRequestBudgetID.Add(1),
+			maxSource: p.MaxRequestSourceBytes,
+			maxOutput: p.MaxRequestOutputBytes,
+		})
+	}
 	seen := make(map[string]int, len(seed))
 	results := make([]model.SearchResult, 0, len(seed))
 	for _, r := range seed {
@@ -172,6 +317,32 @@ func (p *Pipeline) process(ctx context.Context, o Options, seed []model.SearchRe
 	}
 	results = filterResultsByDomains(results, o.IncludeDomains, o.ExcludeDomains)
 
+	if o.RespectRobots && p.Robots != nil {
+		userAgent := o.UserAgent
+		if userAgent == "" {
+			userAgent = p.RobotsUserAgent
+		}
+		var robotsWG sync.WaitGroup
+		for i := range results {
+			i := i
+			robotsWG.Add(1)
+			go func() {
+				defer robotsWG.Done()
+				release, err := p.acquireArtifact(ctx)
+				if err != nil {
+					return
+				}
+				defer release()
+				allowed, _ := p.Robots.Allowed(ctx, userAgent, results[i].URL)
+				if !allowed {
+					results[i].Unsupported = fetcher.ReasonRobots
+					obs.RobotsBlocks.Inc()
+				}
+			}()
+		}
+		robotsWG.Wait()
+	}
+
 	cacheBypass := o.ProxyURL != ""
 	renderMode := o.Render && p.Renderer != nil
 
@@ -184,6 +355,9 @@ func (p *Pipeline) process(ctx context.Context, o Options, seed []model.SearchRe
 	for i := range results {
 		i := i
 		r := &results[i]
+		if r.Unsupported == fetcher.ReasonRobots {
+			continue
+		}
 		// Try cache first synchronously — a hit avoids spawning a worker
 		// and keeps the common path allocation-free. Render requests
 		// consult the rendered key space so a plain-fetched
@@ -212,6 +386,21 @@ func (p *Pipeline) process(ctx context.Context, o Options, seed []model.SearchRe
 		}()
 	}
 	wg.Wait()
+
+	// Apply retained-output admission once, in stable result order and outside
+	// shared cache/singleflight work, so concurrent requests never share budget
+	// decisions and completion timing cannot change which results are retained.
+	for i := range results {
+		if results[i].Content != nil && !reserveContent(ctx, results[i].Content) {
+			results[i].Content = nil
+			results[i].Markdown = ""
+			results[i].HTML = ""
+			results[i].Author = ""
+			results[i].PublishedAt = nil
+			results[i].Chunks = nil
+			results[i].Unsupported = ReasonRequestByteBudget
+		}
+	}
 
 	results = dedupeByContentSHA(results)
 	// Rank first, then near-dup collapse. The cluster-winner tiebreak
@@ -329,26 +518,53 @@ func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.Sear
 			return p.renderAndExtract(ctx, o, r, key, cacheBypass)
 		}
 
+		sourceLimit := p.MaxArtifactDecompressedBytes
+		if sourceLimit <= 0 {
+			sourceLimit = p.MaxRequestSourceBytes
+		}
+		claimed := int64(0)
+		if budgetFromContext(ctx) != nil {
+			claimed = claimSource(ctx, sourceLimit)
+			if claimed <= 0 {
+				r.Unsupported = ReasonRequestByteBudget
+				return nil, nil
+			}
+		}
 		req := fetcher.Request{
-			URL:           r.URL,
-			ProxyURL:      o.ProxyURL,
-			UserAgent:     o.UserAgent,
-			RespectRobots: o.RespectRobots,
-			Timeout:       o.Timeout,
+			URL:                  r.URL,
+			ProxyURL:             o.ProxyURL,
+			UserAgent:            o.UserAgent,
+			RespectRobots:        o.RespectRobots,
+			Timeout:              o.Timeout,
+			MaxBodyBytes:         minPositive(p.MaxArtifactBodyBytes, claimed),
+			MaxDecompressedBytes: minPositive(p.MaxArtifactDecompressedBytes, claimed),
+			MaxTotalBytes:        claimed,
 		}
 		fr := p.Fetcher.Fetch(ctx, req)
 		// Record fetch-side outcome on the result; Err + Unsupported
 		// cases short-circuit the rest of the pipeline for this URL.
 		if fr.Err != nil {
+			finishSource(ctx, claimed, int(fr.BytesRead))
 			r.Unsupported = "fetch_failed"
 			r.FetchMS = fr.FetchMS
 			obs.FetchOutcome.WithLabelValues("error").Inc()
 			return nil, fr.Err
 		}
 		if fr.Unsupported != "" {
+			finishSource(ctx, claimed, int(fr.BytesRead))
 			r.Unsupported = fr.Unsupported
 			r.FetchMS = fr.FetchMS
 			obs.FetchOutcome.WithLabelValues(fr.Unsupported).Inc()
+			return nil, nil
+		}
+		consumed := fr.BytesRead
+		if consumed <= 0 {
+			// Preserve compatibility with custom Fetcher implementations that
+			// predate byte accounting while never undercharging a body.
+			consumed = int64(len(fr.Body))
+		}
+		if !finishSource(ctx, claimed, int(consumed)) {
+			r.Unsupported = ReasonRequestByteBudget
 			return nil, nil
 		}
 		r.FetchMS = fr.FetchMS
@@ -396,6 +612,11 @@ func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.Sear
 	// Fast path: no cache configured (bypass or nil) just runs
 	// directly.
 	if cacheBypass || p.Cache == nil {
+		releaseArtifact, err := p.acquireArtifact(ctx)
+		if err != nil {
+			return
+		}
+		defer releaseArtifact()
 		_, _ = doFetch(ctx)
 		return
 	}
@@ -403,14 +624,27 @@ func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.Sear
 	// Local singleflight by key suppresses duplicate in-flight workers
 	// inside this process. Cross-instance suppression happens inside
 	// doFetch via WithLock.
-	v, _, _ := p.Cache.Do(key, func() (any, error) {
+	flightKey := key
+	if budget := budgetFromContext(ctx); budget != nil {
+		// Budget decisions are request-local and must never be shared with a
+		// concurrent request that has different remaining capacity.
+		flightKey += ":request:" + strconv.FormatUint(budget.id, 10)
+	}
+	v, _, _ := p.Cache.Do(flightKey, func() (any, error) {
 		// Recheck cache once more — singleflight may have raced us.
 		if raw, _ := p.Cache.Get(ctx, key); raw != nil {
-			if err := applyRaw(r, raw); err == nil {
+			if err := applyRaw(ctx, r, raw); err == nil {
 				r.FromCache = true
 			}
 			return fetchOutcome{raw: raw, fromCache: true}, nil
 		}
+		// Acquire process capacity before the distributed lock so queued work
+		// cannot hold a Redis lock until it expires without doing useful work.
+		releaseArtifact, err := p.acquireArtifact(ctx)
+		if err != nil {
+			return fetchOutcome{unsupported: r.Unsupported, fetchMS: r.FetchMS}, nil
+		}
+		defer releaseArtifact()
 		// Cross-process lock. LockTTL is generous relative to our
 		// fetch+extract budget so a slow fetcher doesn't lose the lock
 		// mid-request.
@@ -426,16 +660,16 @@ func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.Sear
 		// waited, the lock path returned that blob without calling our
 		// fetcher — reflect it on r.
 		if r.Content == nil && raw != nil {
-			if err := applyRaw(r, raw); err == nil {
+			if err := applyRaw(ctx, r, raw); err == nil {
 				r.FromCache = true
 			}
 		}
 		return fetchOutcome{raw: raw, fromCache: r.FromCache, unsupported: r.Unsupported, fetchMS: r.FetchMS}, nil
 	})
-	applyFetchOutcome(r, v)
+	applyFetchOutcome(ctx, r, v)
 }
 
-func applyFetchOutcome(r *model.SearchResult, v any) {
+func applyFetchOutcome(ctx context.Context, r *model.SearchResult, v any) {
 	out, ok := v.(fetchOutcome)
 	if !ok {
 		if raw, ok := v.([]byte); ok {
@@ -450,7 +684,7 @@ func applyFetchOutcome(r *model.SearchResult, v any) {
 		return
 	}
 	if out.raw != nil && r.Content == nil && r.Unsupported == "" {
-		if err := applyRaw(r, out.raw); err == nil {
+		if err := applyRaw(ctx, r, out.raw); err == nil {
 			r.FromCache = out.fromCache
 		}
 	}
@@ -471,11 +705,36 @@ func (p *Pipeline) renderAndExtract(ctx context.Context, o Options, r *model.Sea
 		}
 	}
 	start := time.Now()
-	raw, err := p.Renderer.Render(ctx, r.URL)
+	sourceLimit := p.MaxRendererSourceBytes
+	if sourceLimit <= 0 {
+		sourceLimit = p.MaxRequestSourceBytes
+	}
+	claimed := int64(0)
+	if budgetFromContext(ctx) != nil {
+		claimed = claimSource(ctx, sourceLimit)
+		if claimed <= 0 {
+			r.Unsupported = ReasonRequestByteBudget
+			return nil, nil
+		}
+	}
+	var raw []byte
+	var err error
+	if bounded, ok := p.Renderer.(boundedRenderer); ok && claimed > 0 {
+		raw, err = bounded.RenderBounded(ctx, r.URL, claimed)
+	} else {
+		raw, err = p.Renderer.Render(ctx, r.URL)
+	}
 	if err != nil {
+		// The renderer adapter cannot report partial browser/network work, so
+		// conservatively consume the full claim on failure.
+		finishSource(ctx, claimed, int(claimed))
 		r.Unsupported = "render_failed"
 		obs.RendererOutcome.WithLabelValues("error").Inc()
 		return nil, err
+	}
+	if !finishSource(ctx, claimed, len(raw)) {
+		r.Unsupported = ReasonRequestByteBudget
+		return nil, nil
 	}
 	obs.RendererOutcome.WithLabelValues("ok").Inc()
 	obs.RendererDuration.Observe(time.Since(start).Seconds())
@@ -539,15 +798,19 @@ func applyRenderedContent(r *model.SearchResult, c *model.Content) {
 // caller's fetch timeout) because auto-render runs with o.Render=false.
 func (p *Pipeline) tryAutoRender(ctx context.Context, o Options, r *model.SearchResult, cacheBypass bool) ([]byte, error) {
 	renderedKey := cache.RenderedArtifactKey(r.URL)
+	applyCached := func(raw []byte) bool {
+		var c model.Content
+		if err := json.Unmarshal(raw, &c); err != nil || c.UnsupportedReason == extractor.ReasonJSRequired {
+			return false
+		}
+		applyRenderedContent(r, &c)
+		r.FromCache = true
+		return true
+	}
 	if !cacheBypass && p.Cache != nil {
-		if raw, _ := p.Cache.Get(ctx, renderedKey); raw != nil {
-			var c model.Content
-			if err := json.Unmarshal(raw, &c); err == nil && c.UnsupportedReason != extractor.ReasonJSRequired {
-				applyRenderedContent(r, &c)
-				r.FromCache = true
-				obs.CacheEvents.WithLabelValues("fa", "hit").Inc()
-				return raw, nil
-			}
+		if raw, _ := p.Cache.Get(ctx, renderedKey); raw != nil && applyCached(raw) {
+			obs.CacheEvents.WithLabelValues("fa", "hit").Inc()
+			return raw, nil
 		}
 	}
 	if cacheBypass || p.Cache == nil {
@@ -560,6 +823,7 @@ func (p *Pipeline) tryAutoRender(ctx context.Context, o Options, r *model.Search
 	ro := o
 	ro.Render = true
 
+	renderedLocally := false
 	raw, err := p.Cache.WithLock(ctx, renderedKey, cache.LockOptions{
 		LockTTL:      p.lockTTL(ro),
 		WaitMax:      p.lockWait(ro),
@@ -567,16 +831,15 @@ func (p *Pipeline) tryAutoRender(ctx context.Context, o Options, r *model.Search
 	}, func(ctx context.Context) ([]byte, error) {
 		// Re-check inside the lock — a peer may have populated the
 		// rendered cache while we were waiting. If so, reuse it.
-		if raw, _ := p.Cache.Get(ctx, renderedKey); raw != nil {
-			var c model.Content
-			if err := json.Unmarshal(raw, &c); err == nil && c.UnsupportedReason != extractor.ReasonJSRequired {
-				applyRenderedContent(r, &c)
-				r.FromCache = true
-				obs.CacheEvents.WithLabelValues("fa", "hit").Inc()
-				return raw, nil
-			}
+		if raw, _ := p.Cache.Get(ctx, renderedKey); raw != nil && applyCached(raw) {
+			obs.CacheEvents.WithLabelValues("fa", "hit").Inc()
+			return raw, nil
 		}
-		return p.renderAndExtract(ctx, o, r, renderedKey, cacheBypass)
+		rendered, renderErr := p.renderAndExtract(ctx, o, r, renderedKey, cacheBypass)
+		if renderErr == nil {
+			renderedLocally = true
+		}
+		return rendered, renderErr
 	})
 	if err != nil {
 		return nil, err
@@ -586,19 +849,15 @@ func (p *Pipeline) tryAutoRender(ctx context.Context, o Options, r *model.Search
 	// case our fn did not run, so r still carries the js_required plain
 	// content from the earlier fetch — unconditionally re-apply so the
 	// caller sees the rendered upgrade.
-	if raw != nil && r.FromCache == false {
-		var c model.Content
-		if err := json.Unmarshal(raw, &c); err == nil && c.UnsupportedReason != extractor.ReasonJSRequired {
-			applyRenderedContent(r, &c)
-			r.FromCache = true
-		}
+	if raw != nil && !renderedLocally && !r.FromCache {
+		applyCached(raw)
 	}
 	return raw, nil
 }
 
 // applyRaw decodes a cached artifact blob onto r. It is the symmetric
 // counterpart of the Cache.Set call inside doFetch.
-func applyRaw(r *model.SearchResult, raw []byte) error {
+func applyRaw(ctx context.Context, r *model.SearchResult, raw []byte) error {
 	var c model.Content
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return err

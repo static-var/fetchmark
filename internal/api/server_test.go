@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/staticvar/fetchmark/internal/config"
 	"github.com/staticvar/fetchmark/internal/core/model"
@@ -16,11 +17,13 @@ import (
 )
 
 type fakePipeline struct {
-	searchCalls int
-	parseCalls  int
-	lastOpts    pipeline.Options
-	results     []model.SearchResult
-	err         error
+	searchCalls      int
+	parseCalls       int
+	lastOpts         pipeline.Options
+	results          []model.SearchResult
+	err              error
+	parseDeadline    time.Time
+	parseHasDeadline bool
 }
 
 func (f *fakePipeline) Search(_ context.Context, o pipeline.Options) ([]model.SearchResult, error) {
@@ -28,7 +31,8 @@ func (f *fakePipeline) Search(_ context.Context, o pipeline.Options) ([]model.Se
 	f.lastOpts = o
 	return f.results, f.err
 }
-func (f *fakePipeline) Parse(_ context.Context, o pipeline.Options) []model.SearchResult {
+func (f *fakePipeline) Parse(ctx context.Context, o pipeline.Options) []model.SearchResult {
+	f.parseDeadline, f.parseHasDeadline = ctx.Deadline()
 	f.parseCalls++
 	f.lastOpts = o
 	return f.results
@@ -45,6 +49,33 @@ func newTestRouter(ready func() error) (http.Handler, *fakePipeline) {
 	}
 	p := &fakePipeline{results: []model.SearchResult{{URL: "https://x/y", Title: "t"}}}
 	return NewRouter(Deps{Log: log, Config: cfg, Pipeline: p, ReadyCheck: ready}), p
+}
+
+func TestParseResponseHonorsSerializedByteBudget(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	pipe := &fakePipeline{results: []model.SearchResult{{
+		URL:      "https://example.com",
+		Markdown: strings.Repeat("x", 1024),
+	}}}
+	router := NewRouter(Deps{
+		Log: log,
+		Config: config.Config{
+			APIKeys:               []string{"k1"},
+			ResultsCap:            50,
+			MaxRequestOutputBytes: 128,
+		},
+		Pipeline: pipe,
+	})
+	req := httptest.NewRequest("POST", "/v1/parse", strings.NewReader(`{"urls":["https://example.com"]}`))
+	req.Header.Set("X-API-Key", "k1")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInsufficientStorage {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if int64(rec.Body.Len()) > 128 {
+		t.Fatalf("response bytes=%d, limit=128", rec.Body.Len())
+	}
 }
 
 func TestHealthz(t *testing.T) {

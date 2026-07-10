@@ -7,7 +7,7 @@ pipeline, and a BM25 re-ranker into one small Go binary. Point it at a query,
 get back ranked results with clean Markdown, structured JSON, and cleaned
 HTML — ready for RAG, LLM context, or downstream processing.
 
-[![Go](https://img.shields.io/badge/go-1.26.3-00ADD8)](go.mod)
+[![Go](https://img.shields.io/badge/go-1.26.4-00ADD8)](go.mod)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Docker](https://img.shields.io/badge/docker-ready-2496ED)](deploy/docker-compose.yml)
 
@@ -165,7 +165,12 @@ All config is environment-driven. Copy `.env.example` and edit.
 | `FM_SEARXNG_COOLDOWN`        | `30s`                    | Skip window after an instance fails   |
 | `FM_REDIS_URL`               | `redis://redis:6379/0`   | Redis cache/rate-limit state; falls back to in-memory when unreachable |
 | `FM_RATE_LIMIT_PER_SEC` / `_BURST` | `5` / `20`         | Default per-key token bucket          |
+| `FM_ARTIFACT_CONCURRENCY`    | `3`                      | Process-wide cold artifact workers    |
+| `FM_MAX_REQUEST_SOURCE_BYTES` / `_OUTPUT_BYTES` | `64 MiB` / `128 MiB` | Aggregate request byte budgets |
+| `FM_MEMORY_CACHE_ENTRIES` / `_BYTES` | `512` / `128 MiB` | In-memory fallback capacity           |
+| `FM_CACHE_MAX_VALUE_BYTES`   | `8 MiB`                  | Maximum admitted cache artifact       |
 | `FM_RENDERER_URL`            | _(unset)_                | Enable headless render path           |
+| `FM_RENDERER_EGRESS_PROXY_URL` | required with renderer | Browser traffic proxy enforced per dial |
 | `FM_RENDERER_AUTO`           | `false`                  | Auto-upgrade js_required pages        |
 | `FM_DASHBOARD_USER` / `_PASSWORD` | _(unset)_           | Enable `/dashboard/` when both set    |
 | `FM_LOG_LEVEL`               | `info`                   | `debug` / `info` / `warn` / `error`   |
@@ -191,6 +196,11 @@ FM_RENDERER_URL=http://chromium:3000/content \
 FM_RENDERER_TOKEN=$(openssl rand -hex 32) \
 docker compose -f deploy/docker-compose.yml --profile render up -d --build
 ```
+
+Compose routes every Chromium request through Fetchmark's private egress
+proxy on port 8081. For external renderer deployments, set
+`FM_RENDERER_EGRESS_PROXY_URL` to a proxy reachable by the renderer and keep
+that proxy private; startup fails closed when rendering is enabled without it.
 
 Then pass `"render": true` on `/v1/parse`, or set `FM_RENDERER_AUTO=true` to
 auto-upgrade any page the extractor flags as `js_required`.
@@ -265,7 +275,9 @@ for patterns (stub adapters, table-driven cases).
 ## Security
 
 - SSRF-hardened egress policy (private/link-local/loopback blocked by
-  default, redirect chain revalidated, scheme-downgrade refused).
+  default, redirect chain revalidated, scheme-downgrade refused). Chromium
+  rendering uses a connection-time egress proxy so redirects, subresources,
+  and second DNS resolutions receive the same checks.
 - Body + decompressed size caps enforced pre-read.
 - Admin-only `proxy_url` passthrough: non-admin keys get 403.
 - API keys are compared with a constant-time check.

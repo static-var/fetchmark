@@ -97,7 +97,7 @@ func TestRateLimiter_RedisAllowDeny(t *testing.T) {
 	}
 }
 
-func TestRateLimiter_RedisErrorFailsOpenAfterLocalBucketExhausted(t *testing.T) {
+func TestRateLimiter_RedisErrorFallsBackToLocalBucket(t *testing.T) {
 	mr, err := miniredis.Run()
 	if err != nil {
 		t.Fatalf("miniredis: %v", err)
@@ -127,8 +127,8 @@ func TestRateLimiter_RedisErrorFailsOpenAfterLocalBucketExhausted(t *testing.T) 
 	if got := call(); got != http.StatusOK {
 		t.Fatalf("call 2 status = %d", got)
 	}
-	if got := call(); got != http.StatusOK {
-		t.Fatalf("call 3 status = %d, want fail-open 200", got)
+	if got := call(); got != http.StatusTooManyRequests {
+		t.Fatalf("call 3 status = %d, want local fallback 429", got)
 	}
 }
 

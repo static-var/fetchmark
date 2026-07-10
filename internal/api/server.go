@@ -1,8 +1,10 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -178,4 +180,40 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+var errResponseBudget = errors.New("response exceeds byte budget")
+
+type limitedBuffer struct {
+	bytes.Buffer
+	limit int64
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	if b.limit > 0 && int64(b.Len()+len(p)) > b.limit {
+		return 0, errResponseBudget
+	}
+	return b.Buffer.Write(p)
+}
+
+func writeJSONBounded(w http.ResponseWriter, status int, v any, maxBytes int64) {
+	if maxBytes <= 0 {
+		writeJSON(w, status, v)
+		return
+	}
+	var body limitedBuffer
+	body.limit = maxBytes
+	if err := json.NewEncoder(&body).Encode(v); err != nil {
+		fallback := []byte("{\"error\":\"response_byte_budget\"}\n")
+		if int64(len(fallback)) > maxBytes {
+			fallback = nil
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInsufficientStorage)
+		_, _ = w.Write(fallback)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(body.Bytes())
 }

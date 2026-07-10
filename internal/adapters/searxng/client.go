@@ -23,7 +23,10 @@ import (
 	"github.com/staticvar/fetchmark/internal/obs"
 )
 
-const maxResponseBytes = 10 << 20
+const (
+	maxResponseBytes = 10 << 20
+	maxSearchPages   = 10
+)
 
 var errResponseTooLarge = errors.New("searxng: response too large")
 
@@ -124,7 +127,8 @@ func (c *Client) Search(ctx context.Context, q search.Query) ([]search.Hit, erro
 	out := make([]search.Hit, 0, q.MaxResults)
 	var allResults []apiResult
 	var allUnresponsive [][]any
-	for page := 1; ; page++ {
+	var previousPage string
+	for page := 1; page <= maxSearchPages; page++ {
 		pageVals := cloneValues(vals)
 		if q.MaxResults > 0 {
 			pageVals.Set("pageno", strconv.Itoa(page))
@@ -159,11 +163,21 @@ func (c *Client) Search(ctx context.Context, q search.Query) ([]search.Hit, erro
 			return nil, fmt.Errorf("searxng: close response: %w", closeErr)
 		}
 
-		allResults = append(allResults, body.Results...)
 		allUnresponsive = append(allUnresponsive, body.UnresponsiveEngines...)
 		if len(body.Results) == 0 {
 			break
 		}
+		var pageKey strings.Builder
+		for _, result := range body.Results {
+			pageKey.WriteString(result.URL)
+			pageKey.WriteByte('\x00')
+		}
+		currentPage := pageKey.String()
+		if previousPage != "" && currentPage == previousPage {
+			break
+		}
+		previousPage = currentPage
+		allResults = append(allResults, body.Results...)
 		for _, r := range body.Results {
 			out = append(out, hitFromAPIResult(r, len(out)+1))
 			if q.MaxResults > 0 && len(out) >= q.MaxResults {

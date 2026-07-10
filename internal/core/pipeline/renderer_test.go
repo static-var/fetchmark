@@ -33,6 +33,18 @@ func (jsAwareExtractor) Extract(raw []byte, url string) (*model.Content, error) 
 	return &model.Content{URL: url, Title: "Rendered", MainText: s, Markdown: "# " + s}, nil
 }
 
+type stubRobots struct {
+	allowed   bool
+	calls     int
+	userAgent string
+}
+
+func (s *stubRobots) Allowed(_ context.Context, userAgent, _ string) (bool, error) {
+	s.calls++
+	s.userAgent = userAgent
+	return s.allowed, nil
+}
+
 type stubRenderer struct {
 	body []byte
 	err  error
@@ -45,6 +57,29 @@ func (s *stubRenderer) Render(_ context.Context, _ string) ([]byte, error) {
 		return nil, s.err
 	}
 	return s.body, nil
+}
+
+func TestPipeline_RenderExplicit_RespectsRobotsBeforeCacheOrRenderer(t *testing.T) {
+	robots := &stubRobots{allowed: false}
+	rend := &stubRenderer{body: []byte("RENDERED")}
+	p := &Pipeline{
+		Extractor:       jsAwareExtractor{},
+		Cache:           cache.New(nil, 0),
+		Renderer:        rend,
+		Robots:          robots,
+		RobotsUserAgent: "Fetchmark/0.1",
+	}
+	out := p.Parse(context.Background(), Options{
+		URLs:          []string{"https://spa.example/private"},
+		Render:        true,
+		RespectRobots: true,
+	})
+	if robots.calls != 1 || robots.userAgent != "Fetchmark/0.1" || rend.hits != 0 {
+		t.Fatalf("robots calls=%d user-agent=%q renderer hits=%d", robots.calls, robots.userAgent, rend.hits)
+	}
+	if len(out) != 1 || out[0].Unsupported != fetcher.ReasonRobots {
+		t.Fatalf("result = %+v", out)
+	}
 }
 
 func TestPipeline_RenderExplicit_UsesRenderer(t *testing.T) {

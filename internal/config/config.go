@@ -45,9 +45,17 @@ type Config struct {
 	HostAllowlist []string `env:"FM_HOST_ALLOWLIST" envSeparator:","`
 	HostDenylist  []string `env:"FM_HOST_DENYLIST"  envSeparator:","`
 
-	CacheTTL   time.Duration `env:"FM_CACHE_TTL"    envDefault:"1h"`
-	MaxResults int           `env:"FM_MAX_RESULTS"  envDefault:"10"`
-	ResultsCap int           `env:"FM_RESULTS_CAP"  envDefault:"50"`
+	CacheTTL           time.Duration `env:"FM_CACHE_TTL"             envDefault:"1h"`
+	MemoryCacheEntries int           `env:"FM_MEMORY_CACHE_ENTRIES"  envDefault:"512"`
+	MemoryCacheBytes   int64         `env:"FM_MEMORY_CACHE_BYTES"    envDefault:"134217728"` // 128 MiB
+	CacheMaxValueBytes int64         `env:"FM_CACHE_MAX_VALUE_BYTES" envDefault:"8388608"`   // 8 MiB
+
+	ArtifactConcurrency   int   `env:"FM_ARTIFACT_CONCURRENCY"     envDefault:"3"`
+	MaxRequestSourceBytes int64 `env:"FM_MAX_REQUEST_SOURCE_BYTES" envDefault:"67108864"`  // 64 MiB
+	MaxRequestOutputBytes int64 `env:"FM_MAX_REQUEST_OUTPUT_BYTES" envDefault:"134217728"` // 128 MiB
+
+	MaxResults int `env:"FM_MAX_RESULTS" envDefault:"10"`
+	ResultsCap int `env:"FM_RESULTS_CAP" envDefault:"50"`
 
 	// Per-API-key rate limits. Rate is requests per second sustained;
 	// Burst is the token bucket capacity. A Rate of 0 disables limiting.
@@ -61,11 +69,13 @@ type Config struct {
 	// feature is disabled and render=true requests degrade to the plain
 	// fetch path. RendererAuto toggles automatic retry when the
 	// extractor flags a page as js_required.
-	RendererURL     string        `env:"FM_RENDERER_URL"`
-	RendererAuto    bool          `env:"FM_RENDERER_AUTO"     envDefault:"false"`
-	RendererTimeout time.Duration `env:"FM_RENDERER_TIMEOUT"  envDefault:"20s"`
-	RendererMaxBody int64         `env:"FM_RENDERER_MAX_BODY" envDefault:"10485760"` // 10 MiB
-	RendererToken   string        `env:"FM_RENDERER_TOKEN"`
+	RendererURL             string        `env:"FM_RENDERER_URL"`
+	RendererAuto            bool          `env:"FM_RENDERER_AUTO"     envDefault:"false"`
+	RendererTimeout         time.Duration `env:"FM_RENDERER_TIMEOUT"  envDefault:"20s"`
+	RendererMaxBody         int64         `env:"FM_RENDERER_MAX_BODY" envDefault:"10485760"` // 10 MiB
+	RendererToken           string        `env:"FM_RENDERER_TOKEN"`
+	RendererEgressProxyURL  string        `env:"FM_RENDERER_EGRESS_PROXY_URL"`
+	RendererProxyListenAddr string        `env:"FM_RENDERER_PROXY_LISTEN_ADDR" envDefault:"127.0.0.1:8081"`
 
 	// /v1/summarize runtime configuration. Env vars bootstrap one or
 	// two profiles (one per provider kind) at boot; admin PUT calls
@@ -136,11 +146,33 @@ func (c Config) validate() error {
 	if c.MaxResults <= 0 || c.ResultsCap <= 0 || c.MaxResults > c.ResultsCap {
 		return errors.New("FM_MAX_RESULTS must be >0 and <= FM_RESULTS_CAP")
 	}
+	if c.ArtifactConcurrency <= 0 {
+		return errors.New("FM_ARTIFACT_CONCURRENCY must be > 0")
+	}
+	if c.MaxRequestSourceBytes <= 0 || c.MaxRequestOutputBytes <= 0 {
+		return errors.New("request byte budgets must be > 0")
+	}
+	maxArtifactSource := c.MaxDecompressedBytes
+	if c.RendererMaxBody > maxArtifactSource {
+		maxArtifactSource = c.RendererMaxBody
+	}
+	if int64(c.ArtifactConcurrency)*maxArtifactSource > c.MaxRequestSourceBytes {
+		return errors.New("FM_MAX_REQUEST_SOURCE_BYTES must cover one full source claim per artifact worker")
+	}
+	if c.MemoryCacheEntries <= 0 || c.MemoryCacheBytes <= 0 || c.CacheMaxValueBytes <= 0 {
+		return errors.New("memory cache limits must be > 0")
+	}
+	if c.CacheMaxValueBytes > c.MemoryCacheBytes {
+		return errors.New("FM_CACHE_MAX_VALUE_BYTES must be <= FM_MEMORY_CACHE_BYTES")
+	}
 	if len(c.SearxngURLs) == 0 {
 		return errors.New("at least one SearXNG URL must be configured (FM_SEARXNG_URL or FM_SEARXNG_URLS)")
 	}
 	if c.SearxngCooldown <= 0 {
 		return errors.New("FM_SEARXNG_COOLDOWN must be > 0")
+	}
+	if c.RendererURL != "" && c.RendererEgressProxyURL == "" {
+		return errors.New("FM_RENDERER_EGRESS_PROXY_URL is required when FM_RENDERER_URL is set")
 	}
 	if c.SummarizeMaxTokensCap <= 0 {
 		return errors.New("FM_SUMMARIZE_MAX_TOKENS_CAP must be > 0")
