@@ -14,6 +14,7 @@ import (
 	"github.com/staticvar/fetchmark/internal/config"
 	"github.com/staticvar/fetchmark/internal/core/model"
 	"github.com/staticvar/fetchmark/internal/core/pipeline"
+	"github.com/staticvar/fetchmark/internal/core/search"
 )
 
 type fakePipeline struct {
@@ -24,6 +25,16 @@ type fakePipeline struct {
 	err              error
 	parseDeadline    time.Time
 	parseHasDeadline bool
+}
+
+type detailedFakePipeline struct {
+	*fakePipeline
+	output pipeline.SearchOutput
+	err    error
+}
+
+func (f *detailedFakePipeline) SearchDetailed(context.Context, pipeline.Options) (pipeline.SearchOutput, error) {
+	return f.output, f.err
 }
 
 func (f *fakePipeline) Search(_ context.Context, o pipeline.Options) ([]model.SearchResult, error) {
@@ -51,6 +62,60 @@ func newTestRouter(ready func() error) (http.Handler, *fakePipeline) {
 	return NewRouter(Deps{Log: log, Config: cfg, Pipeline: p, ReadyCheck: ready}), p
 }
 
+func TestRouterExposesCanonicalBuildSHA256(t *testing.T) {
+	const buildSHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	router := NewRouter(Deps{
+		Log:         log,
+		Config:      config.Config{APIKeys: []string{"k1"}, ResultsCap: 50},
+		Pipeline:    &fakePipeline{},
+		BuildSHA256: strings.ToUpper(buildSHA256),
+	})
+
+	for _, test := range []struct {
+		name   string
+		apiKey string
+	}{
+		{name: "success", apiKey: "k1"},
+		{name: "authentication failure"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/v1/search", strings.NewReader(`{"query":"birds"}`))
+			if test.apiKey != "" {
+				request.Header.Set("X-API-Key", test.apiKey)
+			}
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+			if got := recorder.Header().Get("X-Fetchmark-Build-SHA256"); got != buildSHA256 {
+				t.Fatalf("build header = %q, want %q", got, buildSHA256)
+			}
+		})
+	}
+
+	healthRequest := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	healthRecorder := httptest.NewRecorder()
+	router.ServeHTTP(healthRecorder, healthRequest)
+	if got := healthRecorder.Header().Get("X-Fetchmark-Build-SHA256"); got != "" {
+		t.Fatalf("health build header = %q, want omitted outside native search", got)
+	}
+}
+
+func TestRouterOmitsInvalidBuildSHA256(t *testing.T) {
+	router := NewRouter(Deps{
+		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Config:      config.Config{APIKeys: []string{"k1"}, ResultsCap: 50},
+		Pipeline:    &fakePipeline{},
+		BuildSHA256: "not-a-digest",
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/search", strings.NewReader(`{"query":"birds"}`))
+	request.Header.Set("X-API-Key", "k1")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if got := recorder.Header().Get("X-Fetchmark-Build-SHA256"); got != "" {
+		t.Fatalf("invalid build header = %q, want omitted", got)
+	}
+}
+
 func TestParseResponseHonorsSerializedByteBudget(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	pipe := &fakePipeline{results: []model.SearchResult{{
@@ -75,6 +140,203 @@ func TestParseResponseHonorsSerializedByteBudget(t *testing.T) {
 	}
 	if int64(rec.Body.Len()) > 128 {
 		t.Fatalf("response bytes=%d, limit=128", rec.Body.Len())
+	}
+}
+
+func TestNativeSearchResponseExposesTypedDiscoveryProvenance(t *testing.T) {
+	router, pipe := newTestRouter(nil)
+	pipe.results[0].Provenance = []model.DiscoveryProvenance{{Provider: "searxng", Lane: "searxng-open", Variant: "original"}}
+	req := httptest.NewRequest(http.MethodPost, "/v1/search", strings.NewReader(`{"query":"birds"}`))
+	req.Header.Set("X-API-Key", "k1")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"provenance":[{"provider":"searxng","lane":"searxng-open","variant":"original"}]`) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestNativeSearchResponseExposesBoundedDiscoveryReport(t *testing.T) {
+	report := search.DiscoveryReport{
+		Status: search.BatchPartial,
+		Lanes: []search.DiscoveryLaneReport{{
+			Provider: "wiby", Lane: "wiby-general", Variant: "original",
+			Status: search.BatchPartial, CandidateCount: 2, DurationMS: 25,
+			Diagnostics: []search.DiscoveryDiagnostic{{Source: "official_api", Reason: "malformed_results"}},
+		}},
+	}
+	base := &fakePipeline{results: []model.SearchResult{{URL: "https://example.com"}}}
+	router := NewRouter(Deps{
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Config:   config.Config{APIKeys: []string{"k1"}, ResultsCap: 50, MaxRequestOutputBytes: 1 << 20},
+		Pipeline: &detailedFakePipeline{fakePipeline: base, output: pipeline.SearchOutput{Results: base.results, Discovery: report}},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/search", strings.NewReader(`{"query":"birds"}`))
+	req.Header.Set("X-API-Key", "k1")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"discovery":{"status":"partial","lanes":[{"provider":"wiby"`) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestNativeSearchFailureRetainsDiscoveryReport(t *testing.T) {
+	report := search.DiscoveryReport{
+		Status: search.BatchFailed,
+		Lanes: []search.DiscoveryLaneReport{{
+			Provider: "mwmbl", Lane: "mwmbl-general", Variant: "original", Status: search.BatchFailed,
+			DurationMS: 8000, Diagnostics: []search.DiscoveryDiagnostic{{Reason: "timeout", Retryable: true}},
+		}},
+	}
+	router := NewRouter(Deps{
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Config:   config.Config{APIKeys: []string{"k1"}, ResultsCap: 50, MaxRequestOutputBytes: 1 << 20},
+		Pipeline: &detailedFakePipeline{fakePipeline: &fakePipeline{}, output: pipeline.SearchOutput{Discovery: report}, err: context.DeadlineExceeded},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/search", strings.NewReader(`{"query":"birds"}`))
+	req.Header.Set("X-API-Key", "k1")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), `"error":"search_failed"`) || !strings.Contains(rec.Body.String(), `"discovery":{"status":"failed"`) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestNativeSearchFailureRetainsPartialDiscoveryReport(t *testing.T) {
+	report := search.DiscoveryReport{Status: search.BatchPartial, Lanes: []search.DiscoveryLaneReport{
+		{Provider: "wiby", Lane: "wiby-general", Variant: "original", Status: search.BatchHealthy, CandidateCount: 1},
+		{Provider: "mwmbl", Lane: "mwmbl-general", Variant: "original", Status: search.BatchFailed, Diagnostics: []search.DiscoveryDiagnostic{{Reason: "canceled"}}},
+	}}
+	router := NewRouter(Deps{
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Config:   config.Config{APIKeys: []string{"k1"}, ResultsCap: 50, MaxRequestOutputBytes: 1 << 20},
+		Pipeline: &detailedFakePipeline{fakePipeline: &fakePipeline{}, output: pipeline.SearchOutput{Discovery: report}, err: context.DeadlineExceeded},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/search", strings.NewReader(`{"query":"birds"}`))
+	req.Header.Set("X-API-Key", "k1")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), `"discovery":{"status":"partial"`) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestNativeSearchFailsClosedOnInvalidDetailedRunnerReport(t *testing.T) {
+	tests := map[string]search.DiscoveryReport{
+		"raw identity": {
+			Status: search.BatchFailed,
+			Lanes: []search.DiscoveryLaneReport{{
+				Provider: "http://private.internal", Lane: "raw error text", Variant: "original",
+				Status: search.BatchFailed, Diagnostics: []search.DiscoveryDiagnostic{{Reason: "dial tcp 10.0.0.1:8080"}},
+			}},
+		},
+		"too many diagnostics": {
+			Status: search.BatchDegradedEmpty,
+			Lanes: []search.DiscoveryLaneReport{{
+				Provider: "wiby", Lane: "wiby-general", Variant: "original", Status: search.BatchDegradedEmpty,
+				Diagnostics: make([]search.DiscoveryDiagnostic, search.MaxDiscoveryDiagnosticsPerLane+1),
+			}},
+		},
+		"inconsistent aggregate": {
+			Status: search.BatchHealthy,
+			Lanes: []search.DiscoveryLaneReport{{
+				Provider: "wiby", Lane: "wiby-general", Variant: "original", Status: search.BatchFailed,
+			}},
+		},
+	}
+	for name, report := range tests {
+		t.Run(name, func(t *testing.T) {
+			base := &fakePipeline{results: []model.SearchResult{{URL: "https://example.com"}}}
+			router := NewRouter(Deps{
+				Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+				Config:   config.Config{APIKeys: []string{"k1"}, ResultsCap: 50, MaxRequestOutputBytes: 1 << 20},
+				Pipeline: &detailedFakePipeline{fakePipeline: base, output: pipeline.SearchOutput{Results: base.results, Discovery: report}},
+			})
+			req := httptest.NewRequest(http.MethodPost, "/v1/search", strings.NewReader(`{"query":"birds"}`))
+			req.Header.Set("X-API-Key", "k1")
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), `"discovery"`) || strings.Contains(rec.Body.String(), "private.internal") || strings.Contains(rec.Body.String(), "dial tcp") {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestNativeSearchErrorFailsClosedOnInvalidDetailedRunnerReport(t *testing.T) {
+	report := search.DiscoveryReport{Status: search.BatchFailed, Lanes: []search.DiscoveryLaneReport{{
+		Provider: "http://private.internal", Lane: "raw error text", Variant: "original", Status: search.BatchFailed,
+		Diagnostics: []search.DiscoveryDiagnostic{{Reason: "dial tcp 10.0.0.1:8080"}},
+	}}}
+	router := NewRouter(Deps{
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Config:   config.Config{APIKeys: []string{"k1"}, ResultsCap: 50, MaxRequestOutputBytes: 1 << 20},
+		Pipeline: &detailedFakePipeline{fakePipeline: &fakePipeline{}, output: pipeline.SearchOutput{Discovery: report}, err: context.DeadlineExceeded},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/search", strings.NewReader(`{"query":"birds"}`))
+	req.Header.Set("X-API-Key", "k1")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway || strings.Contains(rec.Body.String(), `"discovery"`) || strings.Contains(rec.Body.String(), "private.internal") || strings.Contains(rec.Body.String(), "dial tcp") {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestNativeSearchAttributesWibyResultsWithLinkHeader(t *testing.T) {
+	router, pipe := newTestRouter(nil)
+	pipe.results[0].Provenance = []model.DiscoveryProvenance{{Provider: "wiby", Lane: "wiby-general", Variant: "original"}}
+	req := httptest.NewRequest(http.MethodPost, "/v1/search", strings.NewReader(`{"query":"birds"}`))
+	req.Header.Set("X-API-Key", "k1")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || rec.Header().Get("Link") != wibyAttributionLink {
+		t.Fatalf("status=%d link=%q body=%s", rec.Code, rec.Header().Get("Link"), rec.Body.String())
+	}
+}
+
+func TestNativeSearchAttributesStackExchangeResultsWithLinkHeader(t *testing.T) {
+	router, pipe := newTestRouter(nil)
+	pipe.results[0].URL = "https://stackoverflow.com/questions/1"
+	pipe.results[0].Provenance = []model.DiscoveryProvenance{{Provider: "stackexchange", Lane: "stackexchange-developer", Variant: "original"}}
+	req := httptest.NewRequest(http.MethodPost, "/v1/search", strings.NewReader(`{"query":"birds"}`))
+	req.Header.Set("X-API-Key", "k1")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || rec.Header().Get("Link") != stackExchangeAttributionLink {
+		t.Fatalf("status=%d link=%q body=%s", rec.Code, rec.Header().Get("Link"), rec.Body.String())
+	}
+}
+
+func TestNativeSearchAttributesArxivResultsWithLinkHeader(t *testing.T) {
+	router, pipe := newTestRouter(nil)
+	pipe.results[0].URL = "https://arxiv.org/abs/2401.01234"
+	pipe.results[0].Provenance = []model.DiscoveryProvenance{{Provider: "arxiv", Lane: "arxiv-research", Variant: "original"}}
+	req := httptest.NewRequest(http.MethodPost, "/v1/search", strings.NewReader(`{"query":"retrieval research"}`))
+	req.Header.Set("X-API-Key", "k1")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || rec.Header().Get("Link") != arxivAttributionLink {
+		t.Fatalf("status=%d link=%q body=%s", rec.Code, rec.Header().Get("Link"), rec.Body.String())
+	}
+}
+
+func TestNativeSearchResponseBudgetDoesNotAttributeWibyError(t *testing.T) {
+	pipe := &fakePipeline{results: []model.SearchResult{{
+		URL: "https://example.com", Markdown: strings.Repeat("x", 1024),
+		Provenance: []model.DiscoveryProvenance{{Provider: "wiby", Lane: "wiby-general", Variant: "original"}},
+	}}}
+	router := NewRouter(Deps{
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Config: config.Config{
+			APIKeys: []string{"k1"}, ResultsCap: 50, MaxRequestOutputBytes: 128,
+		},
+		Pipeline: pipe,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/search", strings.NewReader(`{"query":"birds"}`))
+	req.Header.Set("X-API-Key", "k1")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInsufficientStorage || rec.Header().Get("Link") != "" {
+		t.Fatalf("status=%d unexpected link=%q body=%s", rec.Code, rec.Header().Get("Link"), rec.Body.String())
 	}
 }
 
@@ -148,6 +410,21 @@ func TestSearch_MissingQueryIs400(t *testing.T) {
 	}
 }
 
+func TestSearch_UnsupportedEngineControlIsTypedClientError(t *testing.T) {
+	r, p := newTestRouter(nil)
+	p.err = &search.UnsupportedControlError{Control: "engines", Reason: "no enabled SearXNG discovery source"}
+	req := httptest.NewRequest("POST", "/v1/search", strings.NewReader(`{"query":"birds","engines":["mwmbl"]}`))
+	req.Header.Set("X-API-Key", "k1")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, `"error":"unsupported_control"`) || !strings.Contains(body, `"control":"engines"`) {
+		t.Fatalf("body = %s", body)
+	}
+}
+
 func TestSearch_PropagatesSearchControls(t *testing.T) {
 	r, p := newTestRouter(nil)
 	body := strings.NewReader(`{"query":"birds","categories":["general","news"],"language":"en","time_range":"year","safesearch":1,"include_domains":["a.example"],"exclude_domains":["b.example"],"exact_match":true,"search_depth":"advanced","chunks_per_source":2}`)
@@ -174,7 +451,7 @@ func TestSearch_InvalidSearchControlsReturn400(t *testing.T) {
 		name string
 		body string
 	}{
-		{name: "unsupported time range", body: `{"query":"birds","time_range":"week"}`},
+		{name: "unsupported time range", body: `{"query":"birds","time_range":"hour"}`},
 		{name: "unsupported safesearch", body: `{"query":"birds","safesearch":3}`},
 		{name: "unsupported search depth", body: `{"query":"birds","search_depth":"deep"}`},
 		{name: "unsupported chunks per source", body: `{"query":"birds","chunks_per_source":4}`},
@@ -225,15 +502,15 @@ func TestParse_InvalidRequestValuesReturn400(t *testing.T) {
 
 func TestSearch_NormalizesSearchControlValues(t *testing.T) {
 	r, p := newTestRouter(nil)
-	req := httptest.NewRequest("POST", "/v1/search", strings.NewReader(`{"query":"birds","time_range":" Year ","search_depth":" Advanced "}`))
+	req := httptest.NewRequest("POST", "/v1/search", strings.NewReader(`{"query":"birds","time_range":" Week ","search_depth":" Advanced "}`))
 	req.Header.Set("X-API-Key", "k1")
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
-	if p.lastOpts.TimeRange != "year" {
-		t.Fatalf("time range = %q, want normalized year", p.lastOpts.TimeRange)
+	if p.lastOpts.TimeRange != "week" {
+		t.Fatalf("time range = %q, want normalized week", p.lastOpts.TimeRange)
 	}
 	if p.lastOpts.SearchDepth != "advanced" {
 		t.Fatalf("search depth = %q, want normalized advanced", p.lastOpts.SearchDepth)

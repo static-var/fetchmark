@@ -10,7 +10,6 @@ import (
 
 	"github.com/staticvar/fetchmark/internal/api/middleware"
 	"github.com/staticvar/fetchmark/internal/core/pipeline"
-	"github.com/staticvar/fetchmark/internal/obs"
 )
 
 // searchRequest is the JSON body for POST /v1/search.
@@ -112,59 +111,22 @@ func searchHandler(d Deps) http.HandlerFunc {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_request"})
 			return
 		}
-		if req.Query == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "query required"})
+		out, executionErr := executeCanonicalSearch(d, r, req)
+		if executionErr != nil {
+			writeJSONBounded(w, executionErr.Status, nativeSearchError(executionErr), d.Config.MaxRequestOutputBytes)
 			return
 		}
-		if err := validateSearchControls(req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
+		payload := map[string]any{
+			"query":   out.Query,
+			"count":   len(out.Results),
+			"results": out.Results,
 		}
-		normalizeSearchControls(&req)
-		if d.Pipeline == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "pipeline_not_ready"})
-			return
+		if out.Discovery != nil {
+			payload["discovery"] = out.Discovery
 		}
-
-		max := req.MaxResults
-		if max <= 0 {
-			max = d.Config.MaxResults
-		}
-		if max > d.Config.ResultsCap {
-			max = d.Config.ResultsCap
-		}
-		opts, err := buildOptions(r, d.Config.RespectRobots, req.ProxyURL, "", req.RespectRobots,
-			req.TimeoutMS, max, req.Formats, req.Engines, req.Query, nil, req.Render, req.Categories, req.Language, req.TimeRange, req.SafeSearch, req.IncludeDomains, req.ExcludeDomains, req.ExactMatch, req.SearchDepth, req.ChunksPerSource)
-		if err != nil {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
-			return
-		}
-		candidateCap := max * candidateMultiplier(req.SearchDepth)
-		if candidateCap < max {
-			candidateCap = max
-		}
-		if candidateCap > d.Config.ResultsCap {
-			candidateCap = d.Config.ResultsCap
-		}
-		opts.CandidateCap = candidateCap
-
-		out, err := d.Pipeline.Search(r.Context(), opts)
-		if err != nil {
-			obs.SearchQueryTotal.WithLabelValues("upstream_error").Inc()
-			d.Log.Error("search failed", "err", err)
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "search_failed"})
-			return
-		}
-		if len(out) == 0 {
-			obs.SearchQueryTotal.WithLabelValues("empty").Inc()
-		} else {
-			obs.SearchQueryTotal.WithLabelValues("ok").Inc()
-		}
-		writeJSONBounded(w, http.StatusOK, map[string]any{
-			"query":   req.Query,
-			"count":   len(out),
-			"results": out,
-		}, d.Config.MaxRequestOutputBytes)
+		writeJSONBoundedWithSuccessHeaders(w, http.StatusOK, payload, d.Config.MaxRequestOutputBytes, func(header http.Header) {
+			addDiscoveryAttributionHeaders(header, out.Results)
+		})
 	}
 }
 
@@ -226,9 +188,9 @@ func validateSearchControls(req searchRequest) error {
 		return err
 	}
 	switch strings.ToLower(strings.TrimSpace(req.TimeRange)) {
-	case "", "day", "month", "year":
+	case "", "day", "week", "month", "year":
 	default:
-		return errors.New("time_range must be one of day, month, year")
+		return errors.New("time_range must be one of day, week, month, year")
 	}
 	if req.SafeSearch != nil && (*req.SafeSearch < 0 || *req.SafeSearch > 2) {
 		return errors.New("safesearch must be 0, 1, or 2")

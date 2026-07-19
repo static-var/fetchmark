@@ -173,6 +173,31 @@ func TestHTTPClientHonorsMaxRedirects(t *testing.T) {
 	}
 }
 
+func TestCheckRedirectPermitsExactlyConfiguredHops(t *testing.T) {
+	policy := DefaultInternal()
+	policy.MaxRedirects = 5
+	client := policy.HTTPClient(time.Second)
+	request, err := http.NewRequest(http.MethodGet, "https://example.org/final", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	via := make([]*http.Request, 5)
+	for index := range via {
+		via[index], err = http.NewRequest(http.MethodGet, "https://example.org/hop", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := client.CheckRedirect(request, via); err != nil {
+		t.Fatalf("fifth redirect rejected: %v", err)
+	}
+	via = append(via, via[len(via)-1])
+	var policyError *Error
+	if err := client.CheckRedirect(request, via); !errors.As(err, &policyError) || policyError.Reason != ReasonTooManyHops {
+		t.Fatalf("sixth redirect error = %v", err)
+	}
+}
+
 func TestTransportHonorsResponseHeaderTimeout(t *testing.T) {
 	p := DefaultInternal()
 	p.ResponseHeaderTimeout = 25 * time.Millisecond

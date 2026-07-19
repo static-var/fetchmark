@@ -57,6 +57,47 @@ func TestRateLimiter_Disabled(t *testing.T) {
 	}
 }
 
+func TestRateLimiterCustomUsesProvidedErrorEncoder(t *testing.T) {
+	h := RateLimiterCustom(0.0001, 1, nil, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"vendor":"limited"}`))
+	})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	call := func() *httptest.ResponseRecorder {
+		ctx := context.WithValue(context.Background(), authKey, Principal{Key: "custom"})
+		recorder := httptest.NewRecorder()
+		h.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx))
+		return recorder
+	}
+	if got := call().Code; got != http.StatusOK {
+		t.Fatalf("first status = %d", got)
+	}
+	denied := call()
+	if denied.Code != http.StatusTooManyRequests || denied.Body.String() != `{"vendor":"limited"}` || denied.Header().Get("Retry-After") != "1" {
+		t.Fatalf("denied = status %d headers %v body %q", denied.Code, denied.Header(), denied.Body.String())
+	}
+}
+
+func TestRateLimiterGroupSharesBucketsAcrossRouteMiddlewares(t *testing.T) {
+	group := NewRateLimiterGroup(0.0001, 1, nil)
+	h1 := group.Middleware(nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	h2 := group.Middleware(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte("vendor-limited"))
+	})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	call := func(handler http.Handler) *httptest.ResponseRecorder {
+		ctx := context.WithValue(context.Background(), authKey, Principal{Key: "shared"})
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx))
+		return recorder
+	}
+	if first := call(h1); first.Code != http.StatusOK {
+		t.Fatalf("first status = %d", first.Code)
+	}
+	if second := call(h2); second.Code != http.StatusTooManyRequests || second.Body.String() != "vendor-limited" {
+		t.Fatalf("second status = %d body = %q", second.Code, second.Body.String())
+	}
+}
+
 // TestRateLimiter_RedisAllowDeny runs the middleware against an
 // in-memory Redis and asserts the allow/deny semantics the cross-
 // instance coordinator is supposed to enforce: same key exhausts the

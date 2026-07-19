@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/staticvar/fetchmark/internal/core/model"
@@ -53,6 +54,38 @@ func TestDedupeNearDuplicates_DropsReposts(t *testing.T) {
 	}
 	if !seen["https://b/x"] || !seen["https://c/y"] {
 		t.Errorf("expected b and c to survive; survivors=%v", seen)
+	}
+}
+
+func TestDedupeNearDuplicatesUnionsProvenanceIntoWinner(t *testing.T) {
+	article := "This post explains how BM25 ranking works over a corpus of documents with term frequency saturation and document length normalization."
+	in := []model.SearchResult{
+		{URL: "https://a/x", Score: 0.4, Content: &model.Content{MainText: article}, Metadata: map[string]string{"rrf_sources": "searxng-open:original"}, Provenance: []model.DiscoveryProvenance{{Provider: "searxng", Lane: "searxng-open", Variant: "original"}}},
+		{URL: "https://b/x", Score: 0.9, Content: &model.Content{MainText: article + " Reprinted with permission."}, Metadata: map[string]string{"rrf_sources": "crossref-research:exact"}, Provenance: []model.DiscoveryProvenance{{Provider: "crossref", Lane: "crossref-research", Variant: "exact"}}},
+	}
+	out := dedupeNearDuplicates(in)
+	want := []model.DiscoveryProvenance{
+		{Provider: "crossref", Lane: "crossref-research", Variant: "exact"},
+		{Provider: "searxng", Lane: "searxng-open", Variant: "original"},
+	}
+	if len(out) != 1 || out[0].URL != "https://b/x" || !reflect.DeepEqual(out[0].Provenance, want) || out[0].Metadata["rrf_sources"] != "crossref-research:exact,searxng-open:original" {
+		t.Fatalf("deduped = %#v, want winner with provenance %#v", out, want)
+	}
+}
+
+func TestDedupeExactContentUnionsProvenanceIntoFirstWinner(t *testing.T) {
+	body := "identical normalized body"
+	in := []model.SearchResult{
+		{URL: "https://a/x", Content: &model.Content{MainText: body}, Metadata: map[string]string{"rrf_sources": "searxng-open:original"}, Provenance: []model.DiscoveryProvenance{{Provider: "searxng", Lane: "searxng-open", Variant: "original"}}},
+		{URL: "https://b/x", Content: &model.Content{MainText: body}, Metadata: map[string]string{"rrf_sources": "wikipedia-knowledge:original"}, Provenance: []model.DiscoveryProvenance{{Provider: "wikipedia", Lane: "wikipedia-knowledge", Variant: "original"}}},
+	}
+	out := dedupeByContentSHA(in)
+	want := []model.DiscoveryProvenance{
+		{Provider: "searxng", Lane: "searxng-open", Variant: "original"},
+		{Provider: "wikipedia", Lane: "wikipedia-knowledge", Variant: "original"},
+	}
+	if len(out) != 1 || !reflect.DeepEqual(out[0].Provenance, want) || out[0].Metadata["rrf_sources"] != "searxng-open:original,wikipedia-knowledge:original" {
+		t.Fatalf("deduped = %#v, want provenance %#v", out, want)
 	}
 }
 

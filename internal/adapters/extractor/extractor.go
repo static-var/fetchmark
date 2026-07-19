@@ -13,7 +13,10 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
+	"github.com/staticvar/fetchmark/internal/adapters/cache"
 	"github.com/staticvar/fetchmark/internal/core/model"
 
 	htmltomarkdown "github.com/JohannesKaufmann/html-to-markdown/v2"
@@ -40,6 +43,14 @@ const (
 	jsHeuristicMinText      = 200
 	jsHeuristicScriptRatio  = 0.5
 	jsHeuristicMinHTMLBytes = 1024
+
+	// Extracted list metadata is internal indexing input. Keep the combined
+	// retained count (640) comfortably below Bleve's 4096 list-value limit,
+	// and bound individual values before parsing or normalization.
+	maxMetadataHeadings      = 128
+	maxMetadataOutboundLinks = 512
+	maxMetadataHeadingBytes  = 512
+	maxMetadataURLBytes      = 2048
 )
 
 var scriptRE = regexp.MustCompile(`(?is)<script\b[^>]*>.*?</script\s*>`)
@@ -57,6 +68,11 @@ func (e *Extractor) Extract(rawHTML []byte, pageURL string) (*model.Content, err
 	opts.IncludeImages = false
 	if pageURL != "" {
 		if u, err := url.Parse(pageURL); err == nil {
+			// go-trafilatura currently joins relative hrefs to OriginalURL.Path
+			// as though that path were a directory. Supplying the containing
+			// directory preserves RFC 3986 resolution for ordinary page URLs;
+			// Content.URL below still retains the full caller-visible page URL.
+			u = trafilaturaBaseURL(u)
 			opts.OriginalURL = u
 		}
 	}
@@ -92,6 +108,8 @@ func (e *Extractor) Extract(rawHTML []byte, pageURL string) (*model.Content, err
 	}
 
 	if result.ContentNode != nil {
+		c.Headings, c.OutboundLinks = collectContentMetadata(result.ContentNode, pageURL)
+
 		var buf bytes.Buffer
 		if err := html.Render(&buf, result.ContentNode); err == nil {
 			c.CleanedHTML = buf.String()
@@ -106,6 +124,202 @@ func (e *Extractor) Extract(rawHTML []byte, pageURL string) (*model.Content, err
 	}
 
 	return c, nil
+}
+
+func trafilaturaBaseURL(pageURL *url.URL) *url.URL {
+	if pageURL == nil {
+		return nil
+	}
+	base := *pageURL
+	base.RawQuery = ""
+	base.ForceQuery = false
+	base.Fragment = ""
+	base.RawFragment = ""
+	if !strings.HasSuffix(base.Path, "/") {
+		if separator := strings.LastIndex(base.Path, "/"); separator >= 0 {
+			base.Path = base.Path[:separator+1]
+		} else {
+			base.Path = "/"
+		}
+		base.RawPath = ""
+	}
+	if base.Path == "" {
+		base.Path = "/"
+	}
+	return &base
+}
+
+// collectContentMetadata projects a bounded amount of indexing metadata from
+// the reader-view content tree. It deliberately ignores the raw document so
+// navigation and other discarded boilerplate do not enter the local corpus.
+func collectContentMetadata(root *html.Node, pageURL string) ([]string, []string) {
+	var baseURL *url.URL
+	if len(pageURL) <= maxMetadataURLBytes {
+		if parsed, err := url.Parse(pageURL); err == nil && isWebURL(parsed) {
+			baseURL = parsed
+		}
+	}
+
+	headings := make([]string, 0, 16)
+	links := make([]string, 0, 32)
+	seenLinks := make(map[string]struct{})
+
+	var walk func(*html.Node) bool
+	walk = func(node *html.Node) bool {
+		if node.Type == html.ElementNode {
+			if isNonVisibleNode(node) {
+				return false
+			}
+			if len(headings) < maxMetadataHeadings && isHeadingElement(node.Data) {
+				if text, ok := normalizedVisibleText(node); ok && text != "" {
+					headings = append(headings, text)
+				}
+			}
+
+			if len(links) < maxMetadataOutboundLinks && node.Data == "a" {
+				if link, ok := resolvedWebLink(node, baseURL); ok && !anchorNoFollow(node) {
+					if _, duplicate := seenLinks[link]; !duplicate {
+						seenLinks[link] = struct{}{}
+						links = append(links, link)
+					}
+				}
+			}
+		}
+
+		if len(headings) == maxMetadataHeadings && len(links) == maxMetadataOutboundLinks {
+			return true
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			if walk(child) {
+				return true
+			}
+		}
+		return false
+	}
+	walk(root)
+	return headings, links
+}
+
+func anchorNoFollow(node *html.Node) bool {
+	if node == nil {
+		return false
+	}
+	for _, attribute := range node.Attr {
+		if strings.EqualFold(attribute.Key, "rel") {
+			for _, value := range strings.Fields(strings.ToLower(attribute.Val)) {
+				if value == "nofollow" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func isHeadingElement(name string) bool {
+	return len(name) == 2 && name[0] == 'h' && name[1] >= '1' && name[1] <= '6'
+}
+
+func normalizedVisibleText(root *html.Node) (string, bool) {
+	var text strings.Builder
+	text.Grow(maxMetadataHeadingBytes)
+	seenText := false
+	pendingSpace := false
+	oversized := false
+
+	var walk func(*html.Node)
+	walk = func(node *html.Node) {
+		if oversized {
+			return
+		}
+		if node.Type == html.ElementNode && isNonVisibleNode(node) {
+			return
+		}
+		if node.Type == html.TextNode {
+			for _, r := range node.Data {
+				if unicode.IsSpace(r) {
+					pendingSpace = seenText
+					continue
+				}
+				extraBytes := utf8.RuneLen(r)
+				if pendingSpace {
+					extraBytes++
+				}
+				if text.Len()+extraBytes > maxMetadataHeadingBytes {
+					oversized = true
+					return
+				}
+				if pendingSpace {
+					text.WriteByte(' ')
+				}
+				text.WriteRune(r)
+				seenText = true
+				pendingSpace = false
+			}
+			return
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(root)
+	if oversized {
+		return "", false
+	}
+	return text.String(), true
+}
+
+func isNonVisibleNode(node *html.Node) bool {
+	switch node.Data {
+	case "script", "style", "template", "noscript":
+		return true
+	}
+	for _, attribute := range node.Attr {
+		if attribute.Key == "hidden" ||
+			(attribute.Key == "aria-hidden" && strings.EqualFold(strings.TrimSpace(attribute.Val), "true")) {
+			return true
+		}
+	}
+	return false
+}
+
+func resolvedWebLink(node *html.Node, baseURL *url.URL) (string, bool) {
+	var rawHref string
+	for _, attribute := range node.Attr {
+		if attribute.Key == "href" {
+			rawHref = strings.TrimSpace(attribute.Val)
+			break
+		}
+	}
+	if rawHref == "" || len(rawHref) > maxMetadataURLBytes {
+		return "", false
+	}
+
+	parsed, err := url.Parse(rawHref)
+	if err != nil {
+		return "", false
+	}
+	if !parsed.IsAbs() {
+		if baseURL == nil {
+			return "", false
+		}
+		parsed = baseURL.ResolveReference(parsed)
+	}
+	if !isWebURL(parsed) {
+		return "", false
+	}
+	parsed.Fragment = ""
+	parsed.RawFragment = ""
+	resolved, err := cache.CanonicalURL(parsed.String())
+	if err != nil || resolved == "" || len(resolved) > maxMetadataURLBytes {
+		return "", false
+	}
+	return resolved, true
+}
+
+func isWebURL(candidate *url.URL) bool {
+	return candidate != nil && candidate.Hostname() != "" && candidate.User == nil &&
+		(strings.EqualFold(candidate.Scheme, "http") || strings.EqualFold(candidate.Scheme, "https"))
 }
 
 // safeConvertMarkdown wraps html-to-markdown/v2's ConvertNode in a

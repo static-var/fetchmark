@@ -2,6 +2,7 @@ package robots
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -35,6 +36,145 @@ func TestChecker_AllowDisallow(t *testing.T) {
 	_, _ = c.Allowed(context.Background(), "Fetchmark", srv.URL+"/another")
 	if n := atomic.LoadInt64(&hits); n != 1 {
 		t.Fatalf("expected 1 upstream hit, got %d", n)
+	}
+}
+
+func TestEvaluatePolicyUsesExactProductTokenAndPathQuery(t *testing.T) {
+	body := []byte("User-agent: Fetchmark\nDisallow: /search?private=\n\nUser-agent: Fetch\nDisallow: /\n")
+	allowed, err := EvaluatePolicy(body, "Fetchmark/1 (+mailto:operator@example.org)", "https://example.org/search?public=1")
+	if err != nil || !allowed {
+		t.Fatalf("public query allowed=%v error=%v", allowed, err)
+	}
+	allowed, err = EvaluatePolicy(body, "Fetchmark/1 (+mailto:operator@example.org)", "https://example.org/search?private=1")
+	if err != nil || allowed {
+		t.Fatalf("private query allowed=%v error=%v", allowed, err)
+	}
+	for name, body := range map[string][]byte{
+		"oversized": make([]byte, MaxEvidencePolicyBytes+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := EvaluatePolicy(body, "Fetchmark/1", "https://example.org/"); err == nil {
+				t.Fatal("invalid policy input accepted")
+			}
+		})
+	}
+	if _, err := EvaluatePolicy(nil, "", "https://example.org/"); err == nil {
+		t.Fatal("empty product token accepted")
+	}
+	if decision := New(http.DefaultClient, time.Hour, 512<<10).Evaluate(context.Background(), "", "https://example.org/"); decision.Err == nil || decision.Allowed {
+		t.Fatalf("checker empty product token decision = %#v", decision)
+	}
+	if _, err := EvaluatePolicy(nil, "Fetchmark/1", "relative"); err == nil {
+		t.Fatal("relative URL accepted")
+	}
+}
+
+func TestEvaluatePolicyRFC9309BOMEncodingGroupsAndAllowTie(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		url       string
+		wantAllow bool
+	}{
+		{
+			name: "BOM does not create prefix agent match",
+			body: "\ufeffUser-agent: Fetch\nAllow: /\n\nUser-agent: *\nDisallow: /private\n",
+			url:  "https://example.org/private", wantAllow: false,
+		},
+		{
+			name: "percent encoded unreserved octet is decoded",
+			body: "User-agent: *\nDisallow: /private/~user\n",
+			url:  "https://example.org/private/%7euser", wantAllow: false,
+		},
+		{
+			name: "equal specificity allow wins",
+			body: "User-agent: Fetchmark\nDisallow: /same\nAllow: /same\n",
+			url:  "https://example.org/same", wantAllow: true,
+		},
+		{
+			name: "equal specificity allow wins in reverse order",
+			body: "User-agent: Fetchmark\nAllow: /same\nDisallow: /same\n",
+			url:  "https://example.org/same", wantAllow: true,
+		},
+		{
+			name: "matching groups are combined",
+			body: "User-agent: Fetchmark\nDisallow: /one\n\nUser-agent: Fetchmark\nDisallow: /two\n",
+			url:  "https://example.org/two", wantAllow: false,
+		},
+		{
+			name: "exact group suppresses wildcard",
+			body: "User-agent: *\nDisallow: /\n\nUser-agent: Fetchmark\nAllow: /public\n",
+			url:  "https://example.org/other", wantAllow: true,
+		},
+		{
+			name: "wildcard and end anchor",
+			body: "User-agent: *\nDisallow: /private/*/exact$\n",
+			url:  "https://example.org/private/one/exact", wantAllow: false,
+		},
+		{
+			name: "end anchor excludes suffix",
+			body: "User-agent: *\nDisallow: /private/exact$\n",
+			url:  "https://example.org/private/exact/suffix", wantAllow: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			allowed, err := EvaluatePolicy([]byte(test.body), "Fetchmark/1", test.url)
+			if err != nil || allowed != test.wantAllow {
+				t.Fatalf("allowed=%v want=%v error=%v", allowed, test.wantAllow, err)
+			}
+		})
+	}
+	if _, err := EvaluatePolicy([]byte{0xff}, "Fetchmark/1", "https://example.org/"); err == nil {
+		t.Fatal("invalid UTF-8 policy accepted")
+	}
+}
+
+func TestEvaluatePolicyResourceLimitsFailClosed(t *testing.T) {
+	longTarget := "https://example.org/" + strings.Repeat("a", maxPolicyRequestTargetBytes)
+	allowed, err := EvaluatePolicy(nil, "Fetchmark/1", longTarget)
+	if err != nil || allowed {
+		t.Fatalf("oversized request target allowed=%v error=%v", allowed, err)
+	}
+
+	var oversizedPolicy strings.Builder
+	oversizedPolicy.WriteString("User-agent: Fetchmark\n")
+	for index := 0; index <= maxPolicyRules; index++ {
+		fmt.Fprintf(&oversizedPolicy, "Disallow: /%05d\n", index)
+	}
+	if oversizedPolicy.Len() > MaxEvidencePolicyBytes {
+		t.Fatalf("rule-limit fixture exceeds policy byte limit: %d", oversizedPolicy.Len())
+	}
+	if _, err := EvaluatePolicy([]byte(oversizedPolicy.String()), "Fetchmark/1", "https://example.org/"); err == nil || !strings.Contains(err.Error(), "rule limit") {
+		t.Fatalf("rule-limit error = %v", err)
+	}
+
+	target := "/" + strings.Repeat("a", maxPolicyRequestTargetBytes-1)
+	rules := make([]policyRule, 0, 256)
+	for index := 0; index < cap(rules); index++ {
+		pattern := fmt.Sprintf("/*never-%03d", index)
+		rules = append(rules, policyRule{pattern: pattern, specificity: policySpecificity(pattern)})
+	}
+	resourceIntensive := &policy{groups: []policyGroup{{agents: []string{"fetchmark"}, rules: rules}}}
+	if resourceIntensive.allowed("fetchmark", target) {
+		t.Fatal("matcher allowed after exhausting its explicit work budget")
+	}
+}
+
+func TestChecker_UserAgentGroupsMatchExactProductToken(t *testing.T) {
+	const userAgent = "Fetchmark/0.1 (+https://github.com/staticvar/fetchmark)"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("User-Agent"); got != userAgent {
+			t.Errorf("robots User-Agent = %q, want %q", got, userAgent)
+		}
+		_, _ = w.Write([]byte("User-agent: Fetch\nDisallow: /\n\nUser-agent: *\nDisallow: /w/\n"))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(srv.Client(), time.Hour, 0)
+	decision := c.Evaluate(context.Background(), userAgent, srv.URL+"/wiki/Article")
+	if decision.Err != nil || !decision.Allowed || !decision.Authoritative {
+		t.Fatalf("Fetchmark must not inherit the distinct Fetch product-token group: %+v", decision)
 	}
 }
 
@@ -93,7 +233,7 @@ func TestChecker_FetchReportsOversizedRobots(t *testing.T) {
 	}
 }
 
-func TestChecker_FetchFailureIsNotCachedAsAllow(t *testing.T) {
+func TestChecker_FetchFailureFailsClosedAndIsNotCached(t *testing.T) {
 	var hits atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if hits.Add(1) == 1 {
@@ -105,8 +245,8 @@ func TestChecker_FetchFailureIsNotCachedAsAllow(t *testing.T) {
 	t.Cleanup(srv.Close)
 	c := New(srv.Client(), time.Hour, 0)
 
-	if ok, _ := c.Allowed(context.Background(), "Fetchmark", srv.URL+"/private"); !ok {
-		t.Fatal("first transient failure should fail open")
+	if ok, err := c.Allowed(context.Background(), "Fetchmark", srv.URL+"/private"); ok || err == nil {
+		t.Fatalf("first transient failure should fail closed, ok=%v err=%v", ok, err)
 	}
 	if ok, _ := c.Allowed(context.Background(), "Fetchmark", srv.URL+"/private"); ok {
 		t.Fatal("second request should retry robots and observe disallow")
@@ -116,15 +256,37 @@ func TestChecker_FetchFailureIsNotCachedAsAllow(t *testing.T) {
 	}
 }
 
-func TestChecker_UnreachableFailsOpen(t *testing.T) {
+func TestChecker_UnreachableFailsClosed(t *testing.T) {
 	c := New(&http.Client{Timeout: 100 * time.Millisecond}, time.Hour, 0)
 	// Port 1 is reserved; connect refuses fast.
 	ok, err := c.Allowed(context.Background(), "Fetchmark", "http://127.0.0.1:1/page")
-	if err != nil {
-		t.Fatalf("err = %v", err)
+	if err == nil || ok {
+		t.Fatalf("unreachable robots.txt should fail closed, err=%v ok=%v", err, ok)
 	}
-	if !ok {
-		t.Fatal("unreachable robots.txt should fail open")
+	if !c.IsDisallowed(context.Background(), "Fetchmark", "http://127.0.0.1:1/page") {
+		t.Fatal("IsDisallowed failed open on unreachable robots.txt")
+	}
+}
+
+func TestChecker_EvaluatePreservesRobotsUncertaintyForRetention(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if hits.Add(1) == 1 {
+			http.Error(w, "temporary", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("User-agent: Fetchmark\nDisallow: /private\n"))
+	}))
+	t.Cleanup(srv.Close)
+	c := New(srv.Client(), time.Hour, 0)
+
+	decision := c.Evaluate(context.Background(), "Fetchmark", srv.URL+"/private")
+	if decision.Allowed || !decision.Authoritative || decision.Err == nil {
+		t.Fatalf("transient decision = %+v", decision)
+	}
+	decision = c.Evaluate(context.Background(), "Fetchmark", srv.URL+"/private")
+	if decision.Allowed || !decision.Authoritative || decision.Err != nil {
+		t.Fatalf("authoritative decision = %+v", decision)
 	}
 }
 

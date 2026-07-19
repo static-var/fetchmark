@@ -17,8 +17,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net/url"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -26,25 +24,13 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/staticvar/fetchmark/internal/core/canonicalurl"
 )
 
 // ExtractorVersion is bumped whenever the extraction pipeline changes so
 // that cached entries are invalidated automatically.
-const ExtractorVersion = "1"
-
-// Tracking query params stripped before canonicalisation.
-var trackingParams = map[string]struct{}{
-	"utm_source":   {},
-	"utm_medium":   {},
-	"utm_campaign": {},
-	"utm_term":     {},
-	"utm_content":  {},
-	"fbclid":       {},
-	"gclid":        {},
-	"mc_cid":       {},
-	"mc_eid":       {},
-	"igshid":       {},
-}
+const ExtractorVersion = "2"
 
 // Cache is the exported cache surface. All operations are safe for
 // concurrent use.
@@ -156,58 +142,7 @@ func (c *Cache) deleteMemoryEntry(key string, entry memEntry) {
 //   - drops well-known tracking params
 //   - sorts the remaining query params
 func CanonicalURL(raw string) (string, error) {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return "", err
-	}
-	if u.Scheme == "" || u.Host == "" {
-		return "", errors.New("cache: url missing scheme/host")
-	}
-	u.Scheme = strings.ToLower(u.Scheme)
-	host := strings.ToLower(u.Hostname())
-	if port := u.Port(); port != "" {
-		if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
-			u.Host = host
-		} else {
-			u.Host = host + ":" + port
-		}
-	} else {
-		u.Host = host
-	}
-	u.Fragment = ""
-	u.RawFragment = ""
-
-	if u.RawQuery != "" {
-		q := u.Query()
-		for k := range q {
-			if _, drop := trackingParams[strings.ToLower(k)]; drop {
-				q.Del(k)
-			}
-		}
-		keys := make([]string, 0, len(q))
-		for k := range q {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		var b strings.Builder
-		for i, k := range keys {
-			if i > 0 {
-				b.WriteByte('&')
-			}
-			vals := q[k]
-			sort.Strings(vals)
-			for j, v := range vals {
-				if j > 0 {
-					b.WriteByte('&')
-				}
-				b.WriteString(url.QueryEscape(k))
-				b.WriteByte('=')
-				b.WriteString(url.QueryEscape(v))
-			}
-		}
-		u.RawQuery = b.String()
-	}
-	return u.String(), nil
+	return canonicalurl.V1(raw)
 }
 
 // ArtifactKey returns the Redis key for a fetch artifact (plain fetch).

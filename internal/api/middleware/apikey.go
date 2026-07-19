@@ -24,18 +24,34 @@ type Principal struct {
 // the Authorization: Bearer <key> header or the X-API-Key header. Admin
 // keys are a strict superset and unlock gated request fields.
 func APIKey(keys, adminKeys []string) func(http.Handler) http.Handler {
+	return APIKeyCustom(keys, adminKeys, extractKey, func(w http.ResponseWriter, _ *http.Request, status int, code string) {
+		writeErr(w, status, code)
+	})
+}
+
+// APIKeyCustom applies the same constant-time key validation while allowing a
+// compatibility route to use its vendor's documented header and error shape.
+func APIKeyCustom(keys, adminKeys []string, extractor func(*http.Request) string, onError func(http.ResponseWriter, *http.Request, int, string)) func(http.Handler) http.Handler {
 	kSet := toSet(keys)
 	aSet := toSet(adminKeys)
+	if extractor == nil {
+		extractor = extractKey
+	}
+	if onError == nil {
+		onError = func(w http.ResponseWriter, _ *http.Request, status int, code string) {
+			writeErr(w, status, code)
+		}
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			provided := extractKey(r)
+			provided := strings.TrimSpace(extractor(r))
 			if provided == "" {
-				writeErr(w, http.StatusUnauthorized, "missing_api_key")
+				onError(w, r, http.StatusUnauthorized, "missing_api_key")
 				return
 			}
 			admin := constantTimeHas(aSet, provided)
 			if !(admin || constantTimeHas(kSet, provided)) {
-				writeErr(w, http.StatusUnauthorized, "invalid_api_key")
+				onError(w, r, http.StatusUnauthorized, "invalid_api_key")
 				return
 			}
 			ctx := context.WithValue(r.Context(), authKey, Principal{Key: provided, Admin: admin})

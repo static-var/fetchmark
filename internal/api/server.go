@@ -18,9 +18,12 @@ import (
 	"github.com/staticvar/fetchmark/internal/adapters/summarizer"
 	"github.com/staticvar/fetchmark/internal/api/dashboard"
 	"github.com/staticvar/fetchmark/internal/api/middleware"
+	"github.com/staticvar/fetchmark/internal/buildidentity"
 	"github.com/staticvar/fetchmark/internal/config"
+	"github.com/staticvar/fetchmark/internal/core/localcorpus"
 	"github.com/staticvar/fetchmark/internal/core/model"
 	"github.com/staticvar/fetchmark/internal/core/pipeline"
+	"github.com/staticvar/fetchmark/internal/evaluationmanifest"
 )
 
 // Deps bundles the external collaborators an API server needs.
@@ -29,10 +32,19 @@ type Deps struct {
 	Config   config.Config
 	Pipeline PipelineRunner
 	Version  string
+	// BuildSHA256 identifies the executable artifact resolved at process
+	// startup. Invalid or absent values are omitted from search responses.
+	BuildSHA256 string
+	// EvaluationConfiguration is a bounded non-secret manifest of the
+	// resolved controls that affect search evaluation. Its digest is emitted on
+	// native search responses so artifacts can prove one configuration.
+	EvaluationConfiguration    []byte
+	EvaluationConfigurationSHA string
 	// Redis is optional; when set it backs cross-instance rate limiting.
 	Redis *redis.Client
-	// ReadyCheck reports whether hard dependencies (Redis, SearXNG) are
-	// reachable. Returning nil means ready; non-nil is rendered as the
+	// ReadyCheck reports whether configured hard dependencies are reachable.
+	// Redis is checked when active; SearXNG is checked only when it is the
+	// configured primary. Returning nil means ready; non-nil is rendered as the
 	// failure reason on /readyz.
 	ReadyCheck func() error
 
@@ -40,6 +52,17 @@ type Deps struct {
 	// config endpoints. A nil or empty registry turns summarize into
 	// a 503 "not configured" response.
 	Summarizers *summarizer.Registry
+	// CorpusCurator is the explicit admin-only mutation boundary. It remains
+	// separate from PipelineRunner so ordinary native and compatibility routes
+	// cannot request curated persistence.
+	CorpusCurator CorpusCurator
+}
+
+type CorpusCurator interface {
+	AdmitCurated(context.Context, []string) []pipeline.CuratedMutationResult
+	AdmitCuratedClassified(context.Context, []string, localcorpus.SafetyClassification) []pipeline.CuratedMutationResult
+	AdmitCuratedFocused(context.Context, pipeline.FocusedAdmission) []pipeline.CuratedMutationResult
+	TakedownCurated(context.Context, []string) []pipeline.CuratedMutationResult
 }
 
 // PipelineRunner is the subset of *pipeline.Pipeline the API layer uses;
@@ -49,15 +72,29 @@ type PipelineRunner interface {
 	Parse(ctx context.Context, o pipeline.Options) []model.SearchResult
 }
 
+// DetailedPipelineRunner is an optional additive search contract. Keeping it
+// separate preserves test and adapter compatibility while production retains
+// provider-aware discovery evidence.
+type DetailedPipelineRunner interface {
+	SearchDetailed(ctx context.Context, o pipeline.Options) (pipeline.SearchOutput, error)
+}
+
 // NewRouter wires the full HTTP surface for Fetchmark. It is invoked once
 // from cmd/fetchmark and from integration tests.
 func NewRouter(d Deps) http.Handler {
 	r := chi.NewRouter()
 
+	if buildSHA256, ok := buildidentity.Parse(d.BuildSHA256); ok {
+		r.Use(nativeSearchResponseHeader(buildSHA256))
+	}
+	if _, configurationSHA256, ok := evaluationConfigurationEvidence(d); ok {
+		r.Use(nativeSearchConfigurationHeader(configurationSHA256))
+	}
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Logger(d.Log))
 	r.Use(middleware.Metrics)
 	r.Use(chimw.Recoverer)
+	rateLimits := middleware.NewRateLimiterGroup(d.Config.RateLimitPerSec, d.Config.RateLimitBurst, d.Redis)
 
 	r.Get("/healthz", healthz)
 	r.Get("/readyz", readyz(d.ReadyCheck))
@@ -65,10 +102,36 @@ func NewRouter(d Deps) http.Handler {
 
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(middleware.APIKey(d.Config.APIKeys, d.Config.AdminAPIKeys))
-		r.Use(middleware.RateLimiter(d.Config.RateLimitPerSec, d.Config.RateLimitBurst, d.Redis))
+		r.Use(rateLimits.Middleware(nil))
 		r.Post("/search", searchHandler(d))
+		r.Get("/evaluation/configuration", evaluationConfigurationHandler(d))
 		r.Post("/parse", parseHandler(d))
 		r.Post("/summarize", summarizeHandler(d))
+	})
+
+	r.Route("/compat/tavily", func(r chi.Router) {
+		r.Use(middleware.APIKeyCustom(d.Config.APIKeys, d.Config.AdminAPIKeys, bearerKey, tavilyAuthError))
+		r.Use(rateLimits.Middleware(func(w http.ResponseWriter, _ *http.Request) {
+			writeTavilyError(w, http.StatusTooManyRequests, "rate limit exceeded")
+		}))
+		r.Post("/search", tavilySearchHandler(d))
+	})
+
+	r.Route("/compat/exa", func(r chi.Router) {
+		r.Use(middleware.APIKeyCustom(d.Config.APIKeys, d.Config.AdminAPIKeys, exaAPIKey, exaAuthError))
+		r.Use(rateLimits.Middleware(func(w http.ResponseWriter, request *http.Request) {
+			writeExaError(w, request, http.StatusTooManyRequests, "rate limit exceeded", "RATE_LIMITED")
+		}))
+		r.Post("/search", exaSearchHandler(d))
+		r.Post("/contents", exaContentsHandler(d))
+	})
+
+	r.Route("/compat/brave", func(r chi.Router) {
+		r.Use(middleware.APIKeyCustom(d.Config.APIKeys, d.Config.AdminAPIKeys, headerKey("X-Subscription-Token"), braveAuthError))
+		r.Use(rateLimits.Middleware(func(w http.ResponseWriter, request *http.Request) {
+			writeBraveError(w, request, http.StatusTooManyRequests, "rate limit exceeded", "RATE_LIMITED")
+		}))
+		r.Get("/res/v1/web/search", braveSearchHandler(d))
 	})
 
 	// Admin surface. Mounted only when admin keys are configured so
@@ -77,11 +140,14 @@ func NewRouter(d Deps) http.Handler {
 	if len(d.Config.AdminAPIKeys) > 0 {
 		r.Route("/admin", func(r chi.Router) {
 			r.Use(middleware.APIKey(d.Config.AdminAPIKeys, d.Config.AdminAPIKeys))
-			r.Use(middleware.RateLimiter(d.Config.RateLimitPerSec, d.Config.RateLimitBurst, d.Redis))
+			r.Use(rateLimits.Middleware(nil))
 			r.Get("/summarize/config", adminSummarizeGet(d))
 			r.Put("/summarize/providers", adminSummarizeProviderPut(d))
 			r.Delete("/summarize/providers/{name}", adminSummarizeProviderDelete(d))
 			r.Put("/summarize/default", adminSummarizeDefaultPut(d))
+			r.Post("/corpus/admissions", adminCorpusAdmission(d))
+			r.Post("/corpus/focused-admissions", adminCorpusFocusedAdmission(d))
+			r.Post("/corpus/takedowns", adminCorpusTakedown(d))
 		})
 	}
 
@@ -102,6 +168,28 @@ func NewRouter(d Deps) http.Handler {
 	})
 
 	return r
+}
+
+func nativeSearchResponseHeader(value string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			if request.URL.Path == "/v1/search" {
+				writer.Header().Set(buildidentity.HeaderName, value)
+			}
+			next.ServeHTTP(writer, request)
+		})
+	}
+}
+
+func nativeSearchConfigurationHeader(value string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			if request.URL.Path == "/v1/search" {
+				writer.Header().Set(evaluationmanifest.HeaderName, value)
+			}
+			next.ServeHTTP(writer, request)
+		})
+	}
 }
 
 // summarizerDashboardView adapts *summarizer.Registry to the narrow
@@ -197,21 +285,40 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 }
 
 func writeJSONBounded(w http.ResponseWriter, status int, v any, maxBytes int64) {
+	writeJSONBoundedWithSuccessHeaders(w, status, v, maxBytes, nil)
+}
+
+func writeJSONBoundedWithSuccessHeaders(w http.ResponseWriter, status int, v any, maxBytes int64, successHeaders func(http.Header)) {
+	writeJSONBoundedCustomWithSuccessHeaders(w, status, v, maxBytes, http.StatusInsufficientStorage, map[string]string{"error": "response_byte_budget"}, successHeaders)
+}
+
+func writeJSONBoundedCustom(w http.ResponseWriter, status int, v any, maxBytes int64, fallbackStatus int, fallback any) {
+	writeJSONBoundedCustomWithSuccessHeaders(w, status, v, maxBytes, fallbackStatus, fallback, nil)
+}
+
+func writeJSONBoundedCustomWithSuccessHeaders(w http.ResponseWriter, status int, v any, maxBytes int64, fallbackStatus int, fallback any, successHeaders func(http.Header)) {
 	if maxBytes <= 0 {
+		if successHeaders != nil {
+			successHeaders(w.Header())
+		}
 		writeJSON(w, status, v)
 		return
 	}
 	var body limitedBuffer
 	body.limit = maxBytes
 	if err := json.NewEncoder(&body).Encode(v); err != nil {
-		fallback := []byte("{\"error\":\"response_byte_budget\"}\n")
-		if int64(len(fallback)) > maxBytes {
-			fallback = nil
+		var fallbackBody limitedBuffer
+		fallbackBody.limit = maxBytes
+		if encodeErr := json.NewEncoder(&fallbackBody).Encode(fallback); encodeErr != nil {
+			fallbackBody.Reset()
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInsufficientStorage)
-		_, _ = w.Write(fallback)
+		w.WriteHeader(fallbackStatus)
+		_, _ = w.Write(fallbackBody.Bytes())
 		return
+	}
+	if successHeaders != nil {
+		successHeaders(w.Header())
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

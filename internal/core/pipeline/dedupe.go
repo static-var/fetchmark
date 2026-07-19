@@ -68,10 +68,14 @@ func dedupeNearDuplicates(in []model.SearchResult) []model.SearchResult {
 				continue
 			}
 			if preferOver(in[i], in[j]) {
+				in[i].Provenance = mergeDiscoveryProvenance(in[i].Provenance, in[j].Provenance)
+				syncLegacyRRFProvenance(&in[i])
 				dropped[j] = true
 				continue
 			}
 			// j wins; drop i and move on to the next i.
+			in[j].Provenance = mergeDiscoveryProvenance(in[j].Provenance, in[i].Provenance)
+			syncLegacyRRFProvenance(&in[j])
 			dropped[i] = true
 			break
 		}

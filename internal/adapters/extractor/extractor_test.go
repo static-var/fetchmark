@@ -1,8 +1,13 @@
 package extractor
 
 import (
+	"encoding/json"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+
+	"golang.org/x/net/html"
 )
 
 const sampleArticle = `<!DOCTYPE html><html lang="en"><head>
@@ -50,6 +55,95 @@ func TestExtract_BasicArticle(t *testing.T) {
 	if c.UnsupportedReason != "" {
 		t.Fatalf("unexpected unsupported: %q", c.UnsupportedReason)
 	}
+	if want := []string{"The Test Article"}; !reflect.DeepEqual(c.Headings, want) {
+		t.Fatalf("headings = %#v, want %#v", c.Headings, want)
+	}
+	if want := []string{"https://example.com/other"}; !reflect.DeepEqual(c.OutboundLinks, want) {
+		t.Fatalf("outbound links = %#v, want %#v", c.OutboundLinks, want)
+	}
+
+	encoded, err := json.Marshal(c)
+	if err != nil {
+		t.Fatalf("marshal content: %v", err)
+	}
+	if strings.Contains(string(encoded), "headings") || strings.Contains(string(encoded), "outbound_links") {
+		t.Fatalf("internal metadata leaked into public JSON: %s", encoded)
+	}
+}
+
+func TestCollectContentMetadata_OrderResolutionFilteringAndDedupe(t *testing.T) {
+	node := parseMetadataFixture(t, `<article>
+		<h2>  First <span> heading </span><span hidden> hidden text</span><span aria-hidden="true"> aria-hidden text</span> </h2>
+		<p>
+			<a href="../docs?q=go#install">relative</a>
+			<a href="https://other.example/path#one">absolute</a>
+			<a href="https://OTHER.example:443/path#two">canonical duplicate</a>
+			<a href="//cdn.example/asset#download">scheme relative</a>
+			<a href="https://[2001:DB8::1]:443/page#section">IPv6</a>
+			<a href="../docs?q=go#other">duplicate after fragment removal</a>
+			<a href="https://user:secret@example.com/private">userinfo</a>
+			<a href="mailto:test@example.com">email</a>
+			<a href="javascript:alert(1)">script</a>
+			<a href="%zz">malformed</a>
+			<a href="/do-not-follow" rel="external NOFOLLOW">nofollow</a>
+		</p>
+		<section hidden><h3>Hidden ancestor heading</h3><a href="/hidden">hidden link</a></section>
+		<section aria-hidden="true"><h3>ARIA-hidden ancestor heading</h3><a href="/aria-hidden">ARIA-hidden link</a></section>
+		<h6>Second
+		 heading<script>not visible</script></h6>
+	</article>`)
+
+	headings, links := collectContentMetadata(node, "https://example.com/news/page")
+
+	if want := []string{"First heading", "Second heading"}; !reflect.DeepEqual(headings, want) {
+		t.Fatalf("headings = %#v, want %#v", headings, want)
+	}
+	if want := []string{
+		"https://example.com/docs?q=go",
+		"https://other.example/path",
+		"https://cdn.example/asset",
+		"https://[2001:db8::1]/page",
+	}; !reflect.DeepEqual(links, want) {
+		t.Fatalf("links = %#v, want %#v", links, want)
+	}
+}
+
+func TestCollectContentMetadata_BoundsCountsAndEntrySizes(t *testing.T) {
+	var fixture strings.Builder
+	fixture.WriteString("<article>")
+	fixture.WriteString("<h2>" + strings.Repeat("h", maxMetadataHeadingBytes+1) + "</h2>")
+	fixture.WriteString(`<a href="https://example.com/` + strings.Repeat("u", maxMetadataURLBytes+1) + `">oversized</a>`)
+	for i := 0; i < maxMetadataHeadings+5; i++ {
+		fixture.WriteString("<h3>Heading " + strconv.Itoa(i) + "</h3>")
+	}
+	for i := 0; i < maxMetadataOutboundLinks+5; i++ {
+		fixture.WriteString(`<a href="/link/` + strconv.Itoa(i) + `#fragment">Link</a>`)
+	}
+	fixture.WriteString("</article>")
+
+	headings, links := collectContentMetadata(parseMetadataFixture(t, fixture.String()), "https://example.com/base")
+
+	if len(headings) != maxMetadataHeadings {
+		t.Fatalf("heading count = %d, want cap %d", len(headings), maxMetadataHeadings)
+	}
+	if headings[0] != "Heading 0" || headings[len(headings)-1] != "Heading "+strconv.Itoa(maxMetadataHeadings-1) {
+		t.Fatalf("unexpected bounded headings: first=%q last=%q", headings[0], headings[len(headings)-1])
+	}
+	if len(links) != maxMetadataOutboundLinks {
+		t.Fatalf("link count = %d, want cap %d", len(links), maxMetadataOutboundLinks)
+	}
+	if links[0] != "https://example.com/link/0" || links[len(links)-1] != "https://example.com/link/"+strconv.Itoa(maxMetadataOutboundLinks-1) {
+		t.Fatalf("unexpected bounded links: first=%q last=%q", links[0], links[len(links)-1])
+	}
+}
+
+func parseMetadataFixture(t *testing.T, fixture string) *html.Node {
+	t.Helper()
+	node, err := html.Parse(strings.NewReader(fixture))
+	if err != nil {
+		t.Fatalf("parse metadata fixture: %v", err)
+	}
+	return node
 }
 
 func TestExtract_JSRequiredHeuristic(t *testing.T) {

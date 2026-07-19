@@ -4,26 +4,49 @@ package model
 
 import "time"
 
+// DiscoveryProvenance identifies one trusted broker lane that contributed to
+// a result. The tuple is additive public metadata; vendor compatibility
+// translators intentionally do not expose it.
+type DiscoveryProvenance struct {
+	Provider string `json:"provider"`
+	Lane     string `json:"lane"`
+	Variant  string `json:"variant"`
+}
+
+// ProviderDocument is content returned by a fixed, trusted discovery provider
+// in the same bounded request as its URL result. It is transient pipeline input:
+// it is never serialized or retained in the local corpus by ordinary search.
+type ProviderDocument struct {
+	// HTML is empty when the provider intentionally withholds content; the
+	// containing pointer still tells the pipeline not to crawl the result URL.
+	HTML     []byte
+	Author   string
+	SiteName string
+}
+
 // SearchResult is the canonical representation of a single search hit
 // after it has been extracted (possibly) and scored (possibly). Adapters
 // return lighter-weight variants which are promoted into this shape by
 // the core pipeline.
 type SearchResult struct {
-	URL         string            `json:"url"`
-	Title       string            `json:"title,omitempty"`
-	Snippet     string            `json:"snippet,omitempty"`
-	Engines     []string          `json:"engines,omitempty"`
-	PublishedAt *time.Time        `json:"published_at,omitempty"`
-	Author      string            `json:"author,omitempty"`
-	Markdown    string            `json:"markdown,omitempty"`
-	HTML        string            `json:"html,omitempty"`
-	Content     *Content          `json:"content,omitempty"`
-	Score       float64           `json:"score,omitempty"`
-	FromCache   bool              `json:"from_cache,omitempty"`
-	FetchMS     int64             `json:"fetch_ms,omitempty"`
-	Unsupported string            `json:"unsupported_reason,omitempty"`
-	Metadata    map[string]string `json:"metadata,omitempty"`
-	Chunks      []ContentChunk    `json:"chunks,omitempty"`
+	URL         string                `json:"url"`
+	Title       string                `json:"title,omitempty"`
+	Snippet     string                `json:"snippet,omitempty"`
+	Engines     []string              `json:"engines,omitempty"`
+	PublishedAt *time.Time            `json:"published_at,omitempty"`
+	Author      string                `json:"author,omitempty"`
+	Markdown    string                `json:"markdown,omitempty"`
+	HTML        string                `json:"html,omitempty"`
+	Content     *Content              `json:"content,omitempty"`
+	Score       float64               `json:"score,omitempty"`
+	FromCache   bool                  `json:"from_cache,omitempty"`
+	FetchMS     int64                 `json:"fetch_ms,omitempty"`
+	Unsupported string                `json:"unsupported_reason,omitempty"`
+	Metadata    map[string]string     `json:"metadata,omitempty"`
+	Provenance  []DiscoveryProvenance `json:"provenance,omitempty"`
+	Chunks      []ContentChunk        `json:"chunks,omitempty"`
+	// ProviderDocument is consumed before the result crosses the API boundary.
+	ProviderDocument *ProviderDocument `json:"-"`
 }
 
 // ContentChunk is a query-focused excerpt selected from extracted page
@@ -48,5 +71,7 @@ type Content struct {
 	MainText          string     `json:"main_text,omitempty"`
 	Markdown          string     `json:"markdown,omitempty"`
 	CleanedHTML       string     `json:"cleaned_html,omitempty"`
+	Headings          []string   `json:"-"`
+	OutboundLinks     []string   `json:"-"`
 	UnsupportedReason string     `json:"unsupported_reason,omitempty"`
 }

@@ -5,14 +5,15 @@ robots.txt fetch + cache + policy check. Admin-gated bypass lives in
 
 ## Entry points
 
-- `robots.go` — `New(fetcher, ttl)` returns a `Cache` with
-  `Allowed(ctx, url, ua) (bool, error)`.
+- `robots.go` — `New(client, ttl, maxSize)` returns a `Checker` with
+  `Allowed(ctx, ua, url)` and richer `Evaluate` decision surfaces.
 
 ## Invariants
 
 - Cache is keyed on origin (`scheme://host[:port]`), not full URL.
-- Misses fetch `/robots.txt` via the egress-gated fetcher; a
-  404/403/5xx from robots.txt is treated as "allow" (standard policy).
+- Misses fetch `/robots.txt` via an egress-gated client. RFC 9309 treats 4xx as
+  unavailable (access allowed), while network/5xx unreachable states require
+  complete disallow. Failures are not cached, so a later request retries.
 - Do not short-circuit this check in the pipeline. If the caller
   wants a bypass, they set `respect_robots=false` which is admin-gated
   at the API layer and arrives as `Options.RespectRobots = false`.

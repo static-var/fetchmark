@@ -1,0 +1,40 @@
+{
+  "version": 3,
+  "contact_uri": "mailto:operator@example.invalid",
+  "max_frontier_urls": 10000,
+  "max_discovery_sources": 100,
+  "max_discovery_page_memberships": 10000,
+  "max_discovery_source_edges": 1000,
+  "max_link_edges": 10000,
+  "jobs": [
+    {
+      "id": "research-feed",
+      "seeds": [],
+      "allowed_domains": ["research.example.invalid"],
+      "allowed_path_prefixes": ["/papers/"],
+      "denied_path_prefixes": [],
+      "denied_urls": [],
+      "max_urls_per_run": 200,
+      "max_source_polls_per_run": 2,
+      "refresh_interval": "72h",
+      "rejection_recheck_interval": "336h",
+      "min_host_interval": "3s",
+      "max_attempts": 4,
+      "link_expansion": {"max_links_per_page": 16, "max_pages_per_run": 25},
+      "discovery_sources": [
+        {
+          "url": "https://research.example.invalid/feeds/papers.atom",
+          "kind": "feed",
+          "allowed_source_path_prefixes": ["/feeds/"],
+          "poll_interval": "30m",
+          "error_recheck_interval": "1h",
+          "max_compressed_bytes": 1048576,
+          "max_decompressed_bytes": 4194304,
+          "max_entries": 5000,
+          "max_child_sources": 0,
+          "max_depth": 0
+        }
+      ]
+    }
+  ]
+}

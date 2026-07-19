@@ -11,9 +11,17 @@ See [`openapi.yaml`](../../../openapi.yaml) for the API contract and
 
 | Area | Package | Doc |
 |------|---------|-----|
+| Discovery contracts and roadmap | `internal/core/search` | [discovery.md](discovery.md) |
 | HTTP surface, middleware | `internal/api` | [api.md](api.md) |
 | Dashboard | `internal/api/dashboard` | [dashboard.md](dashboard.md) |
 | SearXNG client | `internal/adapters/searxng` | [searxng.md](searxng.md) |
+| Native open providers | `internal/adapters/{wikipedia,crossref,arxiv,mwmbl,wiby,stackexchange,github,pubmed,yacy}` | [discovery.md](discovery.md) |
+| Discovery coalescing/cache | `internal/adapters/discoverycache` | [discovery.md](discovery.md) |
+| Persistent local lexical index | `internal/adapters/bleveindex` | [discovery.md](discovery.md) |
+| Persistent source artifacts | `internal/adapters/localartifact` | [discovery.md](discovery.md) |
+| Signed open-index packs | `internal/core/indexpack`, `internal/adapters/{openpackindex,openpackbuilder}` | [consumer](open-index-packs.md), [publisher](open-index-pack-publishing.md) |
+| Optional focused ingestion | `internal/core/focusedcrawl`, `cmd/fetchmark-crawl` | [crawler.md](crawler.md) |
+| Private trusted index federation | `internal/core/federation`, `internal/federationapi`, `internal/adapters/federationpeer` | [federation.md](federation.md) |
 | URL fetcher (pool, budgets) | `internal/adapters/fetcher` | [fetcher.md](fetcher.md) |
 | Egress / SSRF policy | `internal/adapters/egress` | [egress.md](egress.md) |
 | Extractor (trafilatura+md) | `internal/adapters/extractor` | [extractor.md](extractor.md) |

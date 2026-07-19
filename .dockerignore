@@ -1,0 +1,15 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+bin/
+coverage.out
+docs/benchmarks/artifacts/
+**/.fetchmark-*/
+**/publisher-private.json
+**/manifest.ed25519
+**/build-report.ed25519
+**/*.key
+**/*.pem
+**/*.bleve/

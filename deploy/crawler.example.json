@@ -1,0 +1,43 @@
+{
+  "version": 3,
+  "contact_uri": "https://example.invalid/fetchmark-crawler",
+  "max_frontier_urls": 10000,
+  "max_discovery_sources": 1000,
+  "max_discovery_page_memberships": 100000,
+  "max_discovery_source_edges": 100000,
+  "max_link_edges": 100000,
+  "jobs": [
+    {
+      "id": "project-docs",
+      "seeds": ["https://example.invalid/docs/"],
+      "allowed_domains": ["example.invalid"],
+      "allowed_path_prefixes": ["/docs/"],
+      "denied_path_prefixes": [],
+      "denied_urls": [],
+      "max_urls_per_run": 500,
+      "max_source_polls_per_run": 4,
+      "refresh_interval": "24h",
+      "rejection_recheck_interval": "168h",
+      "min_host_interval": "2s",
+      "max_attempts": 4,
+      "link_expansion": {
+        "max_links_per_page": 32,
+        "max_pages_per_run": 100
+      },
+      "discovery_sources": [
+        {
+          "url": "https://example.invalid/sitemaps/docs.xml.gz",
+          "kind": "sitemap",
+          "allowed_source_path_prefixes": ["/sitemaps/"],
+          "poll_interval": "6h",
+          "error_recheck_interval": "1h",
+          "max_compressed_bytes": 2097152,
+          "max_decompressed_bytes": 8388608,
+          "max_entries": 10000,
+          "max_child_sources": 128,
+          "max_depth": 2
+        }
+      ]
+    }
+  ]
+}

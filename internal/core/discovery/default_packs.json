@@ -1,0 +1,152 @@
+{
+  "version": 1,
+  "sources": [
+    {
+      "id": "searxng",
+      "kind": "searxng",
+      "weight": 1.0,
+      "max_results": 50,
+      "timeout_ms": 30000,
+      "max_concurrency": 4,
+      "rate_per_second": 10,
+      "burst": 4
+    },
+    {
+      "id": "wikipedia",
+      "kind": "wikipedia",
+      "weight": 1.1,
+      "max_results": 10,
+      "timeout_ms": 5000,
+      "max_concurrency": 2,
+      "rate_per_second": 2,
+      "burst": 2
+    },
+    {
+      "id": "crossref",
+      "kind": "crossref",
+      "weight": 1.2,
+      "max_results": 20,
+      "timeout_ms": 8000,
+      "max_concurrency": 1,
+      "rate_per_second": 5,
+      "burst": 1
+    },
+    {
+      "id": "arxiv",
+      "kind": "arxiv",
+      "weight": 1.0,
+      "max_results": 20,
+      "timeout_ms": 15000,
+      "max_concurrency": 1,
+      "rate_per_second": 0.3333333333333333,
+      "burst": 1
+    },
+    {
+      "id": "mwmbl",
+      "kind": "mwmbl",
+      "weight": 1.0,
+      "max_results": 20,
+      "timeout_ms": 30000,
+      "max_concurrency": 1,
+      "rate_per_second": 0.2,
+      "burst": 1
+    },
+    {
+      "id": "wiby",
+      "kind": "wiby",
+      "weight": 1.0,
+      "max_results": 12,
+      "timeout_ms": 30000,
+      "max_concurrency": 1,
+      "rate_per_second": 0.2,
+      "burst": 1
+    },
+    {
+      "id": "stackexchange",
+      "kind": "stackexchange",
+      "weight": 1.0,
+      "max_results": 10,
+      "timeout_ms": 30000,
+      "max_concurrency": 1,
+      "rate_per_second": 0.2,
+      "burst": 1
+    },
+    {
+      "id": "github",
+      "kind": "github",
+      "weight": 1.0,
+      "max_results": 20,
+      "timeout_ms": 30000,
+      "max_concurrency": 1,
+      "rate_per_second": 0.1,
+      "burst": 1
+    },
+    {
+      "id": "pubmed",
+      "kind": "pubmed",
+      "weight": 1.0,
+      "max_results": 20,
+      "timeout_ms": 15000,
+      "max_concurrency": 1,
+      "rate_per_second": 2,
+      "burst": 1
+    },
+    {
+      "id": "yacy",
+      "kind": "yacy",
+      "weight": 1.0,
+      "max_results": 20,
+      "timeout_ms": 30000,
+      "max_concurrency": 1,
+      "rate_per_second": 0.2,
+      "burst": 1
+    }
+  ],
+  "packs": [
+    {
+      "id": "general-open",
+      "always": true,
+      "sources": [
+        {"id": "searxng-default", "source": "searxng", "weight": 1.0, "variants": ["original", "exact"]},
+        {"id": "searxng-open", "source": "searxng", "weight": 0.9, "variants": ["original"], "engines": ["mwmbl", "wiby", "yacy"], "max_results": 30},
+        {"id": "mwmbl-general", "source": "mwmbl", "weight": 1.0, "variants": ["original"], "max_results": 20},
+        {"id": "wiby-general", "source": "wiby", "weight": 1.0, "variants": ["original"], "max_results": 12},
+        {"id": "yacy-general", "source": "yacy", "weight": 1.0, "variants": ["original"], "max_results": 20}
+      ]
+    },
+    {
+      "id": "developer",
+      "intents": ["developer"],
+      "sources": [
+        {"id": "searxng-developer", "source": "searxng", "weight": 0.9, "variants": ["docs"], "engines": ["github", "gitlab", "stackoverflow"], "max_results": 30},
+        {"id": "stackexchange-developer", "source": "stackexchange", "weight": 1.0, "variants": ["original"], "max_results": 10},
+        {"id": "github-developer", "source": "github", "weight": 1.0, "variants": ["original"], "max_results": 20}
+      ]
+    },
+    {
+      "id": "research",
+      "intents": ["research"],
+      "sources": [
+        {"id": "crossref-research", "source": "crossref", "weight": 1.0, "variants": ["original", "exact", "freshness"]},
+        {"id": "arxiv-research", "source": "arxiv", "weight": 1.0, "variants": ["original", "exact", "freshness"]},
+        {"id": "pubmed-research", "source": "pubmed", "weight": 1.0, "variants": ["original", "freshness"]},
+        {"id": "searxng-research", "source": "searxng", "weight": 0.9, "variants": ["original"], "engines": ["crossref", "arxiv", "pubmed"], "max_results": 30}
+      ]
+    },
+    {
+      "id": "knowledge",
+      "intents": ["knowledge", "explore"],
+      "sources": [
+        {"id": "wikipedia-knowledge", "source": "wikipedia", "weight": 1.0, "variants": ["original"]},
+        {"id": "searxng-knowledge", "source": "searxng", "weight": 0.9, "variants": ["original"], "engines": ["wikipedia", "wikidata"], "max_results": 20}
+      ]
+    },
+    {
+      "id": "fresh",
+      "intents": ["fresh"],
+      "sources": [
+        {"id": "searxng-fresh", "source": "searxng", "weight": 1.0, "variants": ["freshness"]}
+      ]
+    }
+  ]
+}
