@@ -29,6 +29,9 @@ func TestRelevanceLabelsAreRunBoundAndScoreRankingAndSources(t *testing.T) {
 	if report.FullyLabeledCases != 2 || report.RankingSamples != 2 || report.MeanNDCGAt10 != 1 || report.MeanReciprocalRank != 1 {
 		t.Fatalf("ranking report = %+v", report)
 	}
+	if report.RelevantHitCases != 2 || report.RelevantHitCoverageRate != 1 || report.MeanPrecisionAt5 != 0.75 {
+		t.Fatalf("precision-first report = %+v", report)
+	}
 	if report.SourceRelevantResults["searxng"] != 1 || report.SourceRelevantResults["crossref"] != 1 || report.SourceRelevantResults["wikipedia"] != 1 {
 		t.Fatalf("source relevant results = %#v", report.SourceRelevantResults)
 	}
@@ -70,6 +73,9 @@ func TestPartialLabelsReportCoverageWithoutInventingRankingGrades(t *testing.T) 
 	}
 	if report.LabeledResults != 1 || report.LabelCoverageRate != 1.0/3.0 || report.FullyLabeledCases != 0 || report.RankingSamples != 0 {
 		t.Fatalf("partial report = %+v", report)
+	}
+	if report.RelevantHitCases != 1 || report.RelevantHitCoverageRate != 0.5 || report.MeanPrecisionAt5 != 0 {
+		t.Fatalf("partial precision-first report = %+v", report)
 	}
 }
 

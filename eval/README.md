@@ -158,7 +158,10 @@ Offline loading rejects unknown fields, mixed runs, duplicate cases/results,
 invalid URLs, inconsistent counts, unknown judgments, duplicate judgments,
 unfilled grades, and artifacts that exceed the shared per-row or aggregate
 budgets. A run is accepted only when its generated label template fits those
-same limits. Coverage is reported explicitly. NDCG@10 and reciprocal rank
+same limits. Relevant-hit coverage is the operative discovery-quality measure:
+a query is covered only when at least one supplied judgment is grade 2 or 3.
+Raw non-empty coverage remains an availability diagnostic and is not evidence
+that Fetchmark answered the query. Precision@5, NDCG@10, and reciprocal rank
 include only successful non-empty cases whose returned results are fully
 labeled; a missing label is never silently converted to grade zero. Relevant
 result counts and mean grades are also reported by exact source and lane.

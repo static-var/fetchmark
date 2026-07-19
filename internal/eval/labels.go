@@ -42,43 +42,50 @@ type relevanceLabelDocument struct {
 // RelevanceIntentSummary keeps label coverage and ranking quality comparable
 // across the fixed intent categories.
 type RelevanceIntentSummary struct {
-	EligibleCases      int     `json:"eligible_cases"`
-	TotalResults       int     `json:"total_results"`
-	LabeledResults     int     `json:"labeled_results"`
-	LabelCoverageRate  float64 `json:"label_coverage_rate"`
-	RelevantResults    int     `json:"relevant_results"`
-	MeanRelevance      float64 `json:"mean_relevance"`
-	FullyLabeledCases  int     `json:"fully_labeled_cases"`
-	RankingSamples     int     `json:"ranking_samples"`
-	MeanNDCGAt10       float64 `json:"mean_ndcg_at_10"`
-	MeanReciprocalRank float64 `json:"mean_reciprocal_rank"`
+	EligibleCases           int     `json:"eligible_cases"`
+	TotalResults            int     `json:"total_results"`
+	LabeledResults          int     `json:"labeled_results"`
+	LabelCoverageRate       float64 `json:"label_coverage_rate"`
+	RelevantHitCases        int     `json:"relevant_hit_cases"`
+	RelevantHitCoverageRate float64 `json:"relevant_hit_coverage_rate"`
+	RelevantResults         int     `json:"relevant_results"`
+	MeanRelevance           float64 `json:"mean_relevance"`
+	FullyLabeledCases       int     `json:"fully_labeled_cases"`
+	RankingSamples          int     `json:"ranking_samples"`
+	MeanPrecisionAt5        float64 `json:"mean_precision_at_5"`
+	MeanNDCGAt10            float64 `json:"mean_ndcg_at_10"`
+	MeanReciprocalRank      float64 `json:"mean_reciprocal_rank"`
 }
 
-// RelevanceSummary is a deterministic offline report. Ranking metrics include
-// only successful, non-empty cases whose returned results are all labeled;
-// missing labels are reported as missing rather than treated as irrelevant.
+// RelevanceSummary is a deterministic offline report. Relevant-hit coverage is
+// a lower bound over supplied labels, while ranking metrics include only
+// successful, non-empty cases whose returned results are all labeled; missing
+// labels are reported as missing rather than treated as irrelevant.
 type RelevanceSummary struct {
-	SchemaVersion         int                               `json:"schema_version"`
-	RunID                 string                            `json:"run_id"`
-	TotalCases            int                               `json:"total_cases"`
-	EligibleCases         int                               `json:"eligible_cases"`
-	TotalResults          int                               `json:"total_results"`
-	LabeledResults        int                               `json:"labeled_results"`
-	LabelCoverageRate     float64                           `json:"label_coverage_rate"`
-	RelevantResults       int                               `json:"relevant_results"`
-	HighlyRelevantResults int                               `json:"highly_relevant_results"`
-	RelevantRate          float64                           `json:"relevant_rate"`
-	MeanRelevance         float64                           `json:"mean_relevance"`
-	FullyLabeledCases     int                               `json:"fully_labeled_cases"`
-	RankingSamples        int                               `json:"ranking_samples"`
-	MeanNDCGAt10          float64                           `json:"mean_ndcg_at_10"`
-	MeanReciprocalRank    float64                           `json:"mean_reciprocal_rank"`
-	GradeCounts           map[string]int                    `json:"grade_counts"`
-	SourceRelevantResults map[string]int                    `json:"source_relevant_results,omitempty"`
-	SourceMeanRelevance   map[string]float64                `json:"source_mean_relevance,omitempty"`
-	LaneRelevantResults   map[string]int                    `json:"lane_relevant_results,omitempty"`
-	LaneMeanRelevance     map[string]float64                `json:"lane_mean_relevance,omitempty"`
-	ByIntent              map[Intent]RelevanceIntentSummary `json:"by_intent"`
+	SchemaVersion           int                               `json:"schema_version"`
+	RunID                   string                            `json:"run_id"`
+	TotalCases              int                               `json:"total_cases"`
+	EligibleCases           int                               `json:"eligible_cases"`
+	TotalResults            int                               `json:"total_results"`
+	LabeledResults          int                               `json:"labeled_results"`
+	LabelCoverageRate       float64                           `json:"label_coverage_rate"`
+	RelevantHitCases        int                               `json:"relevant_hit_cases"`
+	RelevantHitCoverageRate float64                           `json:"relevant_hit_coverage_rate"`
+	RelevantResults         int                               `json:"relevant_results"`
+	HighlyRelevantResults   int                               `json:"highly_relevant_results"`
+	RelevantRate            float64                           `json:"relevant_rate"`
+	MeanRelevance           float64                           `json:"mean_relevance"`
+	FullyLabeledCases       int                               `json:"fully_labeled_cases"`
+	RankingSamples          int                               `json:"ranking_samples"`
+	MeanPrecisionAt5        float64                           `json:"mean_precision_at_5"`
+	MeanNDCGAt10            float64                           `json:"mean_ndcg_at_10"`
+	MeanReciprocalRank      float64                           `json:"mean_reciprocal_rank"`
+	GradeCounts             map[string]int                    `json:"grade_counts"`
+	SourceRelevantResults   map[string]int                    `json:"source_relevant_results,omitempty"`
+	SourceMeanRelevance     map[string]float64                `json:"source_mean_relevance,omitempty"`
+	LaneRelevantResults     map[string]int                    `json:"lane_relevant_results,omitempty"`
+	LaneMeanRelevance       map[string]float64                `json:"lane_mean_relevance,omitempty"`
+	ByIntent                map[Intent]RelevanceIntentSummary `json:"by_intent"`
 }
 
 type resultKey struct {
@@ -287,8 +294,9 @@ func ScoreRelevance(records []Record, labels []RelevanceLabel) (RelevanceSummary
 	intentGradeSum := map[Intent]int{}
 	intentNDCGSum := map[Intent]float64{}
 	intentMRRSum := map[Intent]float64{}
+	intentPrecisionAt5Sum := map[Intent]float64{}
 	var relevanceSum int
-	var ndcgSum, mrrSum float64
+	var precisionAt5Sum, ndcgSum, mrrSum float64
 
 	for _, record := range records {
 		intentSummary := report.ByIntent[record.Intent]
@@ -301,6 +309,7 @@ func ScoreRelevance(records []Record, labels []RelevanceLabel) (RelevanceSummary
 		}
 		grades := make([]int, len(record.Results))
 		fullyLabeled := eligible && len(record.Results) > 0
+		hasRelevantLabel := false
 		for index, result := range record.Results {
 			grade, labeled := labelByResult[resultKey{caseID: record.CaseID, url: result.URL}]
 			if !labeled {
@@ -314,6 +323,7 @@ func ScoreRelevance(records []Record, labels []RelevanceLabel) (RelevanceSummary
 			intentGradeSum[record.Intent] += grade
 			report.GradeCounts[strconv.Itoa(grade)]++
 			if grade >= 2 {
+				hasRelevantLabel = true
 				report.RelevantResults++
 				intentSummary.RelevantResults++
 			}
@@ -349,15 +359,22 @@ func ScoreRelevance(records []Record, labels []RelevanceLabel) (RelevanceSummary
 				}
 			}
 		}
+		if eligible && hasRelevantLabel {
+			report.RelevantHitCases++
+			intentSummary.RelevantHitCases++
+		}
 		if fullyLabeled {
+			precision := precisionAt(grades, 5)
 			ndcg := ndcgAt(grades, 10)
 			mrr := reciprocalRank(grades)
 			report.FullyLabeledCases++
 			report.RankingSamples++
+			precisionAt5Sum += precision
 			ndcgSum += ndcg
 			mrrSum += mrr
 			intentSummary.FullyLabeledCases++
 			intentSummary.RankingSamples++
+			intentPrecisionAt5Sum[record.Intent] += precision
 			intentNDCGSum[record.Intent] += ndcg
 			intentMRRSum[record.Intent] += mrr
 		}
@@ -371,7 +388,11 @@ func ScoreRelevance(records []Record, labels []RelevanceLabel) (RelevanceSummary
 		report.RelevantRate = float64(report.RelevantResults) / float64(report.LabeledResults)
 		report.MeanRelevance = float64(relevanceSum) / float64(report.LabeledResults)
 	}
+	if report.EligibleCases > 0 {
+		report.RelevantHitCoverageRate = float64(report.RelevantHitCases) / float64(report.EligibleCases)
+	}
 	if report.RankingSamples > 0 {
+		report.MeanPrecisionAt5 = precisionAt5Sum / float64(report.RankingSamples)
 		report.MeanNDCGAt10 = ndcgSum / float64(report.RankingSamples)
 		report.MeanReciprocalRank = mrrSum / float64(report.RankingSamples)
 	}
@@ -388,13 +409,33 @@ func ScoreRelevance(records []Record, labels []RelevanceLabel) (RelevanceSummary
 		if summary.LabeledResults > 0 {
 			summary.MeanRelevance = float64(intentGradeSum[intent]) / float64(summary.LabeledResults)
 		}
+		if summary.EligibleCases > 0 {
+			summary.RelevantHitCoverageRate = float64(summary.RelevantHitCases) / float64(summary.EligibleCases)
+		}
 		if summary.RankingSamples > 0 {
+			summary.MeanPrecisionAt5 = intentPrecisionAt5Sum[intent] / float64(summary.RankingSamples)
 			summary.MeanNDCGAt10 = intentNDCGSum[intent] / float64(summary.RankingSamples)
 			summary.MeanReciprocalRank = intentMRRSum[intent] / float64(summary.RankingSamples)
 		}
 		report.ByIntent[intent] = summary
 	}
 	return report, nil
+}
+
+func precisionAt(grades []int, limit int) float64 {
+	if len(grades) == 0 || limit <= 0 {
+		return 0
+	}
+	if len(grades) < limit {
+		limit = len(grades)
+	}
+	relevant := 0
+	for _, grade := range grades[:limit] {
+		if grade >= 2 {
+			relevant++
+		}
+	}
+	return float64(relevant) / float64(limit)
 }
 
 func indexRunResults(records []Record) (string, map[resultKey]indexedResult, error) {

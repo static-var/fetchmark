@@ -562,9 +562,9 @@ func TestSearchCapsCandidatesBeforeFetch(t *testing.T) {
 
 func TestSearchDuplicateCandidatesDoNotStarveLaterUniqueResults(t *testing.T) {
 	hits := []search.Hit{
-		{URL: "https://a.example/same?utm_source=one"},
-		{URL: "https://a.example/same?utm_source=two"},
-		{URL: "https://b.example/unique"},
+		{URL: "https://a.example/same?utm_source=one", Title: "First result"},
+		{URL: "https://a.example/same?utm_source=two", Title: "First result duplicate"},
+		{URL: "https://b.example/unique", Title: "Later relevant unique"},
 	}
 	p := &Pipeline{
 		Searcher: stubSearcher{hits: hits},
@@ -605,15 +605,23 @@ func TestPipeline_Search_EndToEnd(t *testing.T) {
 		Cache:     cache.New(nil, 0),
 		Ranker:    rank.New(),
 	}
-	out, err := p.Search(context.Background(), Options{Query: "bm25", MaxResults: 10})
+	out, err := p.Search(context.Background(), Options{Query: "go bm25", MaxResults: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(out) != 2 {
-		t.Fatalf("got %d results", len(out))
+	if len(out) != 1 {
+		t.Fatalf("got %d results, want only the lexically supported result", len(out))
 	}
 	if out[0].URL != "https://a.example/x" {
 		t.Fatalf("ranking wrong; first=%v", out[0].URL)
+	}
+
+	parsed := p.Parse(context.Background(), Options{
+		Query: "go bm25",
+		URLs:  []string{"https://b.example/y"},
+	})
+	if len(parsed) != 1 {
+		t.Fatalf("parse must preserve caller-supplied URL results, got %d", len(parsed))
 	}
 }
 

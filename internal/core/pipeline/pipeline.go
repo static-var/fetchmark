@@ -26,6 +26,7 @@ import (
 	"github.com/staticvar/fetchmark/internal/core/localartifact"
 	"github.com/staticvar/fetchmark/internal/core/localcorpus"
 	"github.com/staticvar/fetchmark/internal/core/model"
+	corerank "github.com/staticvar/fetchmark/internal/core/rank"
 	"github.com/staticvar/fetchmark/internal/core/search"
 	"github.com/staticvar/fetchmark/internal/obs"
 )
@@ -109,6 +110,7 @@ type Options struct {
 	// request translators cannot opt into the operator-controlled curated path.
 	forceFresh            bool
 	skipOutputReservation bool
+	applyRelevanceFloor   bool
 	focusedRedirectScope  *fetcher.RedirectScope
 	retentionIntent       retentionIntent
 	safetyClassification  localcorpus.SafetyClassification
@@ -360,6 +362,7 @@ func (p *Pipeline) SearchDetailed(ctx context.Context, o Options) (SearchOutput,
 	if candidateCap > 0 && len(hits) > candidateCap {
 		hits = hits[:candidateCap]
 	}
+	o.applyRelevanceFloor = true
 	results := p.process(ctx, o, hitsToResults(hits), o.Query)
 	if len(hits) > 0 {
 		observeTopKContribution(results)
@@ -471,6 +474,9 @@ func (p *Pipeline) process(ctx context.Context, o Options, seed []model.SearchRe
 	// more relevant duplicate.
 	if p.Ranker != nil && query != "" {
 		results = p.Ranker.Score(query, results)
+		if o.applyRelevanceFloor {
+			results = corerank.FilterLowConfidence(query, results)
+		}
 	}
 	if query != "" && o.ChunksPerSource > 0 {
 		attachQueryChunks(results, query, o.ChunksPerSource)

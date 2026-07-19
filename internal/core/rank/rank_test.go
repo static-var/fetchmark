@@ -158,6 +158,67 @@ func TestScore_NoQueryOrEmptyResults(t *testing.T) {
 	}
 }
 
+func TestFilterLowConfidenceKeepsMorphologicalAndAcronymMatches(t *testing.T) {
+	results := []model.SearchResult{
+		{URL: "https://en.wikipedia.org/wiki/Qanat", Title: "Qanat", Score: 3},
+		{URL: "https://sqlite.org/wal.html", Title: "Write-Ahead Logging", Score: 3},
+	}
+
+	qanat := FilterLowConfidence("How were qanats and windcatchers combined to cool buildings?", results[:1])
+	if len(qanat) != 1 {
+		t.Fatalf("plural entity match was dropped: %+v", qanat)
+	}
+	wal := FilterLowConfidence("How do SQLite WAL checkpoints interact with readers?", results[1:])
+	if len(wal) != 1 {
+		t.Fatalf("query acronym match was dropped: %+v", wal)
+	}
+}
+
+func TestFilterLowConfidenceAbstainsFromUnrelatedResults(t *testing.T) {
+	results := []model.SearchResult{
+		{URL: "https://en.wikipedia.org/wiki/Western_African_Ebola_epidemic", Title: "Western African Ebola epidemic", Score: 12},
+		{URL: "https://en.wikipedia.org/wiki/Sodium-ion_battery", Title: "Sodium-ion battery", Score: 5},
+	}
+
+	got := FilterLowConfidence("What are the latest global measles trend updates from the WHO?", results)
+	if len(got) != 0 {
+		t.Fatalf("unrelated results were retained: %+v", got)
+	}
+}
+
+func TestFilterLowConfidencePreservesEmptyArrayShapeForUnsupportedQuery(t *testing.T) {
+	results := []model.SearchResult{{URL: "https://example.org/", Title: "Example"}}
+
+	got := FilterLowConfidence("who are the", results)
+	if got == nil || len(got) != 0 {
+		t.Fatalf("unsupported query result = %#v, want a non-nil empty slice", got)
+	}
+}
+
+func TestFilterLowConfidenceUsesCrossProviderAgreementOnlyWithLexicalSupport(t *testing.T) {
+	results := []model.SearchResult{
+		{
+			URL: "https://example.org/heat-pump-guide", Title: "Building efficiency guide", Score: 1,
+			Provenance: []model.DiscoveryProvenance{
+				{Provider: "mwmbl", Lane: "general", Variant: "original"},
+				{Provider: "wiby", Lane: "general", Variant: "original"},
+			},
+		},
+		{
+			URL: "https://example.org/unrelated", Title: "Completely unrelated page", Score: 20,
+			Provenance: []model.DiscoveryProvenance{
+				{Provider: "mwmbl", Lane: "general", Variant: "original"},
+				{Provider: "wiby", Lane: "general", Variant: "original"},
+			},
+		},
+	}
+
+	got := FilterLowConfidence("How do heat pumps move heat into a building?", results)
+	if len(got) != 1 || got[0].URL != "https://example.org/heat-pump-guide" {
+		t.Fatalf("provenance-aware filter = %+v", got)
+	}
+}
+
 func TestTokenize_DropsStopPunct(t *testing.T) {
 	got := tokenize("Hello, world! It's 2024.")
 	want := []string{"hello", "world", "it", "2024"}
