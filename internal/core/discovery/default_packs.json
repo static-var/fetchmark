@@ -100,6 +100,16 @@
       "max_concurrency": 1,
       "rate_per_second": 0.2,
       "burst": 1
+    },
+    {
+      "id": "feedindex",
+      "kind": "feedindex",
+      "weight": 1.0,
+      "max_results": 20,
+      "timeout_ms": 5000,
+      "max_concurrency": 1,
+      "rate_per_second": 100,
+      "burst": 10
     }
   ],
   "packs": [
@@ -145,7 +155,8 @@
       "id": "fresh",
       "intents": ["fresh"],
       "sources": [
-        {"id": "searxng-fresh", "source": "searxng", "weight": 1.0, "variants": ["freshness"]}
+        {"id": "searxng-fresh", "source": "searxng", "weight": 1.0, "variants": ["freshness"]},
+        {"id": "official-fresh-feeds", "source": "feedindex", "weight": 0.96, "variants": ["original"], "max_results": 20}
       ]
     }
   ]

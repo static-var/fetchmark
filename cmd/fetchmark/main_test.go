@@ -337,6 +337,64 @@ func TestBuildDiscoveryPlannerRejectsUnsplittableCacheBudget(t *testing.T) {
 	}
 }
 
+func TestBuildDiscoveryPlannerOpensOptInFreshFeedIndex(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	snapshotPath := filepath.Join(t.TempDir(), "feed-index.json")
+	snapshot := map[string]any{
+		"version": 1, "generated_at": now.Add(-time.Minute).Format(time.RFC3339),
+		"sources": []map[string]any{{
+			"id": "python", "feed_url": "https://blog.python.org/rss.xml", "topics": []string{"python"},
+			"license": "CC-BY-NC-SA-3.0", "license_url": "https://creativecommons.org/licenses/by-nc-sa/3.0/",
+			"fetched_at": now.Add(-time.Minute).Format(time.RFC3339), "feed_robots_observed_at": now.Add(-time.Minute).Format(time.RFC3339),
+			"feed_robots_allowed": true, "feed_noindex": false, "feed_x_robots_noindex": false,
+			"min_poll_interval_seconds": 3600, "max_items_per_fetch": 50,
+			"documents": []map[string]any{{
+				"url": "https://blog.python.org/2026/06/python-3146-31314/", "title": "Python 3.14.6 and 3.13.14 are now available", "summary": "A pair of bug fix releases.",
+				"published_at": now.Add(-24 * time.Hour).Format(time.RFC3339), "observed_at": now.Add(-time.Minute).Format(time.RFC3339),
+				"robots_observed_at": now.Add(-time.Minute).Format(time.RFC3339), "robots_allowed": true, "noindex": false, "x_robots_noindex": false,
+			}},
+		}},
+	}
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(snapshotPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := discoveryTestConfig()
+	cfg.DiscoveryEnabledSources = append(cfg.DiscoveryEnabledSources, "feedindex")
+	cfg.FeedIndexFile = snapshotPath
+	planner, primary, err := buildDiscoveryPlanner(cfg, stubSearcher{}, &http.Client{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closer, ok := primary.(io.Closer)
+	if !ok {
+		t.Fatal("primary searcher does not own feed-index lifecycle")
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	sources := planner.Sources(search.Query{Q: "latest stable Python release", TimeRange: "day"})
+	var feedSource search.Searcher
+	for _, source := range sources {
+		if source.ID == "official-fresh-feeds" {
+			feedSource = source.Searcher
+			if source.Weight != 0.96 {
+				t.Fatalf("feed lane weight = %v", source.Weight)
+			}
+		}
+	}
+	if feedSource == nil {
+		t.Fatalf("sources = %+v", sources)
+	}
+	hits, err := feedSource.Search(context.Background(), search.Query{Q: "latest stable Python release", MaxResults: 5})
+	if err != nil || len(hits) != 1 || hits[0].Metadata["feed_source"] != "python" {
+		t.Fatalf("feed hits = %+v err=%v", hits, err)
+	}
+}
+
 func TestBuildDiscoveryPlannerOpensExplicitSignedPackSource(t *testing.T) {
 	fixture := installDiscoveryPackFixture(t)
 	cfg := discoveryTestConfig()

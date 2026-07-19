@@ -16,10 +16,10 @@ func TestDefaultSpecIsStrictAndComplete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if spec.Version != 1 || len(spec.Sources) != 10 || len(spec.Packs) != 5 {
+	if spec.Version != 1 || len(spec.Sources) != 11 || len(spec.Packs) != 5 {
 		t.Fatalf("default spec version=%d sources=%d packs=%d", spec.Version, len(spec.Sources), len(spec.Packs))
 	}
-	if spec.Sources[1].ID != "wikipedia" || spec.Sources[2].ID != "crossref" || spec.Sources[3].ID != "arxiv" || spec.Sources[3].Kind != "arxiv" || spec.Sources[4].ID != "mwmbl" || spec.Sources[5].ID != "wiby" || spec.Sources[6].ID != "stackexchange" || spec.Sources[7].ID != "github" || spec.Sources[8].ID != "pubmed" || spec.Sources[8].Kind != "pubmed" || spec.Sources[9].ID != "yacy" || spec.Sources[9].Kind != "yacy" {
+	if spec.Sources[1].ID != "wikipedia" || spec.Sources[2].ID != "crossref" || spec.Sources[3].ID != "arxiv" || spec.Sources[3].Kind != "arxiv" || spec.Sources[4].ID != "mwmbl" || spec.Sources[5].ID != "wiby" || spec.Sources[6].ID != "stackexchange" || spec.Sources[7].ID != "github" || spec.Sources[8].ID != "pubmed" || spec.Sources[8].Kind != "pubmed" || spec.Sources[9].ID != "yacy" || spec.Sources[9].Kind != "yacy" || spec.Sources[10].ID != "feedindex" || spec.Sources[10].Kind != "feedindex" {
 		t.Fatalf("default native sources = %+v", spec.Sources)
 	}
 }
@@ -159,12 +159,28 @@ func TestLoadSpecRejectsAliasedMwmblSource(t *testing.T) {
 }
 
 func TestLoadSpecRejectsAliasedFixedPublicSources(t *testing.T) {
-	for _, kind := range []string{"wikipedia", "crossref", "arxiv", "wiby", "stackexchange", "github", "pubmed", "yacy"} {
+	for _, kind := range []string{"wikipedia", "crossref", "arxiv", "wiby", "stackexchange", "github", "pubmed", "yacy", "feedindex"} {
 		raw := fmt.Sprintf(`{"version":1,"sources":[{"id":"%s-copy","kind":"%s","weight":1,"max_results":10,"timeout_ms":1000,"max_concurrency":1,"rate_per_second":1,"burst":1}],"packs":[{"id":"general-open","always":true,"sources":[{"id":"copy-original","source":"%s-copy","weight":1,"variants":["original"]}]}]}`, kind, kind, kind)
 		if _, err := LoadSpec(strings.NewReader(raw)); err == nil || !strings.Contains(err.Error(), fmt.Sprintf(`%s source must use id %q`, kind, kind)) {
 			t.Fatalf("LoadSpec(%s) error = %v", kind, err)
 		}
 	}
+}
+
+func TestDefaultSpecRoutesOptInFeedIndexOnlyForFreshIntent(t *testing.T) {
+	spec, err := DefaultSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := NewRegistryFromSpec(spec, map[string]search.Searcher{
+		"searxng":   namedSearcher("searxng"),
+		"feedindex": namedSearcher("feedindex"),
+	}, "searxng", []string{"general-open", "fresh"}, []string{"searxng", "feedindex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSourceIDs(t, registry.Sources(search.Query{Q: "stable Python release", TimeRange: "day"}), "searxng-default", "searxng-open", "searxng-fresh", "official-fresh-feeds")
+	assertSourceIDs(t, registry.Sources(search.Query{Q: "stable Python release"}), "searxng-default", "searxng-open")
 }
 
 func TestLoadSpecAcceptsExplicitOpenPackSource(t *testing.T) {

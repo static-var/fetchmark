@@ -197,10 +197,11 @@ All config is environment-driven. Copy `.env.example` and edit.
 | `FM_ADVANCED_SEARCH_CONCURRENCY` | `4` | Maximum concurrent advanced discovery lanes (1–16) |
 | `FM_DISCOVERY_PACK_FILE` | _(built in)_ | Optional strict v1 JSON source-pack registry |
 | `FM_DISCOVERY_ENABLED_PACKS` | all built-ins | Ordered source-pack allowlist |
-| `FM_DISCOVERY_ENABLED_SOURCES` | `searxng,wikipedia,crossref` | Strict source allowlist; append opt-in `arxiv`, `mwmbl`, `wiby`, `stackexchange`, `github`, `pubmed`, and/or `yacy`, or omit `searxng` for a SearX-free process |
+| `FM_DISCOVERY_ENABLED_SOURCES` | `searxng,wikipedia,crossref` | Strict source allowlist; append opt-in `arxiv`, `mwmbl`, `wiby`, `stackexchange`, `github`, `pubmed`, `yacy`, and/or `feedindex`, or omit `searxng` for a SearX-free process |
 | `FM_DISCOVERY_PRIMARY_SOURCE` | `searxng` | Enabled first/fallback source; defaults preserve SearXNG-first behavior |
 | `FM_DISCOVERY_PROVIDER_MAX_BODY` | `2 MiB` | Maximum native-provider response body |
 | `FM_OPEN_PACK_REGISTRY_FILE` | _(unset)_ | Absolute process-owned, non-writable trust registry; open-pack sources stay opt-in |
+| `FM_FEED_INDEX_FILE` | _(unset)_ | Absolute, immutable RSS/Atom metadata snapshot; required only when opt-in `feedindex` discovery is enabled |
 | `FM_FEDERATION_IDENTITY_FILE` / `_TRUST_REGISTRY_FILE` | _(unset)_ | Paired absolute secure files for explicitly enabled trusted peers |
 | `FM_FEDERATION_LISTEN_ADDR` | _(unset)_ | Separate plain-HTTP listener for a private TLS ingress; requires curated mode |
 | `FM_CONTACT` | _(unset)_ | Optional contact appended to provider identity; default UA already has a project URL |

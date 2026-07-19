@@ -189,9 +189,9 @@ only cross-lane merge policy.
 The registry separates trusted process bindings from declarative controls:
 
 - JSON may select only compiled source kinds (`searxng`, `wikipedia`,
-  `crossref`, `arxiv`, `mwmbl`, `wiby`, `stackexchange`, `github`, `pubmed`, `yacy`, and explicitly bound `openpack` or `federation`
+  `crossref`, `arxiv`, `mwmbl`, `wiby`, `stackexchange`, `github`, `pubmed`, `yacy`, `feedindex`, and explicitly bound `openpack` or `federation`
   sources), controlled variants, engine/category names, weights, result
-  caps, timeouts, and global provider budgets. The ten fixed provider
+  caps, timeouts, and global provider budgets. The eleven fixed provider
   kinds must use their canonical singleton IDs; custom aliases cannot multiply
   their process-wide budgets. Open-pack and federation bindings retain distinct
   operator IDs.
@@ -224,6 +224,13 @@ The registry separates trusted process bindings from declarative controls:
   original lane per provider; advanced additionally uses the pack's controlled
   variants. Local-index, signed open-pack, and trusted federation adapters
   participate through the same planner when configured.
+
+The optional `feedindex` source loads a bounded local RSS/Atom metadata
+snapshot and is routed only by the `fresh` pack. It performs no network I/O on
+the API path and is disabled unless the operator both appends `feedindex` to
+`FM_DISCOVERY_ENABLED_SOURCES` and sets `FM_FEED_INDEX_FILE`. See
+[Fresh feed discovery](fresh-feed-index.md) for the strict admission contract,
+offline fixture, and evaluation boundary.
 
 The Wikipedia adapter uses the official Action API with a descriptive
 contactable identity, global rate/concurrency bounds, response-size limits,

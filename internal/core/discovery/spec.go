@@ -167,7 +167,7 @@ func validateSpec(spec RegistrySpec) error {
 			return fmt.Errorf("discovery: duplicate source id %q", source.ID)
 		}
 		switch source.Kind {
-		case "searxng", "wikipedia", "crossref", "arxiv", "mwmbl", "wiby", "stackexchange", "github", "pubmed", "yacy":
+		case "searxng", "wikipedia", "crossref", "arxiv", "mwmbl", "wiby", "stackexchange", "github", "pubmed", "yacy", "feedindex":
 			if source.ID != source.Kind {
 				return fmt.Errorf("discovery: %s source must use id %q", source.Kind, source.Kind)
 			}

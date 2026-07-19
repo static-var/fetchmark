@@ -48,6 +48,7 @@ type Config struct {
 	DiscoveryPrimarySource      string        `env:"FM_DISCOVERY_PRIMARY_SOURCE"  envDefault:"searxng"`
 	DiscoveryProviderMaxBody    int64         `env:"FM_DISCOVERY_PROVIDER_MAX_BODY" envDefault:"2097152"`
 	OpenPackRegistryFile        string        `env:"FM_OPEN_PACK_REGISTRY_FILE"`
+	FeedIndexFile               string        `env:"FM_FEED_INDEX_FILE"`
 	// Federation remains disabled unless an operator supplies a dedicated
 	// identity and trust registry. ListenAddr enables only the separate inbound
 	// URL-discovery listener; outbound peer sources are enabled explicitly in a
@@ -187,6 +188,7 @@ func Load() (Config, error) {
 	c.DiscoveryPrimarySource = strings.TrimSpace(c.DiscoveryPrimarySource)
 	c.YaCyURL = strings.TrimSpace(c.YaCyURL)
 	c.YaCyResource = strings.ToLower(strings.TrimSpace(c.YaCyResource))
+	c.FeedIndexFile = strings.TrimSpace(c.FeedIndexFile)
 	// FM_SEARXNG_URLS wins when set; otherwise fall back to the single
 	// FM_SEARXNG_URL so existing deployments keep working unchanged. Discard
 	// env defaults entirely when SearXNG is not enabled: they must not turn an
@@ -356,6 +358,12 @@ func (c *Config) validate() error {
 	}
 	if c.OpenPackRegistryFile != "" && !filepath.IsAbs(c.OpenPackRegistryFile) {
 		return errors.New("FM_OPEN_PACK_REGISTRY_FILE must be absolute when set")
+	}
+	if c.FeedIndexFile != "" && !filepath.IsAbs(c.FeedIndexFile) {
+		return errors.New("FM_FEED_INDEX_FILE must be absolute when set")
+	}
+	if listContains(c.DiscoveryEnabledSources, "feedindex") && c.FeedIndexFile == "" {
+		return errors.New("FM_FEED_INDEX_FILE is required when the feedindex discovery source is enabled")
 	}
 	if c.FederationIdentityFile != "" && !filepath.IsAbs(c.FederationIdentityFile) {
 		return errors.New("FM_FEDERATION_IDENTITY_FILE must be absolute when set")

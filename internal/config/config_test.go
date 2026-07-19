@@ -112,6 +112,19 @@ func TestLoadRequiresYaCyEndpointWhenSourceIsEnabled(t *testing.T) {
 	}
 }
 
+func TestLoadRequiresAbsoluteFeedIndexFileWhenSourceIsEnabled(t *testing.T) {
+	t.Setenv("FM_DISCOVERY_ENABLED_SOURCES", "feedindex")
+	t.Setenv("FM_DISCOVERY_PRIMARY_SOURCE", "feedindex")
+	t.Setenv("FM_SEARXNG_URL", "")
+	if _, err := Load(); err == nil || err.Error() != "FM_FEED_INDEX_FILE is required when the feedindex discovery source is enabled" {
+		t.Fatalf("Load error = %v", err)
+	}
+	t.Setenv("FM_FEED_INDEX_FILE", "relative/snapshot.json")
+	if _, err := Load(); err == nil || err.Error() != "FM_FEED_INDEX_FILE must be absolute when set" {
+		t.Fatalf("Load relative error = %v", err)
+	}
+}
+
 func TestLoadRejectsInvalidYaCyResourceWhenSourceIsEnabled(t *testing.T) {
 	t.Setenv("FM_DISCOVERY_ENABLED_SOURCES", "yacy")
 	t.Setenv("FM_DISCOVERY_PRIMARY_SOURCE", "yacy")

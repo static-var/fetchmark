@@ -28,6 +28,7 @@ import (
 	"github.com/staticvar/fetchmark/internal/adapters/extractor"
 	"github.com/staticvar/fetchmark/internal/adapters/federationconfigfile"
 	"github.com/staticvar/fetchmark/internal/adapters/federationpeer"
+	"github.com/staticvar/fetchmark/internal/adapters/feedindex"
 	"github.com/staticvar/fetchmark/internal/adapters/fetcher"
 	githubadapter "github.com/staticvar/fetchmark/internal/adapters/github"
 	artifactfs "github.com/staticvar/fetchmark/internal/adapters/localartifact"
@@ -635,6 +636,20 @@ func buildDiscoveryPlannerFromSpec(cfg config.Config, searx search.Searcher, pro
 				Endpoint: cfg.YaCyURL, HTTPClient: yacyHTTP, UserAgent: providerUserAgent,
 				Resource: cfg.YaCyResource, AllowInsecureHTTP: cfg.YaCyAllowInsecureHTTP,
 				MaxResults: sourceSpec.MaxResults, MaxBodyBytes: cfg.DiscoveryProviderMaxBody,
+				RatePerSecond: sourceSpec.RatePerSecond, Burst: sourceSpec.Burst,
+				MaxConcurrency: sourceSpec.MaxConcurrency,
+			})
+		case "feedindex":
+			cacheAdapter = false
+			if id != "feedindex" {
+				return nil, nil, errors.New("configure discovery: feed index source must be named feedindex")
+			}
+			opened, openErr := feedindex.Open(feedindex.Options{Path: cfg.FeedIndexFile})
+			if openErr != nil {
+				return nil, nil, fmt.Errorf("configure discovery source %q: %w", id, openErr)
+			}
+			closers = append(closers, opened)
+			adapter, err = searchbudget.New(opened, searchbudget.Options{
 				RatePerSecond: sourceSpec.RatePerSecond, Burst: sourceSpec.Burst,
 				MaxConcurrency: sourceSpec.MaxConcurrency,
 			})

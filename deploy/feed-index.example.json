@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "generated_at": "2026-07-20T00:00:00Z",
+  "sources": [
+    {
+      "id": "example-release-feed",
+      "feed_url": "https://updates.example.com/feed.xml",
+      "topics": ["example runtime", "examplelang"],
+      "license": "CC-BY-SA-4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "fetched_at": "2026-07-19T23:55:00Z",
+      "feed_robots_observed_at": "2026-07-19T23:55:00Z",
+      "feed_robots_allowed": true,
+      "feed_noindex": false,
+      "feed_x_robots_noindex": false,
+      "min_poll_interval_seconds": 3600,
+      "max_items_per_fetch": 50,
+      "documents": [
+        {
+          "url": "https://updates.example.com/releases/4.2.1",
+          "title": "ExampleLang 4.2.1 is now available",
+          "summary": "A stable bug-fix release with parser and runtime corrections.",
+          "published_at": "2026-07-19T12:00:00Z",
+          "observed_at": "2026-07-19T23:55:00Z",
+          "robots_observed_at": "2026-07-19T23:55:00Z",
+          "robots_allowed": true,
+          "noindex": false,
+          "x_robots_noindex": false
+        }
+      ]
+    }
+  ]
+}

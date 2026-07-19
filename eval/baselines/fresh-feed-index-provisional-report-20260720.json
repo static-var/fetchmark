@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "experiment_id": "fresh-feed-index-provisional-20260720",
+  "judgment_provenance": "assistant-generated provisional judgments at the user's explicit request; not independent human ground truth",
+  "fixed_suite": {
+    "queries": 120,
+    "fresh_queries": 20,
+    "baseline_records": "eval/baselines/native-open-discovery-baseline-serial-20260718.jsonl",
+    "baseline_records_sha256": "2095a1d9823444f87a3198720cc02dbb6291527dbf2cefa771db5bd2dd52d779",
+    "provisional_labels_sha256": "fd2913f575d36b1968efda73a815b9525d4afa403a0669ca3bb6cc1a16c122d8"
+  },
+  "gap_analysis": {
+    "artifact_sha256": "c9a0ffe0de7168e771e70ccefb80cc014d6a1129f2fef115459dbe49b5db1a4c",
+    "by_intent": {
+      "developer": {"discovery_absence": 15, "irrelevant_discovery": 3, "ranking_failure": 0, "relevant_hit": 2, "filter_lost_relevant_hit": 0},
+      "fresh": {"discovery_absence": 2, "irrelevant_discovery": 15, "ranking_failure": 1, "relevant_hit": 3, "filter_lost_relevant_hit": 0},
+      "general": {"discovery_absence": 5, "irrelevant_discovery": 7, "ranking_failure": 2, "relevant_hit": 8, "filter_lost_relevant_hit": 1},
+      "knowledge": {"discovery_absence": 6, "irrelevant_discovery": 7, "ranking_failure": 1, "relevant_hit": 7, "filter_lost_relevant_hit": 0},
+      "long_tail": {"discovery_absence": 17, "irrelevant_discovery": 2, "ranking_failure": 0, "relevant_hit": 1, "filter_lost_relevant_hit": 0},
+      "research": {"discovery_absence": 10, "irrelevant_discovery": 3, "ranking_failure": 1, "relevant_hit": 7, "filter_lost_relevant_hit": 0}
+    },
+    "by_intent_provider": {
+      "developer": {"mwmbl": {"results": 3, "relevant_results": 1, "relevant_hit_cases": 1}, "wiby": {"results": 6, "relevant_results": 1, "relevant_hit_cases": 1}},
+      "fresh": {"mwmbl": {"results": 37, "relevant_results": 5, "relevant_hit_cases": 3}, "wiby": {"results": 69, "relevant_results": 0, "relevant_hit_cases": 0}, "wikipedia": {"results": 16, "relevant_results": 0, "relevant_hit_cases": 0}},
+      "general": {"mwmbl": {"results": 32, "relevant_results": 16, "relevant_hit_cases": 7}, "wiby": {"results": 25, "relevant_results": 1, "relevant_hit_cases": 1}, "wikipedia": {"results": 8, "relevant_results": 1, "relevant_hit_cases": 1}},
+      "knowledge": {"mwmbl": {"results": 38, "relevant_results": 20, "relevant_hit_cases": 7}, "wiby": {"results": 40, "relevant_results": 0, "relevant_hit_cases": 0}},
+      "long_tail": {"mwmbl": {"results": 4, "relevant_results": 2, "relevant_hit_cases": 1}},
+      "research": {"crossref": {"results": 90, "relevant_results": 33, "relevant_hit_cases": 7}, "mwmbl": {"results": 10, "relevant_results": 0, "relevant_hit_cases": 0}}
+    }
+  },
+  "feed_probe": {
+    "artifact_sha256": "1e3460ad570af4ee9e6a875b730af603d0b77f05c985da095f94e1a8b683859b",
+    "routed_results_sha256": "15d0514d4e0b65bfcf8cdcb56c12c79de23157f0dba274255044b62938fa90b8",
+    "official_feeds_attempted": 9,
+    "official_feeds_accepted_for_probe": 8,
+    "queries_abstained": 12,
+    "queries_non_empty": 8,
+    "local_query_latency_ms": {
+      "p50": 0.0535,
+      "p95": 1.126,
+      "max": 1.796
+    }
+  },
+  "raw_rrf_projection": {
+    "feed_lane_weight": 0.96,
+    "records_sha256": "40268337033853b7e61ffead0ff5ac6e4e735821c912c505016a73dcbb3d1c99",
+    "labels_sha256": "d0dcb8e131bf13a47a9389c9b27170e2a8e22837e188b1279e44a0bd8daf4b99",
+    "baseline_score_sha256": "a2cd85a7808de9d35be9edc811adbc3ca384ddeb65e969b044aff7afe65d9c38",
+    "augmented_score_sha256": "c48c3d97fc263b4952fc848e3b5f62b0ee020afe852f42a7ed4f6d2ca071e6e7",
+    "all_before": {"relevant_hit_coverage": 0.23333333333333334, "precision_at_5": 0.2587179487179488, "ndcg_at_10": 0.5802069107788325, "mrr": 0.37948717948717947},
+    "all_after": {"relevant_hit_coverage": 0.275, "precision_at_5": 0.2692307692307692, "ndcg_at_10": 0.5706334175085911, "mrr": 0.39448717948717943},
+    "fresh_before": {"relevant_hit_cases": 3, "relevant_hit_coverage": 0.15, "precision_at_5": 0.05, "ndcg_at_10": 0.5067386971585397, "mrr": 0.12962962962962962},
+    "fresh_after": {"relevant_hit_cases": 8, "relevant_hit_coverage": 0.4, "precision_at_5": 0.08796296296296297, "ndcg_at_10": 0.472167749238223, "mrr": 0.1837962962962963},
+    "feed_index_relevant_results": 6
+  },
+  "current_confidence_guardrail_projection": {
+    "baseline_records_sha256": "d0fa9c0004802b586e070c53f694fd7d8ae985df4a59f085aae14f769651dffc",
+    "baseline_labels_sha256": "3f27932ab28241cbda1120a4b083fb5f8dc7cf6a6d082d4538ed27f0545452db",
+    "baseline_score_sha256": "41e6f6a62cfdd010a92a08d30bcae6effc9d59ae9b7f48b167b3f8621ce0bc28",
+    "augmented_records_sha256": "199b1414ac0ef43de0a9c9c133841e7516479097e18ddf3b05e0e353e3a2731b",
+    "augmented_labels_sha256": "0c35083818342f68557d4e45c50cd3b118c69b72ac3781f073ce2705894a15d5",
+    "augmented_score_sha256": "296a75a369e0bbd63af8584f19a7ffcabfdeaf9c7f83afb2ec977ae240522a84",
+    "all_before": {"relevant_hit_coverage": 0.225, "precision_at_5": 0.4311594202898552, "ndcg_at_10": 0.7470311160560033, "mrr": 0.5507246376811594, "abstained_queries": 74},
+    "all_after": {"relevant_hit_coverage": 0.25, "precision_at_5": 0.4482269503546099, "ndcg_at_10": 0.7438009710965601, "mrr": 0.5709219858156028, "abstained_queries": 73},
+    "fresh_before": {"relevant_hit_cases": 3, "relevant_hit_coverage": 0.15, "precision_at_5": 0.13076923076923078, "ndcg_at_10": 0.6530745554125681, "mrr": 0.17948717948717946, "abstained_queries": 7},
+    "fresh_after": {"relevant_hit_cases": 6, "relevant_hit_coverage": 0.3, "precision_at_5": 0.20952380952380953, "ndcg_at_10": 0.64894168023754, "mrr": 0.2738095238095238, "abstained_queries": 6},
+    "feed_index_relevant_results": 3,
+    "other_intent_metrics_identical": true
+  },
+  "limitations": [
+    "The current confidence guardrail was projected offline over retained evaluation metadata; this is not a replacement for a retained endpoint rerun.",
+    "The same fixed fresh suite informed source selection and evaluation, so this is fixed-suite tuning evidence rather than a blind held-out result.",
+    "Mean NDCG regressed slightly even though relevant-hit coverage, Precision@5, and MRR improved; the formal blind relevance gate remains unpassed.",
+    "Probe bodies and provisional labels remain outside the repository; hashes preserve binding without redistributing source text whose license was not established."
+  ]
+}
