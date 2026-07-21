@@ -15,6 +15,9 @@ func TestCanonicalURL(t *testing.T) {
 		{"https://Example.com:443/a/b?utm_source=x&z=1&a=2#frag", "https://example.com/a/b?a=2&z=1"},
 		{"http://Example.COM:80/?b=2&a=1&fbclid=xyz", "http://example.com/?a=1&b=2"},
 		{"https://host/path?k=v", "https://host/path?k=v"},
+		{"https://[2001:DB8::1]/page", "https://[2001:db8::1]/page"},
+		{"https://[2001:DB8::1]:443/page", "https://[2001:db8::1]/page"},
+		{"https://[2001:DB8::1]:8443/page", "https://[2001:db8::1]:8443/page"},
 	}
 	for _, c := range cases {
 		got, err := CanonicalURL(c.in)

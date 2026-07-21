@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -334,6 +335,87 @@ func TestSearchPropagatesControlsAndMetadata(t *testing.T) {
 	}
 }
 
+func TestSearchExtractsProviderDocumentWithoutFetchingPage(t *testing.T) {
+	var fetchCalls atomic.Int64
+	robots := &stubRobots{allowed: false}
+	corpus := &recordingCorpus{}
+	p := &Pipeline{
+		Searcher: stubSearcher{hits: []search.Hit{
+			{
+				URL: "https://stackoverflow.com/questions/123", Title: "Provider title",
+				ProviderDocument: &model.ProviderDocument{HTML: []byte("<p>provider question body</p>"), Author: "Ada", SiteName: "Stack Overflow"},
+			},
+			{
+				URL: "https://stackoverflow.com/questions/456", Title: "Unavailable provider body",
+				ProviderDocument: &model.ProviderDocument{},
+			},
+		}},
+		Fetcher:     stubFetcher{resp: map[string]fetcher.Result{}, calls: &fetchCalls},
+		Extractor:   stubExtractor{},
+		Cache:       cache.New(nil, 0),
+		Robots:      robots,
+		LocalCorpus: corpus,
+	}
+
+	results, err := p.Search(context.Background(), Options{Query: "question", MaxResults: 2, RespectRobots: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fetchCalls.Load() != 0 {
+		t.Fatalf("page fetches = %d, want 0", fetchCalls.Load())
+	}
+	if robots.calls != 0 {
+		t.Fatalf("robots fetches = %d, want 0", robots.calls)
+	}
+	if len(corpus.reconciled) != 0 || len(corpus.deleted) != 0 {
+		t.Fatalf("provider document reached local corpus: %+v", corpus)
+	}
+	if len(results) != 2 || results[0].Unsupported != "" || results[0].Content == nil ||
+		!strings.Contains(results[0].Content.MainText, "provider question body") {
+		t.Fatalf("provider result = %+v", results)
+	}
+	if results[0].Author != "Ada" || results[0].Content.Author != "Ada" || results[0].Content.SiteName != "Stack Overflow" {
+		t.Fatalf("provider attribution = %+v", results[0])
+	}
+	if results[1].Unsupported != "extract_failed" || results[1].Content != nil {
+		t.Fatalf("unavailable provider result = %+v", results[1])
+	}
+	if results[0].ProviderDocument != nil {
+		t.Fatal("provider document retained after extraction")
+	}
+}
+
+func TestProviderDocumentExtractionUsesArtifactConcurrencyAcrossRequests(t *testing.T) {
+	const resultsPerRequest = 4
+	hits := make([]search.Hit, resultsPerRequest)
+	for index := range hits {
+		hits[index] = search.Hit{
+			URL:              "https://stackoverflow.com/questions/" + strconv.Itoa(index+1),
+			ProviderDocument: &model.ProviderDocument{HTML: []byte("<p>body</p>")},
+		}
+	}
+	release := make(chan struct{})
+	extractor := &blockingExtractor{start: make(chan struct{}, resultsPerRequest*2), block: release}
+	p := &Pipeline{Searcher: stubSearcher{hits: hits}, Extractor: extractor, ArtifactConcurrency: 2}
+
+	var wait sync.WaitGroup
+	for range 2 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			_, _ = p.Search(context.Background(), Options{Query: "question", MaxResults: resultsPerRequest})
+		}()
+	}
+	waitForReceive(t, extractor.start, time.Second, "first provider extractor")
+	waitForReceive(t, extractor.start, time.Second, "second provider extractor")
+	assertNoReceive(t, extractor.start, 50*time.Millisecond, "provider extractor bypassed artifact concurrency")
+	close(release)
+	waitForWaitGroup(t, &wait, time.Second, "provider searches")
+	if peak := extractor.peak.Load(); peak != 2 {
+		t.Fatalf("peak provider extractors = %d, want 2", peak)
+	}
+}
+
 func TestSearchFiltersDomainsBeforeFetch(t *testing.T) {
 	fetcher := &countingFetcher{}
 	p := &Pipeline{
@@ -480,9 +562,9 @@ func TestSearchCapsCandidatesBeforeFetch(t *testing.T) {
 
 func TestSearchDuplicateCandidatesDoNotStarveLaterUniqueResults(t *testing.T) {
 	hits := []search.Hit{
-		{URL: "https://a.example/same?utm_source=one"},
-		{URL: "https://a.example/same?utm_source=two"},
-		{URL: "https://b.example/unique"},
+		{URL: "https://a.example/same?utm_source=one", Title: "First result"},
+		{URL: "https://a.example/same?utm_source=two", Title: "First result duplicate"},
+		{URL: "https://b.example/unique", Title: "Later relevant unique"},
 	}
 	p := &Pipeline{
 		Searcher: stubSearcher{hits: hits},
@@ -523,15 +605,23 @@ func TestPipeline_Search_EndToEnd(t *testing.T) {
 		Cache:     cache.New(nil, 0),
 		Ranker:    rank.New(),
 	}
-	out, err := p.Search(context.Background(), Options{Query: "bm25", MaxResults: 10})
+	out, err := p.Search(context.Background(), Options{Query: "go bm25", MaxResults: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(out) != 2 {
-		t.Fatalf("got %d results", len(out))
+	if len(out) != 1 {
+		t.Fatalf("got %d results, want only the lexically supported result", len(out))
 	}
 	if out[0].URL != "https://a.example/x" {
 		t.Fatalf("ranking wrong; first=%v", out[0].URL)
+	}
+
+	parsed := p.Parse(context.Background(), Options{
+		Query: "go bm25",
+		URLs:  []string{"https://b.example/y"},
+	})
+	if len(parsed) != 1 {
+		t.Fatalf("parse must preserve caller-supplied URL results, got %d", len(parsed))
 	}
 }
 
@@ -556,6 +646,22 @@ func TestPipeline_ParseFormatsMarkdownOnlyClearsDuplicateAndUnrequestedFields(t 
 	}
 	if out[0].Content.MainText != "" {
 		t.Fatalf("structured main text was not cleared: %+v", out[0].Content)
+	}
+}
+
+func TestPipeline_MarkdownFormatFallsBackToExtractedPlainText(t *testing.T) {
+	results := []model.SearchResult{{
+		URL:     "https://example.com/plain",
+		Content: &model.Content{MainText: "Extracted article text without structural markup."},
+	}}
+
+	filterResultsByFormats(results, []string{"markdown"})
+
+	if results[0].Markdown != "Extracted article text without structural markup." {
+		t.Fatalf("markdown fallback = %q", results[0].Markdown)
+	}
+	if results[0].Content.MainText != "" {
+		t.Fatalf("duplicate main text was not cleared: %+v", results[0].Content)
 	}
 }
 
@@ -711,5 +817,21 @@ func TestPipeline_ContentSHADedupes(t *testing.T) {
 	out, _ := p.Search(context.Background(), Options{})
 	if len(out) != 1 {
 		t.Fatalf("content dedupe failed, got %d", len(out))
+	}
+}
+
+func TestPipeline_PreserveURLResultsSkipsContentDeduplication(t *testing.T) {
+	urls := []string{"https://a.example/1", "https://b.example/2"}
+	p := &Pipeline{
+		Fetcher: stubFetcher{resp: map[string]fetcher.Result{
+			urls[0]: {Body: []byte("identical body")},
+			urls[1]: {Body: []byte("identical body")},
+		}},
+		Extractor: stubExtractor{},
+		Cache:     cache.New(nil, 0),
+	}
+	out := p.Parse(context.Background(), Options{URLs: urls, PreserveURLResults: true})
+	if len(out) != 2 || out[0].URL != urls[0] || out[1].URL != urls[1] {
+		t.Fatalf("preserved URL results = %+v", out)
 	}
 }

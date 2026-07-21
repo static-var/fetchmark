@@ -1,11 +1,11 @@
 // Package robots provides a cached robots.txt policy checker.
 //
 // The checker fetches /robots.txt per host (via the caller-supplied
-// http.Client, which MUST already be subject to an egress policy), parses
-// it with github.com/temoto/robotstxt, and caches the result with a TTL.
-// Fetch failures fail open for the current request but are not cached, so a
-// transient outage or cancellation cannot poison policy for the full TTL.
-// Conversely, a 4xx robots.txt is treated per the spec (4xx => allowed).
+// http.Client, which MUST already be subject to an egress policy), parses it
+// with Fetchmark's bounded RFC 9309 matcher, and caches the result with a TTL.
+// Network/5xx failures fail closed for the current request and are not cached,
+// matching RFC 9309's "unreachable" rule without poisoning policy for the full
+// TTL. A 4xx robots.txt is "unavailable" and therefore allows access.
 package robots
 
 import (
@@ -19,9 +19,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/temoto/robotstxt"
 	"golang.org/x/sync/singleflight"
 )
+
+const MaxEvidencePolicyBytes = 512 << 10
 
 // Checker resolves whether a given URL may be fetched by our user agent
 // under the target site's robots.txt policy.
@@ -36,7 +37,7 @@ type Checker struct {
 }
 
 type entry struct {
-	data    *robotstxt.RobotsData
+	data    *policy
 	fetched time.Time
 }
 
@@ -60,24 +61,69 @@ func New(client *http.Client, ttl time.Duration, maxSize int64) *Checker {
 	}
 }
 
-// Allowed reports whether ua may fetch rawURL. Any fetch/parse error is
-// treated as "allow" — see package doc.
-func (c *Checker) Allowed(ctx context.Context, ua, rawURL string) (bool, error) {
+// Decision distinguishes parsed policy from the RFC 9309 complete-disallow
+// assumption used when robots.txt is unreachable.
+type Decision struct {
+	Allowed       bool
+	Authoritative bool
+	Err           error
+}
+
+// Evaluate reports both the effective live-retrieval decision and whether it
+// was based on an authoritative robots.txt response.
+func (c *Checker) Evaluate(ctx context.Context, ua, rawURL string) Decision {
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return false, err
+		return Decision{Err: err}
 	}
 	if u.Scheme == "" || u.Host == "" {
-		return false, errors.New("robots: url missing scheme/host")
+		return Decision{Err: errors.New("robots: url missing scheme/host")}
+	}
+	productToken := robotsProductToken(ua)
+	if productToken == "" {
+		return Decision{Err: errors.New("robots: user agent product token is required")}
 	}
 	data, err := c.get(ctx, u.Scheme+"://"+u.Host, ua)
 	if err != nil || data == nil {
-		return true, nil
+		return Decision{Allowed: false, Authoritative: true, Err: err}
 	}
-	return data.TestAgent(u.EscapedPath(), ua), nil
+	return Decision{Allowed: data.allowed(productToken, robotsRequestTarget(u)), Authoritative: true}
 }
 
-func (c *Checker) get(ctx context.Context, origin, ua string) (*robotstxt.RobotsData, error) {
+// EvaluatePolicy applies the same bounded RFC 9309 parser as Checker to exact
+// already-fetched policy bytes. It exists for the separate publisher evidence
+// adapter, which must hash and archive the policy representation it evaluated.
+// Network status handling remains the caller's responsibility.
+func EvaluatePolicy(body []byte, userAgent, rawURL string) (bool, error) {
+	if len(body) > MaxEvidencePolicyBytes {
+		return false, errors.New("robots: policy exceeds evidence byte limit")
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return false, errors.New("robots: url missing scheme/host")
+	}
+	productToken := robotsProductToken(userAgent)
+	if productToken == "" {
+		return false, errors.New("robots: user agent product token is required")
+	}
+	data, err := parsePolicy(body)
+	if err != nil {
+		return false, err
+	}
+	return data.allowed(productToken, robotsRequestTarget(parsed)), nil
+}
+
+// Allowed reports whether ua may fetch rawURL. Network and server failures are
+// complete disallow per RFC 9309; callers may inspect Evaluate for the cause.
+func (c *Checker) Allowed(ctx context.Context, ua, rawURL string) (bool, error) {
+	decision := c.Evaluate(ctx, ua, rawURL)
+	if decision.Err != nil {
+		return false, decision.Err
+	}
+	return decision.Allowed, nil
+}
+
+func (c *Checker) get(ctx context.Context, origin, ua string) (*policy, error) {
 	c.mu.Lock()
 	if e, ok := c.cache[origin]; ok && time.Since(e.fetched) < c.ttl {
 		c.mu.Unlock()
@@ -108,7 +154,7 @@ func (c *Checker) get(ctx context.Context, origin, ua string) (*robotstxt.Robots
 	if v == nil {
 		return nil, err
 	}
-	data, _ := v.(*robotstxt.RobotsData)
+	data, _ := v.(*policy)
 	return data, err
 }
 
@@ -122,7 +168,7 @@ func (c *Checker) sweepExpired(now time.Time) {
 	}
 }
 
-func (c *Checker) fetch(ctx context.Context, origin, ua string) (*robotstxt.RobotsData, error) {
+func (c *Checker) fetch(ctx context.Context, origin, ua string) (*policy, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, origin+"/robots.txt", nil)
 	if err != nil {
 		return nil, err
@@ -136,11 +182,11 @@ func (c *Checker) fetch(ctx context.Context, origin, ua string) (*robotstxt.Robo
 	}
 	defer resp.Body.Close()
 
-	// Per RFC 9309 §2.3.1: 4xx => full allow, 5xx => full disallow (we
-	// fail open on 5xx to match the stated policy in the package doc).
+	// RFC 9309 §2.3.1: 4xx is unavailable (access allowed), while 5xx is
+	// unreachable (the caller assumes complete disallow).
 	switch {
 	case resp.StatusCode >= 400 && resp.StatusCode < 500:
-		return robotstxt.FromString("")
+		return parsePolicy(nil)
 	case resp.StatusCode >= 500:
 		return nil, fmt.Errorf("robots: upstream status %d", resp.StatusCode)
 	}
@@ -152,7 +198,34 @@ func (c *Checker) fetch(ctx context.Context, origin, ua string) (*robotstxt.Robo
 	if int64(len(body)) > c.maxSize {
 		return nil, errors.New("robots: too large")
 	}
-	return robotstxt.FromBytes(body)
+	return parsePolicy(body)
+}
+
+// robotsProductToken returns the leading RFC 9309 product token from the
+// descriptive HTTP User-Agent identification string.
+func robotsProductToken(userAgent string) string {
+	userAgent = strings.TrimSpace(userAgent)
+	end := 0
+	for end < len(userAgent) {
+		char := userAgent[end]
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || char == '-' || char == '_' {
+			end++
+			continue
+		}
+		break
+	}
+	return userAgent[:end]
+}
+
+func robotsRequestTarget(parsed *url.URL) string {
+	path := parsed.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	if parsed.RawQuery != "" || parsed.ForceQuery {
+		path += "?" + parsed.RawQuery
+	}
+	return path
 }
 
 // IsDisallowed is a convenience wrapper that maps (allowed, err) to a
@@ -160,9 +233,7 @@ func (c *Checker) fetch(ctx context.Context, origin, ua string) (*robotstxt.Robo
 func (c *Checker) IsDisallowed(ctx context.Context, ua, rawURL string) bool {
 	allowed, err := c.Allowed(ctx, ua, rawURL)
 	if err != nil {
-		return false
+		return true
 	}
 	return !allowed
 }
-
-var _ = strings.TrimSpace // keep strings import reserved for future use

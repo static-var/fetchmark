@@ -3,8 +3,9 @@ info:
   title: Fetchmark API
   version: "0.1.0"
   description: |
-    Fetchmark is a self-hostable alternative to Tavily / Exa. It runs
-    SearXNG under the hood, fetches the returned URLs in parallel with
+    Fetchmark is a self-hostable open-discovery API with explicit Tavily,
+    Exa, and Brave compatibility routes. It brokers native open sources and
+    SearXNG, fetches the returned URLs in parallel with
     SSRF-safe egress, extracts clean content with Trafilatura, and
     re-ranks results with BM25 + engine-diversity bonus.
 
@@ -12,6 +13,17 @@ info:
     `Authorization: Bearer <api_key>` or `X-API-Key: <api_key>`.
     Fields flagged "admin only" require the caller's key to be in
     `FM_ADMIN_API_KEYS`; otherwise the request is rejected with 403.
+
+    When the executable file resolved for the process at startup can be hashed,
+    native `/v1/search` responses include `X-Fetchmark-Build-SHA256`. This is a
+    build-artifact fingerprint, not a mapped-process-image, source-revision, or
+    runtime-configuration digest.
+
+    When startup configuration evidence is valid, native `/v1/search`
+    responses also include `X-Fetchmark-Configuration-SHA256`. Authenticated
+    clients can retrieve the exact bounded non-secret bytes from
+    `/v1/evaluation/configuration`; the manifest explicitly identifies dynamic
+    state that it cannot snapshot.
 
 servers:
   - url: http://localhost:8080
@@ -30,6 +42,41 @@ components:
     apiKeyBearer:
       type: http
       scheme: bearer
+    exaApiKey:
+      type: apiKey
+      in: header
+      name: x-api-key
+    braveToken:
+      type: apiKey
+      in: header
+      name: X-Subscription-Token
+
+  headers:
+    BuildSHA256:
+      description: SHA-256 of the executable file resolved for the process at startup.
+      required: false
+      schema:
+        type: string
+        pattern: '^[0-9a-f]{64}$'
+      example: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+    ConfigurationSHA256:
+      description: >-
+        SHA-256 of the exact startup-resolved non-secret evaluation
+        configuration manifest returned by /v1/evaluation/configuration.
+      required: false
+      schema:
+        type: string
+        pattern: '^[0-9a-f]{64}$'
+      example: 'abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd'
+    DiscoveryAttribution:
+      description: >-
+        Optional RFC 8288 attribution link. Present when the returned search
+        page includes a result supplied by an upstream whose terms request
+        attribution, including Wiby, arXiv, and Stack Overflow. arXiv's Link
+        relation is an acknowledgment; its CC0 identity stays scoped to native
+        result metadata and does not license the mixed response.
+      schema: { type: string }
+      example: '<https://wiby.me/>; rel="via"; title="Wiby"'
 
   schemas:
     SearchRequest:
@@ -49,8 +96,8 @@ components:
           example: en
         time_range:
           type: string
-          enum: [day, month, year]
-          description: "Optional SearXNG freshness filter. SearXNG supports day, month, and year."
+          enum: [day, week, month, year]
+          description: "Optional discovery freshness window. Provider support varies; unsupported controls fail explicitly."
         safesearch:
           type: integer
           enum: [0, 1, 2]
@@ -117,10 +164,14 @@ components:
         status:         { type: integer, description: "(Reserved — not currently populated.) HTTP status returned by upstream." }
         score:          { type: number, format: float }
         published_at:   { type: string, format: date-time, description: "Parsed publication date for the search result, when provided by the upstream provider." }
+        provenance:
+          type: array
+          description: "Deterministic broker attribution tuples retained across canonical URL and content deduplication. Federation bindings are redacted to the generic federation provider and lane."
+          items: { $ref: "#/components/schemas/DiscoveryProvenance" }
         metadata:
           type: object
           additionalProperties: { type: string }
-          description: "Search-provider metadata. Current keys include category (the SearXNG category for the result), original_rank (the 1-based rank returned by the upstream provider before Fetchmark re-ranking), date (the raw SearXNG date string), published_at (the raw provider publication date string, when useful), and advanced-mode RRF fields rrf_score, rrf_variants, and rrf_original_rank."
+          description: "Search-provider metadata. Current keys include category (the SearXNG category for the result), original_rank (the 1-based rank returned by the upstream provider before Fetchmark re-ranking), date (the raw SearXNG date string), published_at (the raw provider publication date string, when useful), and RRF fields rrf_score, rrf_variants, rrf_sources, and rrf_original_rank. rrf_sources is a legacy lane/variant projection; use provenance for provider-aware evaluation."
           examples:
             - category: news
               original_rank: "3"
@@ -134,6 +185,73 @@ components:
           items: { $ref: "#/components/schemas/ContentChunk" }
         content:        { $ref: "#/components/schemas/Content" }
         unsupported_reason: { type: string, description: "Reason if parsing could not complete: non_html, js_required, robots_disallowed, egress_blocked, fetch_failed, extract_failed, request_byte_budget." }
+
+    DiscoveryProvenance:
+      type: object
+      required: [provider, lane, variant]
+      properties:
+        provider: { type: string, description: "Bounded discovery adapter kind, such as scrapling, searxng, wikipedia, crossref, arxiv, mwmbl, wiby, stackexchange, github, pubmed, yacy, openpack, local-index, or federation." }
+        lane: { type: string, description: "Validated source-pack lane. Private federation binding IDs are never exposed." }
+        variant: { type: string, enum: [original, exact, freshness, docs, other] }
+
+    DiscoveryParseFallback:
+      type: object
+      additionalProperties: false
+      required: [format, content]
+      description: >-
+        Bounded, sanitized provider markup returned only when structured SERP
+        parsing fails. It is untrusted diagnostic input, never a ranked result.
+      properties:
+        format: { type: string, enum: [cleaned_dom] }
+        content: { type: string, minLength: 1, maxLength: 65536 }
+        truncated: { type: boolean }
+
+    DiscoveryDiagnostic:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      description: >-
+        Bounded machine diagnostic. Raw error text and provider-instance
+        addresses are intentionally excluded.
+      properties:
+        source: { type: string, maxLength: 48, description: "Normalized provider sub-source or engine token." }
+        reason: { type: string, maxLength: 48, description: "Normalized bounded failure classification." }
+        retryable: { type: boolean }
+        retry_after_ms: { type: integer, minimum: 0, maximum: 86400000 }
+        fallback: { $ref: "#/components/schemas/DiscoveryParseFallback" }
+
+    DiscoveryLaneReport:
+      type: object
+      additionalProperties: false
+      required: [provider, lane, variant, status, candidate_count, duration_ms]
+      properties:
+        provider: { type: string, maxLength: 48, description: "Trusted adapter kind from the validated discovery plan." }
+        lane: { type: string, maxLength: 48, description: "Trusted source-pack lane; private federation identities remain redacted." }
+        variant: { type: string, enum: [original, exact, freshness, docs, other] }
+        status: { type: string, enum: [healthy, partial, degraded_empty, authoritative_empty, failed] }
+        candidate_count: { type: integer, minimum: 0, maximum: 100, description: "Unique canonical candidates returned before fetch/extraction." }
+        duration_ms: { type: integer, minimum: 0, maximum: 86400000 }
+        diagnostics:
+          type: array
+          maxItems: 16
+          items: { $ref: "#/components/schemas/DiscoveryDiagnostic" }
+        diagnostics_truncated: { type: boolean, description: "True when more than 16 provider diagnostics were reported." }
+
+    DiscoveryReport:
+      type: object
+      additionalProperties: false
+      required: [status]
+      description: >-
+        Aggregate discovery evidence, separate from later robots, fetch,
+        extraction, deduplication, and ranking outcomes. Lane order follows the
+        deterministic validated plan. This native-only object is not emitted by
+        Tavily, Exa, or Brave compatibility routes.
+      properties:
+        status: { type: string, enum: [healthy, partial, degraded_empty, authoritative_empty, failed] }
+        lanes:
+          type: array
+          maxItems: 128
+          items: { $ref: "#/components/schemas/DiscoveryLaneReport" }
 
     ContentChunk:
       type: object
@@ -161,10 +279,104 @@ components:
         cleaned_html:  { type: string }
         unsupported_reason: { type: string }
 
+    EvaluationConfigurationManifest:
+      type: object
+      additionalProperties: false
+      required: [schema_version, discovery, retrieval, content_cache, persistence, renderer, network_policy]
+      properties:
+        schema_version: { type: integer, const: 1 }
+        discovery: { type: object, additionalProperties: true }
+        retrieval: { type: object, additionalProperties: true }
+        content_cache: { type: object, additionalProperties: true }
+        persistence: { type: object, additionalProperties: true }
+        renderer: { type: object, additionalProperties: true }
+        network_policy: { type: object, additionalProperties: true }
+        state_limitations:
+          type: array
+          items: { type: string }
+
     ErrorResponse:
       type: object
+      example:
+        error: unsupported_control
+        control: engines
+        description: "engines unsupported: no enabled SearXNG discovery source"
       properties:
-        error:     { type: string }
+        error:       { type: string }
+        control:     { type: string, description: "Unsupported request control, when error is unsupported_control." }
+        description: { type: string, description: "Human-readable explanation for a typed request error." }
+        discovery: { $ref: "#/components/schemas/DiscoveryReport" }
+
+    TavilySearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query: { type: string }
+        search_depth: { type: string, enum: [basic, advanced, fast, ultra-fast] }
+        chunks_per_source: { type: integer, minimum: 1, maximum: 3 }
+        max_results: { type: integer, minimum: 1, maximum: 20, default: 5 }
+        topic: { type: string, enum: [general, news] }
+        time_range: { type: string, enum: [day, month, year, d, m, y] }
+        include_answer: { oneOf: [{ type: boolean }, { type: string, enum: [basic, advanced] }] }
+        include_raw_content: { oneOf: [{ type: boolean }, { type: string, enum: [markdown, text] }] }
+        include_domains: { type: array, items: { type: string } }
+        exclude_domains: { type: array, items: { type: string } }
+        exact_match: { type: boolean }
+        include_usage: { type: boolean }
+        safe_search: { type: boolean }
+
+    ExaSearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query: { type: string }
+        includeDomains: { type: array, items: { type: string } }
+        excludeDomains: { type: array, items: { type: string } }
+        numResults: { type: integer, minimum: 1, maximum: 100, default: 10 }
+        type: { type: string, enum: [auto] }
+        contents:
+          type: object
+          properties:
+            text: { oneOf: [{ type: boolean }, { type: object }] }
+            highlights: { oneOf: [{ type: boolean }, { type: object }], description: A distinct highlights query is not supported. }
+
+    ExaContentsRequest:
+      type: object
+      oneOf:
+        - required: [ids]
+        - required: [urls]
+      properties:
+        ids: { type: array, minItems: 1, maxItems: 100, items: { type: string, format: uri } }
+        urls: { type: array, minItems: 1, maxItems: 100, items: { type: string, format: uri } }
+        text: { oneOf: [{ type: boolean }, { type: object }] }
+        highlights: { type: object, description: Requires a non-empty query property. }
+      description: Exactly one of ids or urls is required. Fetchmark IDs are URLs.
+
+    ExaErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [requestId, error, tag]
+      properties:
+        requestId: { type: string, minLength: 1 }
+        error: { type: string, minLength: 1 }
+        tag:
+          type: string
+          enum:
+            - INVALID_API_KEY
+            - INVALID_REQUEST_BODY
+            - INVALID_REQUEST
+            - INVALID_URLS
+            - INVALID_NUM_RESULTS
+            - NUM_RESULTS_EXCEEDED
+            - INTERNAL_ERROR
+            - RESPONSE_TOO_LARGE
+
+    ExaRateLimitResponse:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error: { type: string, minLength: 1 }
 
 paths:
   /healthz:
@@ -176,7 +388,7 @@ paths:
 
   /readyz:
     get:
-      summary: Readiness — verifies SearXNG, plus Redis when Redis mode is active.
+      summary: Readiness — verifies primary SearXNG when configured, plus Redis when Redis mode is active.
       security: []
       responses:
         "200": { description: ok }
@@ -200,6 +412,10 @@ paths:
       responses:
         "200":
           description: ok
+          headers:
+            X-Fetchmark-Build-SHA256: { $ref: "#/components/headers/BuildSHA256" }
+            X-Fetchmark-Configuration-SHA256: { $ref: "#/components/headers/ConfigurationSHA256" }
+            Link: { $ref: "#/components/headers/DiscoveryAttribution" }
           content:
             application/json:
               schema:
@@ -208,12 +424,58 @@ paths:
                   query:   { type: string }
                   count:   { type: integer }
                   results: { type: array, items: { $ref: "#/components/schemas/SearchResult" } }
-        "400": { description: bad_request, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+                  discovery: { $ref: "#/components/schemas/DiscoveryReport" }
+        "400":
+          description: bad_request
+          headers:
+            X-Fetchmark-Build-SHA256: { $ref: "#/components/headers/BuildSHA256" }
+            X-Fetchmark-Configuration-SHA256: { $ref: "#/components/headers/ConfigurationSHA256" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          description: missing_or_invalid_api_key
+          headers:
+            X-Fetchmark-Build-SHA256: { $ref: "#/components/headers/BuildSHA256" }
+            X-Fetchmark-Configuration-SHA256: { $ref: "#/components/headers/ConfigurationSHA256" }
+        "403":
+          description: admin_only_flag_used_with_non_admin_key
+          headers:
+            X-Fetchmark-Build-SHA256: { $ref: "#/components/headers/BuildSHA256" }
+            X-Fetchmark-Configuration-SHA256: { $ref: "#/components/headers/ConfigurationSHA256" }
+        "429":
+          description: rate_limited
+          headers:
+            X-Fetchmark-Build-SHA256: { $ref: "#/components/headers/BuildSHA256" }
+            X-Fetchmark-Configuration-SHA256: { $ref: "#/components/headers/ConfigurationSHA256" }
+        "502":
+          description: search_failed; includes bounded discovery evidence when planning or provider execution began.
+          headers:
+            X-Fetchmark-Build-SHA256: { $ref: "#/components/headers/BuildSHA256" }
+            X-Fetchmark-Configuration-SHA256: { $ref: "#/components/headers/ConfigurationSHA256" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "507":
+          description: serialized response exceeds FM_MAX_REQUEST_OUTPUT_BYTES
+          headers:
+            X-Fetchmark-Build-SHA256: { $ref: "#/components/headers/BuildSHA256" }
+            X-Fetchmark-Configuration-SHA256: { $ref: "#/components/headers/ConfigurationSHA256" }
+
+  /v1/evaluation/configuration:
+    get:
+      summary: Return the exact startup-resolved non-secret evaluation configuration manifest.
+      responses:
+        "200":
+          description: Exact manifest bytes whose digest is advertised on native search responses.
+          headers:
+            X-Fetchmark-Configuration-SHA256: { $ref: "#/components/headers/ConfigurationSHA256" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EvaluationConfigurationManifest" }
         "401": { description: missing_or_invalid_api_key }
-        "403": { description: admin_only_flag_used_with_non_admin_key }
         "429": { description: rate_limited }
-        "502": { description: search_failed }
-        "507": { description: serialized response exceeds FM_MAX_REQUEST_OUTPUT_BYTES }
+        "503": { description: evaluation configuration unavailable because startup evidence is invalid }
 
   /v1/parse:
     post:
@@ -315,6 +577,114 @@ paths:
         "503": { description: summarize_not_configured }
         "504": { description: provider_timeout }
 
+  /compat/tavily/search:
+    post:
+      summary: Tavily-compatible open-search subset.
+      security: [{ apiKeyBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TavilySearchRequest" }
+      responses:
+        "200":
+          description: Tavily-shaped search response
+          headers:
+            Link: { $ref: "#/components/headers/DiscoveryAttribution" }
+        "400": { description: Unsupported or invalid Tavily request }
+        "401": { description: Missing or invalid Bearer key }
+        "429": { description: Tavily-shaped rate limit response }
+        "507": { description: Tavily-shaped response budget error }
+
+  /compat/exa/search:
+    post:
+      summary: Exa-compatible open-search subset.
+      security: [{ exaApiKey: [] }, { apiKeyBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ExaSearchRequest" }
+      responses:
+        "200":
+          description: Exa-shaped search response
+          headers:
+            Link: { $ref: "#/components/headers/DiscoveryAttribution" }
+        "400":
+          description: Invalid body, conflicting controls, invalid numResults, or instance result cap exceeded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExaErrorResponse" }
+        "401":
+          description: Missing, empty, or invalid key (`INVALID_API_KEY`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExaErrorResponse" }
+        "429":
+          description: Exa-compatible simple rate-limit response; contains only `error`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExaRateLimitResponse" }
+        "507":
+          description: Fetchmark-only response-byte-budget extension (`RESPONSE_TOO_LARGE`), not an Exa status/tag.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExaErrorResponse" }
+
+  /compat/exa/contents:
+    post:
+      summary: Exa-compatible URL content retrieval.
+      security: [{ exaApiKey: [] }, { apiKeyBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ExaContentsRequest" }
+      responses:
+        "200": { description: Results plus per-URL statuses }
+        "400":
+          description: Invalid body, conflicting controls, or invalid URLs/IDs.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExaErrorResponse" }
+        "401":
+          description: Missing, empty, or invalid key (`INVALID_API_KEY`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExaErrorResponse" }
+        "429":
+          description: Exa-compatible simple rate-limit response; contains only `error`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExaRateLimitResponse" }
+        "507":
+          description: Fetchmark-only response-byte-budget extension (`RESPONSE_TOO_LARGE`), not an Exa status/tag.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExaErrorResponse" }
+
+  /compat/brave/res/v1/web/search:
+    get:
+      summary: Brave-compatible web-search subset.
+      security: [{ braveToken: [] }]
+      parameters:
+        - { in: query, name: q, required: true, schema: { type: string, maxLength: 400 } }
+        - { in: query, name: count, schema: { type: integer, minimum: 1, maximum: 20, default: 20 } }
+        - { in: query, name: offset, schema: { type: integer, minimum: 0, maximum: 9, default: 0 } }
+        - { in: query, name: search_lang, schema: { type: string, default: en } }
+        - { in: query, name: safesearch, schema: { type: string, enum: [off, moderate, strict], default: moderate } }
+        - { in: query, name: freshness, schema: { type: string, enum: [pd, pm, py] } }
+        - { in: query, name: spellcheck, schema: { type: boolean } }
+      responses:
+        "200":
+          description: Brave-shaped web results
+          headers:
+            Link: { $ref: "#/components/headers/DiscoveryAttribution" }
+        "422": { description: Unsupported or invalid Brave query }
+        "401": { description: Missing or invalid subscription token }
+        "429": { description: Brave-shaped rate limit response }
+        "507": { description: Brave-shaped response budget error }
+
   /admin/summarize/config:
     get:
       summary: (admin) Snapshot of configured providers. API keys are never returned.
@@ -329,6 +699,137 @@ paths:
                   default:   { type: string }
                   providers: { type: array, items: { type: object } }
         "401": { description: missing_or_invalid_admin_key }
+
+  /admin/corpus/admissions:
+    post:
+      summary: (admin) Fresh-fetch and explicitly admit URL-only batches into a curated local corpus.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [urls]
+              properties:
+                urls:
+                  type: array
+                  minItems: 1
+                  items: { type: string, format: uri, maxLength: 2048 }
+                safety_classification:
+                  type: string
+                  enum: [unclassified, safe, unsafe]
+                  default: unclassified
+                  description: Explicit operator assertion applied to every admitted URL; Fetchmark does not infer this from page text.
+      responses:
+        "200": { description: "Bodyless per-URL admitted, rejected, or failed outcomes" }
+        "400": { description: "Invalid, duplicate, or oversized URL batch" }
+        "401": { description: Missing or invalid admin key }
+        "409": { description: Curated mode is not active }
+        "503": { description: Curated stores are not ready }
+        "507": { description: Response byte budget exceeded }
+
+  /admin/corpus/focused-admissions:
+    post:
+      summary: (admin) Admit one focused-crawler URL under an explicit redirect path policy.
+      description: >-
+        Curated-only control plane. Fetchmark fresh-fetches the URL and requires
+        every redirect to retain the original scheme and authority, match an
+        allowed decoded-path prefix, and miss all denied paths and canonical
+        URLs. The request carries no page body and cannot assert safety. A
+        bounded crawler-only outbound-link snapshot may be requested; it is
+        returned only after successful permitted retention.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [url, allowed_path_prefixes]
+              properties:
+                url: { type: string, format: uri, maxLength: 2048 }
+                allowed_path_prefixes:
+                  type: array
+                  minItems: 1
+                  maxItems: 256
+                  uniqueItems: true
+                  items: { type: string, maxLength: 2048, pattern: '^/' }
+                denied_path_prefixes:
+                  type: array
+                  maxItems: 256
+                  uniqueItems: true
+                  items: { type: string, maxLength: 2048, pattern: '^/' }
+                denied_urls:
+                  type: array
+                  maxItems: 256
+                  uniqueItems: true
+                  items: { type: string, format: uri, maxLength: 2048 }
+                max_outbound_links:
+                  type: integer
+                  minimum: 0
+                  maximum: 64
+                  default: 0
+                  description: >-
+                    Crawler-only reader-view link cap. Zero omits link metadata;
+                    a requested admitted response contains outbound_links even
+                    when the authoritative snapshot is empty.
+      responses:
+        "200":
+          description: One admitted, rejected, or failed outcome without page content.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [count, results]
+                properties:
+                  count: { type: integer, enum: [1] }
+                  results:
+                    type: array
+                    minItems: 1
+                    maxItems: 1
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required: [url, status]
+                      properties:
+                        url: { type: string, format: uri, maxLength: 2048 }
+                        status: { type: string, enum: [admitted, rejected, failed] }
+                        reason: { type: string }
+                        outbound_links:
+                          type: array
+                          maxItems: 64
+                          uniqueItems: true
+                          items: { type: string, format: uri, maxLength: 2048 }
+        "400": { description: "Invalid URL, ambiguous path, or invalid/oversized policy" }
+        "401": { description: Missing or invalid admin key }
+        "409": { description: Curated mode is not active }
+        "503": { description: Curated stores are not ready }
+        "507": { description: Response byte budget exceeded }
+
+  /admin/corpus/takedowns:
+    post:
+      summary: (admin) Write sticky curated/archive tombstones and purge all retained source versions.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [urls]
+              properties:
+                urls:
+                  type: array
+                  minItems: 1
+                  items: { type: string, format: uri, maxLength: 2048 }
+      responses:
+        "200": { description: Bodyless per-URL taken_down or failed outcomes }
+        "400": { description: "Invalid, duplicate, or oversized URL batch" }
+        "401": { description: Missing or invalid admin key }
+        "409": { description: Curated or archive mode is not active }
+        "503": { description: Persistent corpus stores are not ready }
+        "507": { description: Response byte budget exceeded }
 
   /admin/summarize/providers:
     put:

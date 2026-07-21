@@ -211,7 +211,9 @@ func (p Policy) HTTPClient(timeout time.Duration) *http.Client {
 		Timeout:   timeout,
 		Transport: p.Transport(),
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= p.MaxRedirects {
+			// via contains the initial request plus every request already made.
+			// Permit exactly MaxRedirects redirect hops and reject the next one.
+			if len(via) > p.MaxRedirects {
 				return &Error{Reason: ReasonTooManyHops, URL: req.URL.String()}
 			}
 			if len(via) > 0 {

@@ -14,18 +14,23 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/staticvar/fetchmark/internal/core/retryafter"
 	"github.com/staticvar/fetchmark/internal/core/search"
 	"github.com/staticvar/fetchmark/internal/obs"
 )
 
 const (
-	maxResponseBytes = 10 << 20
-	maxSearchPages   = 10
+	maxResponseBytes    = 10 << 20
+	maxSearchPages      = 10
+	maxRetryAfter       = 24 * time.Hour
+	maxTrackedEngines   = 512
+	engineOverflowLabel = "__other__"
 )
 
 var errResponseTooLarge = errors.New("searxng: response too large")
@@ -34,6 +39,7 @@ var errResponseTooLarge = errors.New("searxng: response too large")
 type StatusError struct {
 	StatusCode int
 	Status     string
+	RetryAfter time.Duration
 }
 
 func (e *StatusError) Error() string {
@@ -44,15 +50,16 @@ func (e *StatusError) Error() string {
 }
 
 func (e *StatusError) Retryable() bool {
-	return e.StatusCode == http.StatusTooManyRequests || e.StatusCode >= 500
+	return e.StatusCode == http.StatusForbidden || e.StatusCode == http.StatusRequestTimeout || e.StatusCode == http.StatusTooManyRequests || e.StatusCode >= 500
 }
 
 // Client is a thin typed wrapper around a SearXNG instance.
 type Client struct {
-	base     *url.URL
-	http     *http.Client
-	mu       sync.Mutex
-	knownEng map[string]struct{}
+	base           *url.URL
+	http           *http.Client
+	mu             sync.Mutex
+	engineQuality  map[string]float64
+	trackedEngines int
 }
 
 // New constructs a Client. The provided HTTP client is used as-is, which
@@ -70,7 +77,7 @@ func New(baseURL string, httpc *http.Client) (*Client, error) {
 	if httpc == nil {
 		httpc = &http.Client{Timeout: 10 * time.Second}
 	}
-	return &Client{base: u, http: httpc, knownEng: map[string]struct{}{}}, nil
+	return &Client{base: u, http: httpc, engineQuality: map[string]float64{}}, nil
 }
 
 // response mirrors the subset of SearXNG's JSON we consume. The schema
@@ -96,11 +103,42 @@ type apiResult struct {
 	PublishedDate json.RawMessage `json:"publishedDate"`
 }
 
-// Search runs a SearXNG query and returns hits in the order SearXNG
-// provided them. Ordering is not relevance-ranked.
+// Search preserves the original Searcher contract while SearchBatch carries
+// provider diagnostics for batch-aware callers.
 func (c *Client) Search(ctx context.Context, q search.Query) ([]search.Hit, error) {
+	batch, err := c.SearchBatch(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	return batch.Hits, nil
+}
+
+// SearchBatch runs a SearXNG query and classifies the response using both
+// results and unresponsive_engines. SearXNG can report source failures in an
+// otherwise successful HTTP response, so an empty result with diagnostics is
+// degraded rather than authoritative.
+func (c *Client) SearchBatch(ctx context.Context, q search.Query) (batch search.SearchBatch, err error) {
+	started := time.Now()
+	batch.Provider = "searxng"
+	batch.Instance = c.instanceID()
+	defer func() {
+		batch.Duration = time.Since(started)
+		if err != nil {
+			batch.Status = search.BatchFailed
+		}
+		obs.DiscoveryBatchTotal.WithLabelValues(batch.Provider, batch.Instance, string(batch.Status)).Inc()
+		obs.DiscoveryBatchDuration.WithLabelValues(batch.Provider, batch.Instance).Observe(batch.Duration.Seconds())
+		obs.DiscoveryResultCount.WithLabelValues(batch.Provider, batch.Instance).Observe(float64(len(batch.Hits)))
+		for _, diagnostic := range batch.Diagnostics {
+			obs.DiscoveryDiagnosticTotal.WithLabelValues(
+				diagnostic.Provider,
+				diagnostic.Instance,
+			).Inc()
+		}
+	}()
+
 	if strings.TrimSpace(q.Q) == "" {
-		return nil, errors.New("searxng: empty query")
+		return batch, errors.New("searxng: empty query")
 	}
 
 	u := *c.base
@@ -137,30 +175,34 @@ func (c *Client) Search(ctx context.Context, q search.Query) ([]search.Hit, erro
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 		if err != nil {
-			return nil, err
+			return c.finishPageFailure(out, allResults, allUnresponsive, page, err)
 		}
 		req.Header.Set("Accept", "application/json")
 
 		resp, err := c.http.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("searxng: %w", err)
+			return c.finishPageFailure(out, allResults, allUnresponsive, page, fmt.Errorf("searxng: %w", err))
 		}
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			closeErr := resp.Body.Close()
 			if closeErr != nil {
-				return nil, fmt.Errorf("searxng: close response: %w", closeErr)
+				return c.finishPageFailure(out, allResults, allUnresponsive, page, fmt.Errorf("searxng: close response: %w", closeErr))
 			}
-			return nil, &StatusError{StatusCode: resp.StatusCode, Status: resp.Status}
+			return c.finishPageFailure(out, allResults, allUnresponsive, page, &StatusError{
+				StatusCode: resp.StatusCode,
+				Status:     resp.Status,
+				RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()),
+			})
 		}
 		var body response
 		decodeErr := json.NewDecoder(&maxBytesReader{r: resp.Body, n: maxResponseBytes}).Decode(&body)
 		closeErr := resp.Body.Close()
 		if decodeErr != nil {
-			return nil, fmt.Errorf("searxng: decode: %w", decodeErr)
+			return c.finishPageFailure(out, allResults, allUnresponsive, page, fmt.Errorf("searxng: decode: %w", decodeErr))
 		}
 		if closeErr != nil {
-			return nil, fmt.Errorf("searxng: close response: %w", closeErr)
+			return c.finishPageFailure(out, allResults, allUnresponsive, page, fmt.Errorf("searxng: close response: %w", closeErr))
 		}
 
 		allUnresponsive = append(allUnresponsive, body.UnresponsiveEngines...)
@@ -182,7 +224,8 @@ func (c *Client) Search(ctx context.Context, q search.Query) ([]search.Hit, erro
 			out = append(out, hitFromAPIResult(r, len(out)+1))
 			if q.MaxResults > 0 && len(out) >= q.MaxResults {
 				c.updateEngineHealth(allResults, allUnresponsive)
-				return out[:q.MaxResults], nil
+				batch = c.classifyBatch(out[:q.MaxResults], allUnresponsive)
+				return batch, nil
 			}
 		}
 		if q.MaxResults <= 0 {
@@ -191,7 +234,103 @@ func (c *Client) Search(ctx context.Context, q search.Query) ([]search.Hit, erro
 	}
 
 	c.updateEngineHealth(allResults, allUnresponsive)
-	return out, nil
+	batch = c.classifyBatch(out, allUnresponsive)
+	return batch, nil
+}
+
+func parseRetryAfter(raw string, now time.Time) time.Duration {
+	return retryafter.Parse(raw, now, maxRetryAfter)
+}
+
+// finishPageFailure preserves useful earlier pages as a partial batch. A
+// failure before any hit remains an error so failover and legacy callers keep
+// their existing first-page semantics.
+func (c *Client) finishPageFailure(hits []search.Hit, results []apiResult, unresponsive [][]any, page int, cause error) (search.SearchBatch, error) {
+	if errors.Is(cause, context.Canceled) {
+		return search.SearchBatch{Provider: "searxng", Instance: c.instanceID()}, cause
+	}
+	if len(hits) == 0 {
+		return search.SearchBatch{Provider: "searxng", Instance: c.instanceID()}, cause
+	}
+	c.updateEngineHealth(results, unresponsive)
+	batch := c.classifyBatch(hits, unresponsive)
+	batch.Diagnostics = appendProviderDiagnostics(batch.Diagnostics, []search.ProviderDiagnostic{{
+		Provider:   "searxng",
+		Instance:   c.instanceID(),
+		Source:     fmt.Sprintf("page_%d", page),
+		Reason:     normalizedFailureReason(cause),
+		Retryable:  isRetryableSearchError(cause),
+		RetryAfter: retryAfterFromError(cause),
+	}})
+	batch.Status = search.BatchPartial
+	return batch, nil
+}
+
+func (c *Client) classifyBatch(hits []search.Hit, unresponsive [][]any) search.SearchBatch {
+	batch := search.SearchBatch{
+		Hits:        hits,
+		Provider:    "searxng",
+		Instance:    c.instanceID(),
+		Diagnostics: c.providerDiagnostics(unresponsive),
+	}
+	switch {
+	case len(hits) > 0 && len(batch.Diagnostics) > 0:
+		batch.Status = search.BatchPartial
+	case len(hits) > 0:
+		batch.Status = search.BatchHealthy
+	case len(batch.Diagnostics) > 0:
+		batch.Status = search.BatchDegradedEmpty
+	default:
+		batch.Status = search.BatchAuthoritativeEmpty
+	}
+	return batch
+}
+
+func (c *Client) providerDiagnostics(entries [][]any) []search.ProviderDiagnostic {
+	if len(entries) == 0 {
+		return nil
+	}
+	provider, instance := "searxng", c.instanceID()
+	out := make([]search.ProviderDiagnostic, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		source, reason := "unknown", "malformed diagnostic"
+		if len(entry) > 0 {
+			if value, ok := entry[0].(string); ok && strings.TrimSpace(value) != "" {
+				source = strings.TrimSpace(value)
+			}
+		}
+		if len(entry) > 1 {
+			if value, ok := entry[1].(string); ok {
+				reason = strings.TrimSpace(value)
+			} else if entry[1] != nil {
+				reason = fmt.Sprint(entry[1])
+			}
+			if reason == "" {
+				reason = "unknown"
+			}
+		}
+		key := source + "\x00" + reason
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, search.ProviderDiagnostic{
+			Provider: provider,
+			Instance: instance,
+			Source:   source,
+			Reason:   reason,
+		})
+	}
+	return out
+}
+
+func (c *Client) instanceID() string {
+	u := *c.base
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return strings.TrimRight(u.String(), "/")
 }
 
 type maxBytesReader struct {
@@ -346,43 +485,72 @@ func parseDate(s string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// updateEngineHealth mirrors SearXNG's per-engine availability into a
-// Prometheus gauge. SearXNG exposes "unresponsive_engines" as a list of
-// [name, reason] tuples; we track names across queries and clear the
-// gauge on engines that came back. Lock held briefly; this is not on
-// the hot path for latency.
+// updateEngineHealth mirrors SearXNG's per-engine availability into bounded
+// Prometheus gauges. SearXNG exposes "unresponsive_engines" as a list of
+// [name, reason] tuples. The first maxTrackedEngines names seen by an instance
+// retain individual state; later unknown names aggregate under
+// engineOverflowLabel. Lock held briefly; this is not on the hot path for
+// latency.
 func (c *Client) updateEngineHealth(results []apiResult, unresponsive [][]any) {
-	bad := map[string]struct{}{}
+	observed := map[string]bool{}
 	for _, entry := range unresponsive {
 		if len(entry) == 0 {
 			continue
 		}
 		if name, ok := entry[0].(string); ok && name != "" {
-			bad[name] = struct{}{}
+			observed[name] = true
 		}
 	}
+	for _, result := range results {
+		if result.Engine != "" {
+			if _, bad := observed[result.Engine]; !bad {
+				observed[result.Engine] = false
+			}
+		}
+		for _, engine := range result.Engines {
+			if engine != "" {
+				if _, bad := observed[engine]; !bad {
+					observed[engine] = false
+				}
+			}
+		}
+	}
+
+	names := make([]string, 0, len(observed))
+	for name := range observed {
+		names = append(names, name)
+	}
+	sort.Strings(names)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	for _, r := range results {
-		if r.Engine != "" {
-			c.knownEng[r.Engine] = struct{}{}
+	mapped := make(map[string]bool, len(names))
+	for _, name := range names {
+		label := name
+		if _, tracked := c.engineQuality[name]; !tracked {
+			if c.trackedEngines < maxTrackedEngines {
+				c.trackedEngines++
+			} else {
+				label = engineOverflowLabel
+			}
 		}
-		for _, e := range r.Engines {
-			c.knownEng[e] = struct{}{}
-		}
+		mapped[label] = mapped[label] || observed[name]
 	}
-	for name := range bad {
-		c.knownEng[name] = struct{}{}
-	}
-
-	for name := range c.knownEng {
-		v := 0.0
-		if _, unhealthy := bad[name]; unhealthy {
-			v = 1
+	for name, bad := range mapped {
+		observation := 1.0
+		unresponsiveValue := 0.0
+		if bad {
+			observation = 0
+			unresponsiveValue = 1
 		}
-		obs.SearxngEngineUnresponsive.WithLabelValues(name).Set(v)
+		quality, ok := c.engineQuality[name]
+		if !ok {
+			quality = 1
+		}
+		quality += qualityEWMAAlpha * (observation - quality)
+		c.engineQuality[name] = quality
+		obs.SearxngEngineUnresponsive.WithLabelValues(name).Set(unresponsiveValue)
+		obs.SearxngEngineQuality.WithLabelValues(c.instanceID(), name).Set(quality)
 	}
 }
 

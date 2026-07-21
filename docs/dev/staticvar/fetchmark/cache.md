@@ -5,6 +5,14 @@ derived blobs. Redis is used when reachable; otherwise the process falls
 back to its in-memory map. Redis also hosts the cross-instance stampede
 lock, so fallback mode is local to one process.
 
+This expiring response cache is not the personal corpus source store.
+`internal/adapters/localartifact` owns opt-in durable, hash-verified source
+representations and HTTP validators under `FM_LOCAL_ARTIFACT_PATH`; Bleve is a
+third, rebuildable discovery projection. Do not merge their key spaces or
+retention semantics. In personal mode, one cancelable coordinator sweeps Bleve
+then artifacts at `FM_LOCAL_EXPIRY_SWEEP_INTERVAL`; expired entries are already
+read-ineligible before their physical deletion.
+
 ## Entry points
 
 - `cache.go` — `New(redisClient, ttl)` → `*Cache` with `Get`, `Set`,

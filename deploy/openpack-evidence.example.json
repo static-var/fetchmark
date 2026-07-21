@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "product_token": "FetchmarkPackEvidence",
+  "contact_uri": "mailto:operator@example.org",
+  "evidence_validity_hours": 12,
+  "min_host_interval_ms": 1000,
+  "global_concurrency": 4,
+  "request_timeout_seconds": 20,
+  "rights": {
+    "allowed_fields": [
+      "url_metadata"
+    ],
+    "basis": "url_metadata_policy",
+    "evidence_uri": "https://commoncrawl.org/terms-of-use",
+    "rights_notice": "URL metadata only under the publisher-reviewed policy"
+  }
+}

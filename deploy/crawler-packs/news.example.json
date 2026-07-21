@@ -1,0 +1,40 @@
+{
+  "version": 3,
+  "contact_uri": "mailto:operator@example.invalid",
+  "max_frontier_urls": 5000,
+  "max_discovery_sources": 50,
+  "max_discovery_page_memberships": 5000,
+  "max_discovery_source_edges": 500,
+  "max_link_edges": 5000,
+  "jobs": [
+    {
+      "id": "news-feed",
+      "seeds": [],
+      "allowed_domains": ["news.example.invalid"],
+      "allowed_path_prefixes": ["/articles/"],
+      "denied_path_prefixes": [],
+      "denied_urls": [],
+      "max_urls_per_run": 100,
+      "max_source_polls_per_run": 1,
+      "refresh_interval": "6h",
+      "rejection_recheck_interval": "168h",
+      "min_host_interval": "5s",
+      "max_attempts": 3,
+      "link_expansion": {"max_links_per_page": 8, "max_pages_per_run": 10},
+      "discovery_sources": [
+        {
+          "url": "https://news.example.invalid/feeds/latest.xml",
+          "kind": "feed",
+          "allowed_source_path_prefixes": ["/feeds/"],
+          "poll_interval": "10m",
+          "error_recheck_interval": "30m",
+          "max_compressed_bytes": 1048576,
+          "max_decompressed_bytes": 4194304,
+          "max_entries": 2000,
+          "max_child_sources": 0,
+          "max_depth": 0
+        }
+      ]
+    }
+  ]
+}

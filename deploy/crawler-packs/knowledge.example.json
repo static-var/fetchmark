@@ -1,0 +1,40 @@
+{
+  "version": 3,
+  "contact_uri": "mailto:operator@example.invalid",
+  "max_frontier_urls": 20000,
+  "max_discovery_sources": 250,
+  "max_discovery_page_memberships": 20000,
+  "max_discovery_source_edges": 2000,
+  "max_link_edges": 20000,
+  "jobs": [
+    {
+      "id": "knowledge-topics",
+      "seeds": ["https://knowledge.example.invalid/topics/"],
+      "allowed_domains": ["knowledge.example.invalid"],
+      "allowed_path_prefixes": ["/topics/"],
+      "denied_path_prefixes": [],
+      "denied_urls": [],
+      "max_urls_per_run": 300,
+      "max_source_polls_per_run": 4,
+      "refresh_interval": "168h",
+      "rejection_recheck_interval": "720h",
+      "min_host_interval": "2s",
+      "max_attempts": 4,
+      "link_expansion": {"max_links_per_page": 24, "max_pages_per_run": 50},
+      "discovery_sources": [
+        {
+          "url": "https://knowledge.example.invalid/sitemaps/topics.xml.gz",
+          "kind": "sitemap",
+          "allowed_source_path_prefixes": ["/sitemaps/"],
+          "poll_interval": "24h",
+          "error_recheck_interval": "2h",
+          "max_compressed_bytes": 2097152,
+          "max_decompressed_bytes": 8388608,
+          "max_entries": 10000,
+          "max_child_sources": 128,
+          "max_depth": 2
+        }
+      ]
+    }
+  ]
+}

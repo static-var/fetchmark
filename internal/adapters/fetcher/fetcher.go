@@ -21,7 +21,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
+	"github.com/staticvar/fetchmark/internal/adapters/cache"
 	"github.com/staticvar/fetchmark/internal/adapters/egress"
 	"github.com/staticvar/fetchmark/internal/adapters/robots"
 	"github.com/staticvar/fetchmark/internal/obs"
@@ -31,15 +33,16 @@ import (
 // AllowedMIME which may be nil (meaning "accept anything"). MIME matching
 // is prefix-based on the detected type, case-insensitive.
 type Budgets struct {
-	MaxBodyBytes         int64
-	MaxDecompressedBytes int64
-	MaxRedirects         int
-	HeaderTimeout        time.Duration
-	FetchTimeout         time.Duration
-	PerHostConcurrency   int
-	GlobalConcurrency    int
-	Retries              int
-	AllowedMIME          []string
+	MaxBodyBytes           int64
+	MaxDecompressedBytes   int64
+	MaxResponseHeaderBytes int64
+	MaxRedirects           int
+	HeaderTimeout          time.Duration
+	FetchTimeout           time.Duration
+	PerHostConcurrency     int
+	GlobalConcurrency      int
+	Retries                int
+	AllowedMIME            []string
 }
 
 // Request describes a single fetch. ProxyURL/UserAgent are admin-only in
@@ -53,23 +56,47 @@ type Request struct {
 	MaxBodyBytes         int64
 	MaxDecompressedBytes int64
 	MaxTotalBytes        int64
+	// FocusedRedirectScope is reserved for the focused-ingestion control plane.
+	// Every redirect must retain the original scheme and authority and satisfy
+	// this explicit path policy. Ambiguous paths are rejected before a request.
+	FocusedRedirectScope *RedirectScope
+	// Conditional validators are raw origin-provided values. They are never
+	// forwarded to a different origin across redirects.
+	IfNoneMatch     string
+	IfModifiedSince string
+}
+
+// RedirectScope is a declarative, deny-first path boundary. Path prefixes use
+// URL escaped-path form, matching the focused crawler configuration.
+type RedirectScope struct {
+	AllowedPathPrefixes []string
+	DeniedPathPrefixes  []string
+	DeniedURLs          []string
 }
 
 // Result is the fetcher's output. A non-empty Unsupported or non-nil Err
 // both indicate the body is not usable; callers should branch on Err
 // first.
 type Result struct {
-	URL         string
-	Status      int
-	ContentType string
-	Body        []byte
-	FromCache   bool
-	FetchMS     int64
-	BytesRead   int64
-	UAUsed      string
-	ProxyUsed   string
-	Unsupported string
-	Err         error
+	URL                 string
+	FinalURL            string
+	Status              int
+	ContentType         string
+	XRobotsTag          []string
+	ETag                string
+	LastModified        string
+	NotModified         bool
+	RobotsAllowed       bool
+	RobotsAuthoritative bool
+	ObservedAt          time.Time
+	Body                []byte
+	FromCache           bool
+	FetchMS             int64
+	BytesRead           int64
+	UAUsed              string
+	ProxyUsed           string
+	Unsupported         string
+	Err                 error
 }
 
 // Unsupported reason constants — stable, used in metric labels.
@@ -80,9 +107,16 @@ const (
 	ReasonDecompressLarge = "decompressed_too_large"
 	ReasonEgress          = "egress_blocked"
 	ReasonRequestBudget   = "request_byte_budget"
+	ReasonRedirectScope   = "redirect_scope"
 
-	maxHostGates    = 1024
-	maxProxyClients = 32
+	maxHostGates                  = 1024
+	maxProxyClients               = 32
+	defaultMaxResponseHeaderBytes = 64 << 10
+)
+
+var (
+	errRedirectRobots = errors.New("fetcher: redirect target disallowed by robots.txt")
+	errRedirectScope  = errors.New("fetcher: redirect target outside focused scope")
 )
 
 // Fetcher is the concurrency-bounded HTTP worker pool. Safe for
@@ -121,6 +155,9 @@ type Options struct {
 func New(o Options) (*Fetcher, error) {
 	if o.Budgets.MaxBodyBytes <= 0 || o.Budgets.MaxDecompressedBytes <= 0 {
 		return nil, errors.New("fetcher: byte budgets must be > 0")
+	}
+	if o.Budgets.MaxResponseHeaderBytes <= 0 {
+		o.Budgets.MaxResponseHeaderBytes = defaultMaxResponseHeaderBytes
 	}
 	if o.Budgets.PerHostConcurrency <= 0 {
 		o.Budgets.PerHostConcurrency = 2
@@ -199,12 +236,20 @@ func (f *Fetcher) FetchMany(ctx context.Context, reqs []Request) []Result {
 // Fetch performs a single request through all gates.
 func (f *Fetcher) Fetch(ctx context.Context, r Request) Result {
 	start := time.Now()
-	res := Result{URL: r.URL}
+	res := Result{URL: r.URL, ObservedAt: start.UTC()}
 
 	u, err := url.Parse(r.URL)
 	if err != nil {
 		res.Err = fmt.Errorf("parse url: %w", err)
 		return res
+	}
+	var redirectScope *focusedRedirectScope
+	if r.FocusedRedirectScope != nil {
+		redirectScope, err = newFocusedRedirectScope(u, *r.FocusedRedirectScope)
+		if err != nil {
+			res.Unsupported = ReasonRedirectScope
+			return res
+		}
 	}
 	if err := f.policy.Validate(ctx, r.URL); err != nil {
 		res.Unsupported = ReasonEgress
@@ -218,7 +263,8 @@ func (f *Fetcher) Fetch(ctx context.Context, r Request) Result {
 		return res
 	}
 
-	// Global + per-host gates.
+	// Global gate bounds complete fetch work. Per-host gates are acquired for
+	// one HTTP hop at a time below so reciprocal redirects cannot lock-invert.
 	select {
 	case f.globalSem <- struct{}{}:
 	case <-ctx.Done():
@@ -227,19 +273,20 @@ func (f *Fetcher) Fetch(ctx context.Context, r Request) Result {
 	}
 	defer func() { <-f.globalSem }()
 
-	releaseHostGate, err := f.acquireHostGate(ctx, u.Hostname())
-	if err != nil {
-		res.Err = err
-		return res
-	}
-	defer releaseHostGate()
-
 	ua := f.chooseUA(r.UserAgent, r.RespectRobots)
 	res.UAUsed = ua
 
 	if f.respectRbt && r.RespectRobots && f.robots != nil {
-		allowed, _ := f.robots.Allowed(ctx, ua, r.URL)
-		if !allowed {
+		releaseRobotsGate, err := f.acquireHostGate(ctx, u.Hostname())
+		if err != nil {
+			res.Err = err
+			return res
+		}
+		decision := f.robots.Evaluate(ctx, ua, r.URL)
+		releaseRobotsGate()
+		res.RobotsAllowed = decision.Allowed
+		res.RobotsAuthoritative = decision.Authoritative
+		if !decision.Allowed {
 			res.Unsupported = ReasonRobots
 			res.FetchMS = time.Since(start).Milliseconds()
 			obs.RobotsBlocks.Inc()
@@ -261,21 +308,40 @@ func (f *Fetcher) Fetch(ctx context.Context, r Request) Result {
 	fctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	body, status, ctype, reason, bytesRead, err := f.doWithRetry(fctx, client, r.URL, ua, r.MaxBodyBytes, r.MaxDecompressedBytes, r.MaxTotalBytes)
-	res.Status = status
-	res.ContentType = ctype
-	res.Unsupported = reason
-	res.Err = err
-	res.Body = body
+	response, bytesRead := f.doWithRetry(
+		fctx, client, r.URL, ua, r.IfNoneMatch, r.IfModifiedSince,
+		r.MaxBodyBytes, r.MaxDecompressedBytes, r.MaxTotalBytes, f.respectRbt && r.RespectRobots, redirectScope,
+	)
+	res.Status = response.status
+	res.FinalURL = response.finalURL
+	res.ContentType = response.contentType
+	res.XRobotsTag = response.xRobotsTag
+	res.ETag = response.etag
+	res.LastModified = response.lastModified
+	res.NotModified = response.notModified
+	res.Unsupported = response.reason
+	res.Err = response.err
+	res.Body = response.body
 	res.BytesRead = bytesRead
 	res.FetchMS = time.Since(start).Milliseconds()
 	return res
 }
 
-func (f *Fetcher) doWithRetry(ctx context.Context, client *http.Client, rawURL, ua string, maxBodyBytes, maxDecompressedBytes, maxTotalBytes int64) ([]byte, int, string, string, int64, error) {
-	var lastErr error
-	var lastStatus int
-	var lastCtype string
+type responseData struct {
+	body         []byte
+	status       int
+	finalURL     string
+	contentType  string
+	xRobotsTag   []string
+	etag         string
+	lastModified string
+	notModified  bool
+	reason       string
+	err          error
+}
+
+func (f *Fetcher) doWithRetry(ctx context.Context, client *http.Client, rawURL, ua, ifNoneMatch, ifModifiedSince string, maxBodyBytes, maxDecompressedBytes, maxTotalBytes int64, respectRobots bool, redirectScope *focusedRedirectScope) (responseData, int64) {
+	var last responseData
 	var bytesRead int64
 	retries := f.budgets.Retries
 	if retries < 0 {
@@ -283,7 +349,10 @@ func (f *Fetcher) doWithRetry(ctx context.Context, client *http.Client, rawURL, 
 	}
 	for attempt := 0; attempt <= retries; attempt++ {
 		if maxTotalBytes > 0 && bytesRead >= maxTotalBytes {
-			return nil, lastStatus, lastCtype, ReasonRequestBudget, bytesRead, nil
+			last.body = nil
+			last.reason = ReasonRequestBudget
+			last.err = nil
+			return last, bytesRead
 		}
 		if attempt > 0 {
 			backoff := time.Duration(1<<attempt)*200*time.Millisecond +
@@ -291,52 +360,127 @@ func (f *Fetcher) doWithRetry(ctx context.Context, client *http.Client, rawURL, 
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
-				return nil, lastStatus, lastCtype, "", bytesRead, ctx.Err()
+				last.body = nil
+				last.err = ctx.Err()
+				return last, bytesRead
 			}
 		}
-		body, status, ctype, reason, err := f.doOnce(ctx, client, rawURL, ua, maxBodyBytes, maxDecompressedBytes, maxTotalBytes, &bytesRead)
-		if err == nil && reason == "" && status >= 200 && status < 300 {
-			return body, status, ctype, "", bytesRead, nil
+		current := f.doOnce(ctx, client, rawURL, ua, ifNoneMatch, ifModifiedSince, maxBodyBytes, maxDecompressedBytes, maxTotalBytes, respectRobots, redirectScope, &bytesRead)
+		if current.notModified {
+			return current, bytesRead
 		}
-		retryableStatus := isRetryableStatus(status)
-		if reason != "" && !retryableStatus {
-			return nil, status, ctype, reason, bytesRead, nil
+		if current.err == nil && current.reason == "" && current.status >= 200 && current.status < 300 {
+			return current, bytesRead
+		}
+		retryableStatus := isRetryableStatus(current.status)
+		if current.reason != "" && !retryableStatus {
+			current.body = nil
+			return current, bytesRead
 		}
 		// Only retry on transient conditions (5xx, 429, network).
-		if err == nil && !retryableStatus {
-			return body, status, ctype, "", bytesRead, nil
+		if current.err == nil && !retryableStatus {
+			return current, bytesRead
 		}
-		lastErr = err
-		lastStatus = status
-		lastCtype = ctype
+		last = current
 	}
-	if lastErr == nil && lastStatus != 0 {
+	if last.err == nil && last.status != 0 {
 		// Retries exhausted on 5xx/429 but no transport error. Surface as
 		// a terminal error so the pipeline labels it fetch_failed rather
 		// than silently falling through to a non-2xx "success".
-		lastErr = fmt.Errorf("upstream returned %d after %d retries", lastStatus, retries)
+		last.err = fmt.Errorf("upstream returned %d after %d retries", last.status, retries)
 	}
-	return nil, lastStatus, lastCtype, "", bytesRead, lastErr
+	last.body = nil
+	return last, bytesRead
 }
 
 func isRetryableStatus(status int) bool {
 	return status == http.StatusTooManyRequests || status >= 500
 }
 
-func (f *Fetcher) doOnce(ctx context.Context, client *http.Client, rawURL, ua string, requestMaxBody, requestMaxDecompressed, requestMaxTotal int64, bytesRead *int64) ([]byte, int, string, string, error) {
+func (f *Fetcher) doOnce(ctx context.Context, client *http.Client, rawURL, ua, ifNoneMatch, ifModifiedSince string, requestMaxBody, requestMaxDecompressed, requestMaxTotal int64, respectRobots bool, redirectScope *focusedRedirectScope, bytesRead *int64) responseData {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, 0, "", "", err
+		return responseData{err: err}
 	}
 	req.Header.Set("User-Agent", ua)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
 	req.Header.Set("Accept-Encoding", "gzip")
+	if ifNoneMatch != "" {
+		req.Header.Set("If-None-Match", ifNoneMatch)
+	}
+	if ifModifiedSince != "" {
+		req.Header.Set("If-Modified-Since", ifModifiedSince)
+	}
 
-	resp, err := client.Do(req)
+	requestClient := *client
+	previousCheckRedirect := client.CheckRedirect
+	currentHost := strings.ToLower(req.URL.Hostname())
+	currentRelease, err := f.acquireHostGate(ctx, currentHost)
 	if err != nil {
-		return nil, 0, "", "", err
+		return responseData{err: err}
+	}
+	defer func() {
+		if currentRelease != nil {
+			currentRelease()
+		}
+	}()
+	requestClient.CheckRedirect = func(next *http.Request, via []*http.Request) error {
+		if len(via) > 0 {
+			next.Header.Del("If-None-Match")
+			next.Header.Del("If-Modified-Since")
+		}
+		if redirectScope != nil && !redirectScope.allows(next.URL) {
+			return errRedirectScope
+		}
+		if previousCheckRedirect != nil {
+			if err := previousCheckRedirect(next, via); err != nil {
+				return err
+			}
+		}
+		host := strings.ToLower(next.URL.Hostname())
+		if host != currentHost {
+			currentRelease()
+			currentRelease = nil
+			release, err := f.acquireHostGate(next.Context(), host)
+			if err != nil {
+				return err
+			}
+			currentHost = host
+			currentRelease = release
+		}
+		if respectRobots && f.robots != nil {
+			decision := f.robots.Evaluate(next.Context(), ua, next.URL.String())
+			if !decision.Allowed {
+				return errRedirectRobots
+			}
+		}
+		return nil
+	}
+	resp, err := requestClient.Do(req)
+	if err != nil {
+		if errors.Is(err, errRedirectScope) {
+			return responseData{reason: ReasonRedirectScope}
+		}
+		if errors.Is(err, errRedirectRobots) {
+			obs.RobotsBlocks.Inc()
+			return responseData{reason: ReasonRobots}
+		}
+		return responseData{err: err}
 	}
 	defer resp.Body.Close()
+	response := responseData{
+		status: resp.StatusCode, finalURL: resp.Request.URL.String(), contentType: resp.Header.Get("Content-Type"),
+		xRobotsTag: append([]string(nil), resp.Header.Values("X-Robots-Tag")...),
+		etag:       resp.Header.Get("ETag"), lastModified: resp.Header.Get("Last-Modified"),
+	}
+	if resp.StatusCode == http.StatusNotModified {
+		if (ifNoneMatch == "" && ifModifiedSince == "") || !sameOrigin(req.URL, resp.Request.URL) || req.URL.String() != resp.Request.URL.String() {
+			response.err = errors.New("fetcher: unexpected 304 without a matching conditional representation")
+			return response
+		}
+		response.notModified = true
+		return response
+	}
 
 	maxBody := f.budgets.MaxBodyBytes
 	if requestMaxBody > 0 && requestMaxBody < maxBody {
@@ -350,7 +494,8 @@ func (f *Fetcher) doOnce(ctx context.Context, client *http.Client, rawURL, ua st
 	if requestMaxTotal > 0 {
 		remaining := requestMaxTotal - *bytesRead
 		if remaining <= 0 {
-			return nil, resp.StatusCode, resp.Header.Get("Content-Type"), ReasonRequestBudget, nil
+			response.reason = ReasonRequestBudget
+			return response
 		}
 		if remaining < maxBody {
 			maxBody = remaining
@@ -363,13 +508,16 @@ func (f *Fetcher) doOnce(ctx context.Context, client *http.Client, rawURL, ua st
 	consumedRaw := minInt64(int64(len(raw)), maxBody)
 	*bytesRead += consumedRaw
 	if err != nil {
-		return nil, resp.StatusCode, resp.Header.Get("Content-Type"), "", err
+		response.err = err
+		return response
 	}
 	if int64(len(raw)) > maxBody {
 		if bodyLimitedByRequest {
-			return nil, resp.StatusCode, resp.Header.Get("Content-Type"), ReasonRequestBudget, nil
+			response.reason = ReasonRequestBudget
+			return response
 		}
-		return nil, resp.StatusCode, resp.Header.Get("Content-Type"), ReasonTooLarge, nil
+		response.reason = ReasonTooLarge
+		return response
 	}
 
 	// Decompress if gzipped, bounded.
@@ -377,14 +525,16 @@ func (f *Fetcher) doOnce(ctx context.Context, client *http.Client, rawURL, ua st
 	if strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
 		gr, gerr := gzip.NewReader(bytes.NewReader(raw))
 		if gerr != nil {
-			return nil, resp.StatusCode, resp.Header.Get("Content-Type"), "", gerr
+			response.err = gerr
+			return response
 		}
 		defer gr.Close()
 		decompressedLimitedByRequest := false
 		if requestMaxTotal > 0 {
 			remaining := requestMaxTotal - *bytesRead
 			if remaining <= 0 {
-				return nil, resp.StatusCode, resp.Header.Get("Content-Type"), ReasonRequestBudget, nil
+				response.reason = ReasonRequestBudget
+				return response
 			}
 			if remaining < maxDecompressed {
 				maxDecompressed = remaining
@@ -394,13 +544,16 @@ func (f *Fetcher) doOnce(ctx context.Context, client *http.Client, rawURL, ua st
 		decompressed, derr := io.ReadAll(io.LimitReader(gr, maxDecompressed+1))
 		*bytesRead += minInt64(int64(len(decompressed)), maxDecompressed)
 		if derr != nil {
-			return nil, resp.StatusCode, resp.Header.Get("Content-Type"), "", derr
+			response.err = derr
+			return response
 		}
 		if int64(len(decompressed)) > maxDecompressed {
 			if decompressedLimitedByRequest {
-				return nil, resp.StatusCode, resp.Header.Get("Content-Type"), ReasonRequestBudget, nil
+				response.reason = ReasonRequestBudget
+				return response
 			}
-			return nil, resp.StatusCode, resp.Header.Get("Content-Type"), ReasonDecompressLarge, nil
+			response.reason = ReasonDecompressLarge
+			return response
 		}
 		body = decompressed
 	}
@@ -411,9 +564,180 @@ func (f *Fetcher) doOnce(ctx context.Context, client *http.Client, rawURL, ua st
 	final := pickCT(resp.Header.Get("Content-Type"), sniffed)
 
 	if !f.mimeAllowed(sniffed) {
-		return nil, resp.StatusCode, final, ReasonNonHTML, nil
+		response.contentType = final
+		response.reason = ReasonNonHTML
+		return response
 	}
-	return body, resp.StatusCode, final, "", nil
+	response.body = body
+	response.contentType = final
+	return response
+}
+
+func sameOrigin(left, right *url.URL) bool {
+	if left == nil || right == nil {
+		return false
+	}
+	return strings.EqualFold(left.Scheme, right.Scheme) && strings.EqualFold(left.Host, right.Host)
+}
+
+type focusedRedirectScope struct {
+	scheme          string
+	hostname        string
+	port            string
+	allowedPrefixes []string
+	deniedPrefixes  []string
+	deniedURLs      map[string]struct{}
+}
+
+func newFocusedRedirectScope(original *url.URL, policy RedirectScope) (*focusedRedirectScope, error) {
+	if original == nil || original.User != nil || original.Opaque != "" || original.Hostname() == "" ||
+		(!strings.EqualFold(original.Scheme, "http") && !strings.EqualFold(original.Scheme, "https")) ||
+		len(policy.AllowedPathPrefixes) == 0 {
+		return nil, errRedirectScope
+	}
+	escapedPath, ok := unambiguousRedirectPath(original)
+	if !ok {
+		return nil, errRedirectScope
+	}
+	scope := &focusedRedirectScope{
+		scheme: strings.ToLower(original.Scheme), hostname: strings.ToLower(original.Hostname()),
+		port: normalizedURLPort(original), allowedPrefixes: append([]string(nil), policy.AllowedPathPrefixes...),
+		deniedPrefixes: append([]string(nil), policy.DeniedPathPrefixes...), deniedURLs: make(map[string]struct{}, len(policy.DeniedURLs)),
+	}
+	for index, prefix := range scope.allowedPrefixes {
+		normalized, ok := unambiguousPolicyPrefix(prefix)
+		if !ok {
+			return nil, errRedirectScope
+		}
+		scope.allowedPrefixes[index] = normalized
+	}
+	for index, prefix := range scope.deniedPrefixes {
+		normalized, ok := unambiguousPolicyPrefix(prefix)
+		if !ok {
+			return nil, errRedirectScope
+		}
+		scope.deniedPrefixes[index] = normalized
+	}
+	for _, raw := range policy.DeniedURLs {
+		canonical, err := canonicalFocusedURL(raw)
+		if err != nil {
+			return nil, errRedirectScope
+		}
+		scope.deniedURLs[canonical] = struct{}{}
+	}
+	if !scope.allowsPath(original, escapedPath) {
+		return nil, errRedirectScope
+	}
+	return scope, nil
+}
+
+func (scope *focusedRedirectScope) allows(candidate *url.URL) bool {
+	if scope == nil || candidate == nil || candidate.User != nil || candidate.Opaque != "" || strings.ToLower(candidate.Scheme) != scope.scheme ||
+		!strings.EqualFold(candidate.Hostname(), scope.hostname) || normalizedURLPort(candidate) != scope.port {
+		return false
+	}
+	escapedPath, ok := unambiguousRedirectPath(candidate)
+	return ok && scope.allowsPath(candidate, escapedPath)
+}
+
+func (scope *focusedRedirectScope) allowsPath(candidate *url.URL, escapedPath string) bool {
+	canonical, err := canonicalFocusedURL(candidate.String())
+	if err != nil {
+		return false
+	}
+	if _, denied := scope.deniedURLs[canonical]; denied {
+		return false
+	}
+	for _, prefix := range scope.deniedPrefixes {
+		if strings.HasPrefix(escapedPath, prefix) {
+			return false
+		}
+	}
+	for _, prefix := range scope.allowedPrefixes {
+		if strings.HasPrefix(escapedPath, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func unambiguousRedirectPath(candidate *url.URL) (string, bool) {
+	if candidate == nil {
+		return "", false
+	}
+	escapedPath := candidate.EscapedPath()
+	if escapedPath == "" {
+		escapedPath = "/"
+	}
+	escaped := strings.ToLower(escapedPath)
+	if strings.Contains(escaped, "%2f") || strings.Contains(escaped, "%5c") || strings.Contains(candidate.Path, `\`) {
+		return "", false
+	}
+	pathValue := candidate.Path
+	if pathValue == "" {
+		pathValue = "/"
+	}
+	if !strings.HasPrefix(pathValue, "/") {
+		return "", false
+	}
+	if !utf8.ValidString(pathValue) {
+		return "", false
+	}
+	for _, segment := range strings.Split(pathValue, "/") {
+		if segment == "." || segment == ".." {
+			return "", false
+		}
+	}
+	return pathValue, true
+}
+
+func unambiguousPolicyPrefix(prefix string) (string, bool) {
+	if prefix == "" || !strings.HasPrefix(prefix, "/") || strings.ContainsAny(prefix, "?#\\%") {
+		return "", false
+	}
+	parsed, err := url.Parse("https://scope.invalid" + prefix)
+	if err != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", false
+	}
+	pathValue, ok := unambiguousRedirectPath(parsed)
+	if !ok {
+		return "", false
+	}
+	return pathValue, true
+}
+
+func canonicalFocusedURL(raw string) (string, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed == nil || parsed.User != nil || parsed.Opaque != "" || parsed.Hostname() == "" ||
+		(!strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https")) {
+		return "", errRedirectScope
+	}
+	pathValue, ok := unambiguousRedirectPath(parsed)
+	if !ok {
+		return "", errRedirectScope
+	}
+	copy := *parsed
+	copy.Path = pathValue
+	copy.RawPath = ""
+	copy.Fragment = ""
+	return cache.CanonicalURL(copy.String())
+}
+
+func normalizedURLPort(candidate *url.URL) string {
+	if candidate == nil {
+		return ""
+	}
+	if port := candidate.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(candidate.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
 }
 
 func (f *Fetcher) mimeAllowed(detected string) bool {
@@ -548,6 +872,9 @@ func (f *Fetcher) clientFor(proxyURL string) (*http.Client, error) {
 		return c, nil
 	}
 	client := f.policy.HTTPClient(0)
+	if transport, ok := client.Transport.(*http.Transport); ok {
+		transport.MaxResponseHeaderBytes = f.budgets.MaxResponseHeaderBytes
+	}
 	if proxyURL != "" {
 		pu, err := url.Parse(proxyURL)
 		if err != nil {
@@ -559,6 +886,7 @@ func (f *Fetcher) clientFor(proxyURL string) (*http.Client, error) {
 			return nil, err
 		}
 		tr := f.policy.Transport()
+		tr.MaxResponseHeaderBytes = f.budgets.MaxResponseHeaderBytes
 		tr.Proxy = http.ProxyURL(pu)
 		client.Transport = tr
 	}

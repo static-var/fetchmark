@@ -31,15 +31,50 @@ import (
 // The Redis script maintains an atomic token bucket per key so replicas
 // share the same sustained rate and burst capacity.
 func RateLimiter(ratePerSec float64, burst int, rdb *redis.Client) func(http.Handler) http.Handler {
+	return NewRateLimiterGroup(ratePerSec, burst, rdb).Middleware(func(w http.ResponseWriter, _ *http.Request) {
+		writeErr(w, http.StatusTooManyRequests, "rate_limited")
+	})
+}
+
+// RateLimiterCustom is RateLimiter with a caller-supplied 429 encoder. It lets
+// compatibility routes preserve their vendor error envelope without forking
+// the token-bucket implementation.
+func RateLimiterCustom(ratePerSec float64, burst int, rdb *redis.Client, onLimited func(http.ResponseWriter, *http.Request)) func(http.Handler) http.Handler {
+	return NewRateLimiterGroup(ratePerSec, burst, rdb).Middleware(onLimited)
+}
+
+// RateLimiterGroup owns one per-key bucket set that can be shared by several
+// route groups while each route keeps its own error encoder.
+type RateLimiterGroup struct {
+	lim *keyLimiter
+}
+
+// NewRateLimiterGroup builds a shared limiter. A non-positive rate returns a
+// disabled group whose middleware passes requests through.
+func NewRateLimiterGroup(ratePerSec float64, burst int, rdb *redis.Client) *RateLimiterGroup {
 	if ratePerSec <= 0 {
-		return func(next http.Handler) http.Handler { return next }
+		return &RateLimiterGroup{}
 	}
-	lim := &keyLimiter{
+	return &RateLimiterGroup{lim: &keyLimiter{
 		rate:  rate.Limit(ratePerSec),
 		burst: burst,
 		bucks: map[string]*rate.Limiter{},
 		rdb:   rdb,
+	}}
+}
+
+// Middleware applies the shared group and invokes onLimited for a denied
+// request. A nil encoder uses Fetchmark's native error shape.
+func (group *RateLimiterGroup) Middleware(onLimited func(http.ResponseWriter, *http.Request)) func(http.Handler) http.Handler {
+	if group == nil || group.lim == nil {
+		return func(next http.Handler) http.Handler { return next }
 	}
+	if onLimited == nil {
+		onLimited = func(w http.ResponseWriter, _ *http.Request) {
+			writeErr(w, http.StatusTooManyRequests, "rate_limited")
+		}
+	}
+	lim := group.lim
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			key := PrincipalFrom(r.Context()).Key
@@ -50,7 +85,7 @@ func RateLimiter(ratePerSec float64, burst int, rdb *redis.Client) func(http.Han
 			}
 			if !lim.allow(r.Context(), key) {
 				w.Header().Set("Retry-After", "1")
-				writeErr(w, http.StatusTooManyRequests, "rate_limited")
+				onLimited(w, r)
 				return
 			}
 			next.ServeHTTP(w, r)

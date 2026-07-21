@@ -10,6 +10,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"html"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,7 +22,11 @@ import (
 	"github.com/staticvar/fetchmark/internal/adapters/cache"
 	"github.com/staticvar/fetchmark/internal/adapters/extractor"
 	"github.com/staticvar/fetchmark/internal/adapters/fetcher"
+	"github.com/staticvar/fetchmark/internal/core/discovery"
+	"github.com/staticvar/fetchmark/internal/core/localartifact"
+	"github.com/staticvar/fetchmark/internal/core/localcorpus"
 	"github.com/staticvar/fetchmark/internal/core/model"
+	corerank "github.com/staticvar/fetchmark/internal/core/rank"
 	"github.com/staticvar/fetchmark/internal/core/search"
 	"github.com/staticvar/fetchmark/internal/obs"
 )
@@ -89,20 +96,69 @@ type Options struct {
 	Timeout         time.Duration
 	Formats         []string
 	AdminRequest    bool
+	// PreserveURLResults disables content-based deduplication so callers that
+	// require one outcome per supplied URL (such as Exa /contents) can map every
+	// successful extraction back to its input. Canonical duplicate URLs are
+	// still fetched once and may be projected to multiple wire results.
+	PreserveURLResults bool
 	// Render forces the headless renderer to handle this call, bypassing
 	// the first-pass plain fetch only when the extractor flags it as
 	// js_required. It is a hint; an absent Renderer or a disabled
 	// RendererAuto still results in a plain fetch.
 	Render bool
+	// forceFresh and retentionIntent are deliberately package-private. Public
+	// request translators cannot opt into the operator-controlled curated path.
+	forceFresh            bool
+	skipOutputReservation bool
+	applyRelevanceFloor   bool
+	focusedRedirectScope  *fetcher.RedirectScope
+	retentionIntent       retentionIntent
+	safetyClassification  localcorpus.SafetyClassification
 }
+
+type retentionIntent uint8
+
+type existingCorpusWriter interface {
+	ReconcileExisting(context.Context, localcorpus.Document) (bool, error)
+}
+
+type existingArtifactRevoker interface {
+	RevokeExisting(context.Context, string, localcorpus.IndexingDisposition, time.Time) (bool, error)
+}
+
+const (
+	retentionAutomatic retentionIntent = iota
+	retentionCurated
+)
 
 // Pipeline wires search, fetch, extract, cache, rank.
 type Pipeline struct {
-	Searcher        search.Searcher
-	Fetcher         Fetcher
-	Extractor       Extractor
-	Cache           Cache
-	Ranker          Ranker
+	Searcher search.Searcher
+	// DiscoverySources is the trusted, process-configured registry used by
+	// basic and advanced search. Basic search runs only original-capable lanes;
+	// an empty or advanced-only plan falls back to Searcher as source "primary".
+	DiscoverySources          []DiscoverySource
+	DiscoveryPlanner          discovery.Planner
+	AdvancedSearchConcurrency int
+	Fetcher                   Fetcher
+	Extractor                 Extractor
+	Cache                     Cache
+	Ranker                    Ranker
+	// LocalCorpus is an opt-in retention sink. Only cold live retrievals are
+	// reconciled: cached artifacts are never promoted without fresh robots and
+	// X-Robots-Tag evidence.
+	LocalCorpus localcorpus.Writer
+	// LocalRetentionPolicy distinguishes automatic personal/archive feeding
+	// from curated admission. A zero policy with a non-nil writer preserves the
+	// pre-policy embedding contract as personal mode.
+	LocalRetentionPolicy localcorpus.Policy
+	// LocalArtifacts is the durable personal/archive source store used for
+	// conditional revalidation. It is intentionally separate from the Bleve
+	// discovery projection and the expiring response cache.
+	LocalArtifacts localartifact.Store
+	// LocalSearcher is the read side of LocalCorpus. When configured, it runs
+	// alongside live discovery for both basic and advanced searches.
+	LocalSearcher   search.Searcher
 	Renderer        Renderer
 	RendererAuto    bool
 	Robots          RobotsChecker
@@ -131,6 +187,8 @@ type Pipeline struct {
 	MaxRequestOutputBytes        int64
 	artifactOnce                 sync.Once
 	artifactSem                  chan struct{}
+	curatedMutationLocks         urlMutationLocks
+	localCorpusQuarantined       atomic.Bool
 }
 
 // ReasonRequestByteBudget marks an artifact omitted because retaining or
@@ -266,23 +324,51 @@ func (p *Pipeline) acquireArtifact(ctx context.Context) (func(), error) {
 	}
 }
 
-// Search runs the full search pipeline: hit SearXNG, parallel fetch,
-// extract, dedupe, rank.
+// SearchOutput keeps discovery evidence separate from post-discovery fetch and
+// extraction results while letting native callers retain both.
+type SearchOutput struct {
+	Results   []model.SearchResult
+	Discovery search.DiscoveryReport
+}
+
+// Search preserves the original compatibility contract.
 func (p *Pipeline) Search(ctx context.Context, o Options) ([]model.SearchResult, error) {
+	output, err := p.SearchDetailed(ctx, o)
+	return output.Results, err
+}
+
+// SearchDetailed runs the full search pipeline and retains the aggregate and
+// per-lane discovery report even when discovery returns no results or fails.
+func (p *Pipeline) SearchDetailed(ctx context.Context, o Options) (SearchOutput, error) {
 	candidateCap := o.CandidateCap
 	if candidateCap <= 0 {
 		candidateCap = o.MaxResults
 	}
-	hits, err := p.searchCandidates(ctx, o, candidateCap)
-	if err != nil {
-		return nil, err
+	candidates, err := p.searchCandidateSet(ctx, o, candidateCap)
+	discoveryReport := search.DiscoveryReport{Status: candidates.status, Lanes: candidates.lanes}
+	if discoveryReport.Status == "" {
+		if err != nil {
+			discoveryReport.Status = search.BatchFailed
+		} else if len(candidates.hits) == 0 {
+			discoveryReport.Status = search.BatchAuthoritativeEmpty
+		} else {
+			discoveryReport.Status = search.BatchHealthy
+		}
 	}
+	if err != nil {
+		return SearchOutput{Discovery: discoveryReport}, err
+	}
+	hits := candidates.hits
 	if candidateCap > 0 && len(hits) > candidateCap {
 		hits = hits[:candidateCap]
 	}
+	o.applyRelevanceFloor = true
 	results := p.process(ctx, o, hitsToResults(hits), o.Query)
+	if len(hits) > 0 {
+		observeTopKContribution(results)
+	}
 	filterResultsByFormats(results, o.Formats)
-	return results, nil
+	return SearchOutput{Results: results, Discovery: discoveryReport}, nil
 }
 
 // Parse runs the fetch+extract+rank portion on a caller-supplied URL
@@ -301,12 +387,14 @@ func hitsToResults(hits []search.Hit) []model.SearchResult {
 	out := make([]model.SearchResult, len(hits))
 	for i, h := range hits {
 		out[i] = model.SearchResult{
-			URL:         h.URL,
-			Title:       h.Title,
-			Snippet:     h.Snippet,
-			Engines:     h.Engines,
-			PublishedAt: h.PublishedAt,
-			Metadata:    h.Metadata,
+			URL:              h.URL,
+			Title:            h.Title,
+			Snippet:          h.Snippet,
+			Engines:          h.Engines,
+			PublishedAt:      h.PublishedAt,
+			Metadata:         h.Metadata,
+			Provenance:       mergeDiscoveryProvenance(nil, h.Provenance),
+			ProviderDocument: h.ProviderDocument,
 		}
 	}
 	return out
@@ -329,6 +417,11 @@ func (p *Pipeline) process(ctx context.Context, o Options, seed []model.SearchRe
 		}
 		if idx, ok := seen[canon]; ok {
 			results[idx].Engines = mergeEngines(results[idx].Engines, r.Engines)
+			results[idx].Provenance = mergeDiscoveryProvenance(results[idx].Provenance, r.Provenance)
+			if results[idx].ProviderDocument == nil {
+				results[idx].ProviderDocument = r.ProviderDocument
+			}
+			syncLegacyRRFProvenance(&results[idx])
 			continue
 		}
 		seen[canon] = len(results)
@@ -337,72 +430,19 @@ func (p *Pipeline) process(ctx context.Context, o Options, seed []model.SearchRe
 	}
 	results = filterResultsByDomains(results, o.IncludeDomains, o.ExcludeDomains)
 
-	if o.RespectRobots && p.Robots != nil {
-		userAgent := o.UserAgent
-		if userAgent == "" {
-			userAgent = p.RobotsUserAgent
-		}
-		var robotsWG sync.WaitGroup
-		for i := range results {
-			i := i
-			robotsWG.Add(1)
-			go func() {
-				defer robotsWG.Done()
-				release, err := p.acquireArtifact(ctx)
-				if err != nil {
-					return
-				}
-				defer release()
-				allowed, _ := p.Robots.Allowed(ctx, userAgent, results[i].URL)
-				if !allowed {
-					results[i].Unsupported = fetcher.ReasonRobots
-					obs.RobotsBlocks.Inc()
-				}
-			}()
-		}
-		robotsWG.Wait()
-	}
-
-	cacheBypass := o.ProxyURL != ""
+	cacheBypass := o.ProxyURL != "" || o.forceFresh
 	renderMode := o.Render && p.Renderer != nil
 
-	// Cold path: for each result in need of extraction, run a bounded
-	// goroutine that does get-recheck → local singleflight → Redis lock
-	// → get-recheck → fetch → extract → cache.Set. The fetcher already
-	// enforces global and per-host concurrency internally, so we spawn
-	// one goroutine per URL without additional limiting here.
+	// Process each URL independently. In curated mode processOne holds a bounded
+	// per-URL mutation lock across robots evaluation, retrieval, and persistence,
+	// preserving policy-observation order without serializing unrelated URLs.
 	var wg sync.WaitGroup
 	for i := range results {
 		i := i
-		r := &results[i]
-		if r.Unsupported == fetcher.ReasonRobots {
-			continue
-		}
-		// Try cache first synchronously — a hit avoids spawning a worker
-		// and keeps the common path allocation-free. Render requests
-		// consult the rendered key space so a plain-fetched
-		// js_required placeholder never shadows a later render.
-		if !cacheBypass && p.Cache != nil {
-			primaryKey := cache.ArtifactKey(r.URL)
-			if renderMode {
-				primaryKey = cache.RenderedArtifactKey(r.URL)
-			}
-			if raw, _ := p.Cache.Get(ctx, primaryKey); raw != nil {
-				var c model.Content
-				if err := json.Unmarshal(raw, &c); err == nil {
-					applyContent(r, &c)
-					r.FromCache = true
-					obs.CacheEvents.WithLabelValues("fa", "hit").Inc()
-					continue
-				}
-			}
-			obs.CacheEvents.WithLabelValues("fa", "miss").Inc()
-		}
-
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			p.fetchAndExtract(ctx, o, r, cacheBypass)
+			p.processOne(ctx, o, &results[i], cacheBypass, renderMode)
 		}()
 	}
 	wg.Wait()
@@ -410,19 +450,23 @@ func (p *Pipeline) process(ctx context.Context, o Options, seed []model.SearchRe
 	// Apply retained-output admission once, in stable result order and outside
 	// shared cache/singleflight work, so concurrent requests never share budget
 	// decisions and completion timing cannot change which results are retained.
-	for i := range results {
-		if results[i].Content != nil && !reserveContent(ctx, results[i].Content, o.Formats) {
-			results[i].Content = nil
-			results[i].Markdown = ""
-			results[i].HTML = ""
-			results[i].Author = ""
-			results[i].PublishedAt = nil
-			results[i].Chunks = nil
-			results[i].Unsupported = ReasonRequestByteBudget
+	if !o.skipOutputReservation {
+		for i := range results {
+			if results[i].Content != nil && !reserveContent(ctx, results[i].Content, o.Formats) {
+				results[i].Content = nil
+				results[i].Markdown = ""
+				results[i].HTML = ""
+				results[i].Author = ""
+				results[i].PublishedAt = nil
+				results[i].Chunks = nil
+				results[i].Unsupported = ReasonRequestByteBudget
+			}
 		}
 	}
 
-	results = dedupeByContentSHA(results)
+	if !o.PreserveURLResults {
+		results = dedupeByContentSHA(results)
+	}
 	// Rank first, then near-dup collapse. The cluster-winner tiebreak
 	// in dedupeNearDuplicates uses SearchResult.Score, which is only
 	// meaningful after the ranker has run — otherwise every winner is
@@ -430,15 +474,140 @@ func (p *Pipeline) process(ctx context.Context, o Options, seed []model.SearchRe
 	// more relevant duplicate.
 	if p.Ranker != nil && query != "" {
 		results = p.Ranker.Score(query, results)
+		if o.applyRelevanceFloor {
+			results = corerank.FilterLowConfidence(query, results)
+		}
 	}
 	if query != "" && o.ChunksPerSource > 0 {
 		attachQueryChunks(results, query, o.ChunksPerSource)
 	}
-	results = dedupeNearDuplicates(results)
+	if !o.PreserveURLResults {
+		results = dedupeNearDuplicates(results)
+	}
 	if o.MaxResults > 0 && len(results) > o.MaxResults {
 		results = results[:o.MaxResults]
 	}
 	return results
+}
+
+func (p *Pipeline) processOne(ctx context.Context, o Options, result *model.SearchResult, cacheBypass, renderMode bool) {
+	releaseMutation, err := p.acquireCuratedMutation(ctx, result.URL)
+	if err != nil {
+		result.Unsupported = "fetch_failed"
+		return
+	}
+	defer releaseMutation()
+
+	if result.ProviderDocument != nil {
+		p.extractProviderDocument(ctx, result)
+		return
+	}
+
+	if o.RespectRobots && p.Robots != nil {
+		userAgent := o.UserAgent
+		if userAgent == "" {
+			userAgent = p.RobotsUserAgent
+		}
+		releaseArtifact, err := p.acquireArtifact(ctx)
+		if err != nil {
+			result.Unsupported = "fetch_failed"
+			return
+		}
+		allowed, _ := p.Robots.Allowed(ctx, userAgent, result.URL)
+		releaseArtifact()
+		if !allowed {
+			result.Unsupported = fetcher.ReasonRobots
+			obs.RobotsBlocks.Inc()
+			if o.retentionIntent == retentionCurated {
+				if err := p.reconcileCuratedRevocation(ctx, result.URL, localcorpus.DispositionRobotsBlocked, time.Now().UTC()); err != nil {
+					result.Unsupported = CuratedReasonStorageFailed
+				}
+			} else {
+				p.tombstoneLocalCorpus(ctx, result.URL, localcorpus.DispositionRobotsBlocked, time.Now().UTC())
+			}
+			return
+		}
+	}
+
+	if result.Unsupported != "" {
+		return
+	}
+	// Render requests consult a separate key space so a plain js_required
+	// placeholder never shadows a later render.
+	if !cacheBypass && p.Cache != nil {
+		primaryKey := cache.ArtifactKey(result.URL)
+		if renderMode {
+			primaryKey = cache.RenderedArtifactKey(result.URL)
+		}
+		if raw, _ := p.Cache.Get(ctx, primaryKey); raw != nil {
+			var content model.Content
+			if err := json.Unmarshal(raw, &content); err == nil {
+				applyContent(result, &content)
+				result.FromCache = true
+				obs.CacheEvents.WithLabelValues("fa", "hit").Inc()
+				return
+			}
+		}
+		obs.CacheEvents.WithLabelValues("fa", "miss").Inc()
+	}
+	p.fetchAndExtract(ctx, o, result, cacheBypass)
+}
+
+func (p *Pipeline) extractProviderDocument(ctx context.Context, result *model.SearchResult) {
+	document := result.ProviderDocument
+	result.ProviderDocument = nil
+	releaseArtifact, err := p.acquireArtifact(ctx)
+	if err != nil {
+		result.Unsupported = "extract_failed"
+		obs.ExtractOutcome.WithLabelValues("error").Inc()
+		return
+	}
+	defer releaseArtifact()
+	if document == nil || len(document.HTML) == 0 || p.Extractor == nil {
+		result.Unsupported = "extract_failed"
+		obs.ExtractOutcome.WithLabelValues("error").Inc()
+		return
+	}
+	claimed := claimSource(ctx, int64(len(document.HTML)))
+	if claimed < int64(len(document.HTML)) {
+		_ = finishSource(ctx, claimed, int(claimed))
+		result.Unsupported = ReasonRequestByteBudget
+		return
+	}
+	_ = finishSource(ctx, claimed, len(document.HTML))
+
+	var source strings.Builder
+	source.Grow(len(document.HTML) + len(result.Title) + 96)
+	source.WriteString("<!doctype html><html><head><title>")
+	source.WriteString(html.EscapeString(result.Title))
+	source.WriteString("</title></head><body><article>")
+	source.Write(document.HTML)
+	source.WriteString("</article></body></html>")
+	content, err := p.Extractor.Extract([]byte(source.String()), result.URL)
+	if err != nil || content == nil {
+		result.Unsupported = "extract_failed"
+		obs.ExtractOutcome.WithLabelValues("error").Inc()
+		return
+	}
+	content.URL = result.URL
+	if content.Title == "" {
+		content.Title = result.Title
+	}
+	if content.PublishedAt == nil {
+		content.PublishedAt = result.PublishedAt
+	}
+	if content.Author == "" {
+		content.Author = document.Author
+	}
+	if content.SiteName == "" {
+		content.SiteName = document.SiteName
+	}
+	applyContent(result, content)
+	if content.UnsupportedReason != "" {
+		obs.ExtractOutcome.WithLabelValues(content.UnsupportedReason).Inc()
+		return
+	}
+	obs.ExtractOutcome.WithLabelValues("ok").Inc()
 }
 
 func filterResultsByFormats(results []model.SearchResult, formats []string) {
@@ -463,6 +632,13 @@ func filterResultsByFormats(results []model.SearchResult, formats []string) {
 	keepJSON := requested["json"]
 
 	for i := range results {
+		// Plain text is valid Markdown. If structural Markdown conversion was
+		// unavailable but extraction produced a body, preserve useful content
+		// instead of returning metadata-only output for a markdown request.
+		if keepMarkdown && results[i].Markdown == "" && results[i].Content != nil &&
+			strings.TrimSpace(results[i].Content.MainText) != "" {
+			results[i].Markdown = results[i].Content.MainText
+		}
 		if !keepMarkdown {
 			results[i].Markdown = ""
 		}
@@ -500,6 +676,38 @@ type fetchOutcome struct {
 	fromCache   bool
 	unsupported string
 	fetchMS     int64
+}
+
+func (p *Pipeline) revalidationCandidate(ctx context.Context, options Options, rawURL string, maxBody int64) (localartifact.Version, bool) {
+	if p.LocalArtifacts == nil || options.ProxyURL != "" || options.Render || !options.RespectRobots {
+		return localartifact.Version{}, false
+	}
+	policy := p.LocalRetentionPolicy
+	if policy.Mode == "" {
+		policy.Mode = localcorpus.ModePersonal
+	}
+	if policy.Mode != localcorpus.ModePersonal && policy.Mode != localcorpus.ModeArchive {
+		return localartifact.Version{}, false
+	}
+	version, ok, err := p.LocalArtifacts.Current(ctx, rawURL)
+	if err != nil || !ok || (version.ETag == "" && version.LastModified == "") {
+		return localartifact.Version{}, false
+	}
+	expectedAgent := options.UserAgent
+	if expectedAgent == "" {
+		expectedAgent = p.RobotsUserAgent
+	}
+	if version.PolicyAgent == "" || version.PolicyAgent != expectedAgent {
+		return localartifact.Version{}, false
+	}
+	canonicalEffective, err := cache.CanonicalURL(version.EffectiveURL)
+	if err != nil || canonicalEffective != rawURL {
+		return localartifact.Version{}, false
+	}
+	if maxBody > 0 && int64(len(version.Body)) > maxBody {
+		return localartifact.Version{}, false
+	}
+	return version, true
 }
 
 // fetchAndExtract populates r by fetching, extracting, and caching a
@@ -562,8 +770,42 @@ func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.Sear
 			MaxBodyBytes:         minPositive(p.MaxArtifactBodyBytes, claimed),
 			MaxDecompressedBytes: minPositive(p.MaxArtifactDecompressedBytes, claimed),
 			MaxTotalBytes:        claimed,
+			FocusedRedirectScope: o.focusedRedirectScope,
+		}
+		prior, hasPrior := p.revalidationCandidate(ctx, o, r.URL, minPositive(sourceLimit, claimed))
+		if hasPrior {
+			req.IfNoneMatch = prior.ETag
+			req.IfModifiedSince = prior.LastModified
 		}
 		fr := p.Fetcher.Fetch(ctx, req)
+		if fr.NotModified && hasPrior {
+			latest, ok, currentErr := p.LocalArtifacts.Current(ctx, r.URL)
+			if currentErr != nil || !ok || latest.ContentHash != prior.ContentHash {
+				hasPrior = false
+			}
+		}
+		if fr.NotModified && !hasPrior {
+			// An unsolicited or stale 304 has no usable representation. Retry
+			// exactly once without validators; extraction must never see an
+			// empty 304 body.
+			conditionalBytes := fr.BytesRead
+			req.IfNoneMatch = ""
+			req.IfModifiedSince = ""
+			if req.MaxTotalBytes > 0 {
+				if conditionalBytes >= req.MaxTotalBytes {
+					finishSource(ctx, claimed, int(conditionalBytes))
+					r.Unsupported = ReasonRequestByteBudget
+					return nil, nil
+				}
+				req.MaxTotalBytes -= conditionalBytes
+			}
+			fr = p.Fetcher.Fetch(ctx, req)
+			fr.BytesRead += conditionalBytes
+		}
+		observedAt := fetchObservationTime(fr)
+		headerDisposition := localcorpus.EvaluateDisposition(fr.RobotsAllowed, fr.RobotsAuthoritative, fr.XRobotsTag, nil, fr.UAUsed)
+		headerRevokesRetention := headerDisposition == localcorpus.DispositionNoIndexHeader ||
+			headerDisposition == localcorpus.DispositionNoArchiveHeader
 		// Record fetch-side outcome on the result; Err + Unsupported
 		// cases short-circuit the rest of the pipeline for this URL.
 		if fr.Err != nil {
@@ -573,12 +815,155 @@ func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.Sear
 			obs.FetchOutcome.WithLabelValues("error").Inc()
 			return nil, fr.Err
 		}
+		if fr.Status == 404 || fr.Status == 410 {
+			disposition := localcorpus.DispositionUnknown
+			if headerRevokesRetention {
+				disposition = headerDisposition
+			}
+			if o.retentionIntent == retentionCurated {
+				if err := p.reconcileCuratedRevocation(ctx, r.URL, disposition, observedAt); err != nil {
+					r.Unsupported = CuratedReasonStorageFailed
+				}
+			} else {
+				p.tombstoneLocalCorpus(ctx, r.URL, disposition, observedAt)
+			}
+			finishSource(ctx, claimed, int(fr.BytesRead))
+			if r.Unsupported == "" {
+				r.Unsupported = "fetch_failed"
+			}
+			r.FetchMS = fr.FetchMS
+			obs.FetchOutcome.WithLabelValues("error").Inc()
+			return nil, errors.New("upstream returned a terminal missing status")
+		}
 		if fr.Unsupported != "" {
 			finishSource(ctx, claimed, int(fr.BytesRead))
 			r.Unsupported = fr.Unsupported
 			r.FetchMS = fr.FetchMS
 			obs.FetchOutcome.WithLabelValues(fr.Unsupported).Inc()
+			revocation := localcorpus.IndexingDisposition("")
+			if fr.Unsupported == fetcher.ReasonRobots {
+				revocation = localcorpus.DispositionRobotsBlocked
+			} else if fr.Status == 200 && headerRevokesRetention {
+				revocation = headerDisposition
+			} else if fr.Unsupported != fetcher.ReasonRequestBudget && fr.Status == 200 {
+				revocation = localcorpus.DispositionUnknown
+			}
+			if revocation != "" {
+				if o.retentionIntent == retentionCurated {
+					if err := p.reconcileCuratedRevocation(ctx, r.URL, revocation, observedAt); err != nil {
+						r.Unsupported = CuratedReasonStorageFailed
+					}
+				} else {
+					p.tombstoneLocalCorpus(ctx, r.URL, revocation, observedAt)
+				}
+			}
 			return nil, nil
+		}
+		if fr.NotModified {
+			if headerDisposition != localcorpus.DispositionPermitted {
+				p.tombstoneLocalCorpus(ctx, r.URL, headerDisposition, observedAt)
+				finishSource(ctx, claimed, int(fr.BytesRead))
+				r.Unsupported = retentionUnsupportedReason(headerDisposition)
+				return nil, nil
+			}
+			if !hasPrior || len(prior.Body) == 0 {
+				finishSource(ctx, claimed, int(fr.BytesRead))
+				r.Unsupported = "fetch_failed"
+				return nil, errors.New("conditional response has no retained representation")
+			}
+			if !finishSource(ctx, claimed, int(fr.BytesRead)+len(prior.Body)) {
+				r.Unsupported = ReasonRequestByteBudget
+				return nil, nil
+			}
+			reused := fr
+			reused.Body = append([]byte(nil), prior.Body...)
+			reused.ContentType = prior.MIME
+			reused.FinalURL = prior.EffectiveURL
+			disposition := localcorpus.EvaluateDisposition(
+				reused.RobotsAllowed, reused.RobotsAuthoritative, reused.XRobotsTag, reused.Body, reused.UAUsed,
+			)
+			if disposition != localcorpus.DispositionPermitted {
+				p.tombstoneLocalCorpus(ctx, r.URL, disposition, observedAt)
+				r.Unsupported = retentionUnsupportedReason(disposition)
+				return nil, nil
+			}
+			c, err := p.Extractor.Extract(reused.Body, extractionBaseURL(r.URL, reused.FinalURL))
+			if c != nil {
+				// EffectiveURL is extraction context for relative metadata only;
+				// the public content identity remains the URL the caller supplied.
+				c.URL = r.URL
+				if !localcorpus.AllowsLinkFollowing(reused.XRobotsTag, reused.Body, reused.UAUsed) {
+					c.OutboundLinks = nil
+				}
+			}
+			if err != nil || c == nil {
+				r.Unsupported = "extract_failed"
+				obs.ExtractOutcome.WithLabelValues("error").Inc()
+				return nil, err
+			}
+			if c.UnsupportedReason != "" || strings.TrimSpace(c.MainText) == "" {
+				p.tombstoneLocalCorpus(ctx, r.URL, localcorpus.DispositionUnknown, observedAt)
+				r.Unsupported = c.UnsupportedReason
+				return nil, nil
+			}
+			document, retain := p.automaticRetention(localDocument(r, c, reused, localcorpus.DispositionPermitted))
+			if !retain {
+				return nil, errors.New("conditional response is not permitted by local retention policy")
+			}
+			artifactCtx, artifactCancel := localArtifactMutationContext(ctx)
+			err = p.LocalArtifacts.Revalidate(artifactCtx, localartifact.Observation{
+				URL: r.URL, ObservedAt: observedAt, ValidatedAt: time.Now().UTC(),
+				ETag: fr.ETag, LastModified: fr.LastModified, ExpiresAt: document.ExpiresAt,
+			})
+			artifactCancel()
+			if err != nil {
+				obs.LocalArtifactMutationTotal.WithLabelValues("error").Inc()
+				return nil, err
+			}
+			obs.LocalArtifactMutationTotal.WithLabelValues("revalidated").Inc()
+			if p.LocalCorpus != nil {
+				mutationCtx, mutationCancel := localCorpusMutationContext(ctx)
+				err = p.LocalCorpus.Reconcile(mutationCtx, document)
+				mutationCancel()
+				if err != nil {
+					obs.LocalIndexMutationTotal.WithLabelValues("error").Inc()
+					return nil, err
+				}
+			}
+			blob, marshalErr := json.Marshal(c)
+			if marshalErr != nil {
+				return nil, marshalErr
+			}
+			applyContent(r, c)
+			r.FromCache = true
+			r.FetchMS = fr.FetchMS
+			if !cacheBypass && p.Cache != nil {
+				if setErr := p.Cache.Set(ctx, key, blob); setErr == nil {
+					obs.CacheEvents.WithLabelValues("fa", "write").Inc()
+				}
+			}
+			obs.FetchOutcome.WithLabelValues("not_modified").Inc()
+			obs.ExtractOutcome.WithLabelValues("ok").Inc()
+			return blob, nil
+		}
+		if fr.Status != 0 && fr.Status != 200 {
+			finishSource(ctx, claimed, int(fr.BytesRead))
+			r.Unsupported = "fetch_failed"
+			r.FetchMS = fr.FetchMS
+			obs.FetchOutcome.WithLabelValues("error").Inc()
+			return nil, errors.New("upstream returned an unsupported status")
+		}
+		if headerRevokesRetention {
+			if o.retentionIntent == retentionCurated {
+				if err := p.reconcileCuratedRevocation(ctx, r.URL, headerDisposition, observedAt); err != nil {
+					r.Unsupported = CuratedReasonStorageFailed
+				} else {
+					r.Unsupported = retentionUnsupportedReason(headerDisposition)
+				}
+				finishSource(ctx, claimed, int(fr.BytesRead))
+				return nil, nil
+			}
+			p.tombstoneLocalCorpus(ctx, r.URL, headerDisposition, observedAt)
 		}
 		consumed := fr.BytesRead
 		if consumed <= 0 {
@@ -594,9 +979,26 @@ func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.Sear
 		obs.FetchOutcome.WithLabelValues("ok").Inc()
 		obs.FetchDuration.Observe(float64(fr.FetchMS) / 1000.0)
 
-		c, err := p.Extractor.Extract(fr.Body, r.URL)
+		c, err := p.Extractor.Extract(fr.Body, extractionBaseURL(r.URL, fr.FinalURL))
+		if c != nil {
+			c.URL = r.URL
+			if !localcorpus.AllowsLinkFollowing(fr.XRobotsTag, fr.Body, fr.UAUsed) {
+				c.OutboundLinks = nil
+			}
+		}
 		if err != nil || c == nil {
-			r.Unsupported = "extract_failed"
+			if !headerRevokesRetention {
+				if o.retentionIntent == retentionCurated {
+					if mutationErr := p.reconcileCuratedRevocation(ctx, r.URL, localcorpus.DispositionUnknown, observedAt); mutationErr != nil {
+						r.Unsupported = CuratedReasonStorageFailed
+					}
+				} else {
+					p.tombstoneLocalCorpus(ctx, r.URL, localcorpus.DispositionUnknown, observedAt)
+				}
+			}
+			if r.Unsupported == "" {
+				r.Unsupported = "extract_failed"
+			}
 			obs.ExtractOutcome.WithLabelValues("error").Inc()
 			return nil, err
 		}
@@ -604,6 +1006,14 @@ func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.Sear
 			obs.ExtractOutcome.WithLabelValues(c.UnsupportedReason).Inc()
 		} else {
 			obs.ExtractOutcome.WithLabelValues("ok").Inc()
+		}
+		if headerDisposition == localcorpus.DispositionPermitted || headerDisposition == localcorpus.DispositionUnknown {
+			disposition, retained, retentionErr := p.reconcileLocalCorpus(ctx, o.retentionIntent, o.safetyClassification, r, c, fr)
+			if o.retentionIntent == retentionCurated &&
+				(retentionErr != nil || disposition != localcorpus.DispositionPermitted || !retained) {
+				r.Unsupported = curatedUnsupportedReason(disposition, c.UnsupportedReason, retentionErr)
+				return nil, retentionErr
+			}
 		}
 		blob, mErr := json.Marshal(c)
 		if mErr != nil {
@@ -617,14 +1027,14 @@ func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.Sear
 			}
 		}
 
-		// Automatic render upgrade: when the first-pass extractor
-		// flagged js_required and the operator has opted into auto
-		// rendering, try the headless service. The plain blob is kept
+		// Automatic render upgrade: when the first-pass extractor flags
+		// js_required or retains metadata without any usable body, try the
+		// headless service. The plain blob is kept
 		// under the plain key so future non-render requests hit cache;
 		// the rendered blob is stored under a separate key so it does
 		// not clobber the cheap path.
-		if p.Renderer != nil && p.RendererAuto &&
-			c.UnsupportedReason == extractor.ReasonJSRequired {
+		if o.retentionIntent != retentionCurated && p.Renderer != nil && p.RendererAuto &&
+			contentNeedsBrowser(c) {
 			if _, rerr := p.tryAutoRender(ctx, o, r, cacheBypass); rerr == nil {
 				// r already updated in place by tryAutoRender.
 			}
@@ -692,6 +1102,17 @@ func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.Sear
 	applyFetchOutcome(ctx, r, v)
 }
 
+func contentNeedsBrowser(content *model.Content) bool {
+	if content == nil {
+		return true
+	}
+	if content.UnsupportedReason == extractor.ReasonJSRequired {
+		return true
+	}
+	return content.UnsupportedReason == "" && strings.TrimSpace(content.MainText) == "" &&
+		strings.TrimSpace(content.Markdown) == ""
+}
+
 func applyFetchOutcome(ctx context.Context, r *model.SearchResult, v any) {
 	out, ok := v.(fetchOutcome)
 	if !ok {
@@ -713,10 +1134,208 @@ func applyFetchOutcome(ctx context.Context, r *model.SearchResult, v any) {
 	}
 }
 
+func (p *Pipeline) reconcileLocalCorpus(ctx context.Context, intent retentionIntent, classification localcorpus.SafetyClassification, result *model.SearchResult, content *model.Content, fetched fetcher.Result) (localcorpus.IndexingDisposition, bool, error) {
+	if p.LocalCorpus == nil && p.LocalArtifacts == nil {
+		return localcorpus.DispositionUnknown, false, errors.New("local corpus is not configured")
+	}
+	disposition := localcorpus.EvaluateDisposition(
+		fetched.RobotsAllowed, fetched.RobotsAuthoritative, fetched.XRobotsTag, fetched.Body, fetched.UAUsed,
+	)
+	if disposition == localcorpus.DispositionPermitted && (content.UnsupportedReason != "" || strings.TrimSpace(content.MainText) == "") {
+		disposition = localcorpus.DispositionUnknown
+	}
+	document := localDocument(result, content, fetched, disposition)
+	document.SafetyClassification = classification
+	document, retain := p.retention(document, intent)
+	if !retain {
+		return disposition, false, nil
+	}
+	if intent == retentionAutomatic && p.LocalRetentionPolicy.Mode == localcorpus.ModeCurated &&
+		disposition != localcorpus.DispositionPermitted {
+		// Ordinary traffic may revoke retained curated state, but it must not
+		// create durable tombstones for attacker-selected denied URLs. Reconcile
+		// the two stores independently so artifact-only crash/rebuild state is
+		// still purged when the index has no matching document.
+		_ = p.reconcileExistingCuratedRevocation(ctx, document)
+		return disposition, false, nil
+	}
+	if intent == retentionCurated && disposition == localcorpus.DispositionPermitted &&
+		(p.LocalCorpus == nil || p.LocalArtifacts == nil) {
+		return disposition, false, errors.New("curated retention requires both local stores")
+	}
+	if disposition == localcorpus.DispositionPermitted && p.LocalArtifacts != nil {
+		artifactCtx, artifactCancel := localArtifactMutationContext(ctx)
+		defer artifactCancel()
+		if err := p.LocalArtifacts.Put(artifactCtx, localartifact.Version{
+			URL: result.URL, EffectiveURL: fetched.FinalURL, Body: append([]byte(nil), fetched.Body...),
+			ETag: fetched.ETag, LastModified: fetched.LastModified, MIME: fetched.ContentType,
+			PolicyAgent: fetched.UAUsed, FetchedAt: document.FetchedAt, ObservedAt: document.FetchedAt,
+			ValidatedAt: document.FetchedAt, ExpiresAt: document.ExpiresAt,
+			SafetyClassification: document.SafetyClassification,
+			IndexingDisposition:  disposition,
+		}); err != nil {
+			obs.LocalArtifactMutationTotal.WithLabelValues("error").Inc()
+			if intent == retentionCurated {
+				rollbackErr := p.failClosedCuratedRetention(ctx, result.URL, document.FetchedAt)
+				return disposition, false, errors.Join(err, rollbackErr)
+			}
+			return disposition, false, err
+		}
+		obs.LocalArtifactMutationTotal.WithLabelValues("stored").Inc()
+	}
+	if p.LocalCorpus == nil {
+		return disposition, disposition == localcorpus.DispositionPermitted, nil
+	}
+	mutationCtx, cancel := localCorpusMutationContext(ctx)
+	defer cancel()
+	reconcileErr := p.LocalCorpus.Reconcile(mutationCtx, document)
+	if reconcileErr != nil {
+		obs.LocalIndexMutationTotal.WithLabelValues("error").Inc()
+		if disposition == localcorpus.DispositionPermitted {
+			if intent == retentionCurated {
+				// The artifact is written first so the index never points at a
+				// missing source. If indexing fails, fail closed by replacing any
+				// older searchable projection with an unknown tombstone and
+				// revoking the just-written source.
+				rollbackErr := p.failClosedCuratedRetention(ctx, result.URL, document.FetchedAt)
+				return disposition, false, errors.Join(reconcileErr, rollbackErr)
+			}
+			return disposition, false, reconcileErr
+		}
+	}
+	if disposition != localcorpus.DispositionPermitted {
+		p.revokeLocalArtifact(ctx, result.URL, disposition, document.FetchedAt)
+		if intent == retentionCurated && reconcileErr != nil {
+			return disposition, false, reconcileErr
+		}
+		if reconcileErr == nil {
+			obs.LocalIndexMutationTotal.WithLabelValues("removed").Inc()
+		}
+		return disposition, false, nil
+	}
+	obs.LocalIndexMutationTotal.WithLabelValues("indexed").Inc()
+	return disposition, true, nil
+}
+
+func localDocument(result *model.SearchResult, content *model.Content, fetched fetcher.Result, disposition localcorpus.IndexingDisposition) localcorpus.Document {
+	document := localcorpus.Document{
+		URL: result.URL, FetchedAt: fetchObservationTime(fetched), IndexingDisposition: disposition,
+	}
+	if disposition != localcorpus.DispositionPermitted {
+		return document
+	}
+	document.Title = content.Title
+	document.Headings = append([]string(nil), content.Headings...)
+	document.Body = content.MainText
+	document.Language = content.Language
+	document.Author = content.Author
+	document.PublishedAt = content.PublishedAt
+	contentHash := sha256.Sum256(fetched.Body)
+	document.ContentHash = hex.EncodeToString(contentHash[:])
+	document.OutboundLinks = append([]string(nil), content.OutboundLinks...)
+	document.Provenance = append([]string(nil), result.Engines...)
+	document.MIME = fetched.ContentType
+	document.ExtractionStatus = "ok"
+	return document
+}
+
+func (p *Pipeline) tombstoneLocalCorpus(ctx context.Context, rawURL string, disposition localcorpus.IndexingDisposition, observedAt time.Time) {
+	if p.LocalCorpus == nil && p.LocalArtifacts == nil {
+		return
+	}
+	document, retain := p.automaticRetention(localcorpus.Document{
+		URL: rawURL, FetchedAt: observedAt, IndexingDisposition: disposition,
+	})
+	if !retain {
+		return
+	}
+	if p.LocalRetentionPolicy.Mode == localcorpus.ModeCurated {
+		_ = p.reconcileExistingCuratedRevocation(ctx, document)
+		return
+	}
+	if p.LocalCorpus != nil {
+		mutationCtx, cancel := localCorpusMutationContext(ctx)
+		defer cancel()
+		err := p.LocalCorpus.Reconcile(mutationCtx, document)
+		if err != nil {
+			obs.LocalIndexMutationTotal.WithLabelValues("error").Inc()
+			p.revokeLocalArtifact(ctx, rawURL, disposition, observedAt)
+			return
+		}
+		obs.LocalIndexMutationTotal.WithLabelValues("removed").Inc()
+	}
+	p.revokeLocalArtifact(ctx, rawURL, disposition, observedAt)
+}
+
+func (p *Pipeline) revokeLocalArtifact(ctx context.Context, rawURL string, disposition localcorpus.IndexingDisposition, observedAt time.Time) {
+	if p.LocalArtifacts == nil {
+		return
+	}
+	mutationCtx, cancel := localArtifactMutationContext(ctx)
+	defer cancel()
+	if err := p.LocalArtifacts.Revoke(mutationCtx, rawURL, disposition, observedAt); err != nil {
+		obs.LocalArtifactMutationTotal.WithLabelValues("error").Inc()
+		return
+	}
+	obs.LocalArtifactMutationTotal.WithLabelValues("revoked").Inc()
+}
+
+func localArtifactMutationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+}
+
+func (p *Pipeline) automaticRetention(document localcorpus.Document) (localcorpus.Document, bool) {
+	policy := p.LocalRetentionPolicy
+	if policy.Mode == "" && p.LocalCorpus != nil {
+		policy = localcorpus.Policy{Mode: localcorpus.ModePersonal, MaxAge: localcorpus.DefaultPersonalMaxAge}
+	}
+	return policy.ApplyAutomatic(document)
+}
+
+func (p *Pipeline) retention(document localcorpus.Document, intent retentionIntent) (localcorpus.Document, bool) {
+	policy := p.LocalRetentionPolicy
+	if intent == retentionCurated {
+		return policy.ApplyExplicit(document)
+	}
+	return p.automaticRetention(document)
+}
+
+func fetchObservationTime(fetched fetcher.Result) time.Time {
+	if fetched.ObservedAt.IsZero() {
+		return time.Now().UTC()
+	}
+	return fetched.ObservedAt.UTC()
+}
+
+func extractionBaseURL(requestedURL, effectiveURL string) string {
+	candidate := strings.TrimSpace(effectiveURL)
+	parsed, err := url.Parse(candidate)
+	if candidate == "" || err != nil || parsed.Hostname() == "" || parsed.User != nil ||
+		(!strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https")) {
+		return requestedURL
+	}
+	return candidate
+}
+
+func retentionUnsupportedReason(disposition localcorpus.IndexingDisposition) string {
+	if disposition == localcorpus.DispositionNoArchiveHeader || disposition == localcorpus.DispositionNoArchiveMetadata {
+		return "noarchive"
+	}
+	if disposition == localcorpus.DispositionRobotsBlocked {
+		return fetcher.ReasonRobots
+	}
+	return "noindex"
+}
+
+func localCorpusMutationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+}
+
 // renderAndExtract runs the renderer as the primary source of HTML,
 // extracts content, and writes the result to the supplied cache key.
 // Used for explicit render=true requests.
 func (p *Pipeline) renderAndExtract(ctx context.Context, o Options, r *model.SearchResult, key string, cacheBypass bool) ([]byte, error) {
+	observedAt := time.Now().UTC()
 	// The fetcher's DialControl is not on this path — validate the URL
 	// against the egress policy before handing it to the renderer so
 	// render=true can't be used to reach RFC1918/link-local targets.
@@ -762,6 +1381,13 @@ func (p *Pipeline) renderAndExtract(ctx context.Context, o Options, r *model.Sea
 	obs.RendererOutcome.WithLabelValues("ok").Inc()
 	obs.RendererDuration.Observe(time.Since(start).Seconds())
 	r.FetchMS = int64(time.Since(start) / time.Millisecond)
+	// Renderer results can never grant retention because response headers are
+	// unavailable. Explicit HTML noindex remains sufficient to revoke a prior
+	// document; absence of that signal leaves existing state unchanged.
+	metadataDisposition := localcorpus.EvaluateDisposition(true, true, nil, raw, o.UserAgent)
+	if metadataDisposition == localcorpus.DispositionNoIndexMetadata || metadataDisposition == localcorpus.DispositionNoArchiveMetadata {
+		p.tombstoneLocalCorpus(ctx, r.URL, metadataDisposition, observedAt)
+	}
 
 	c, err := p.Extractor.Extract(raw, r.URL)
 	if err != nil || c == nil {
@@ -925,16 +1551,18 @@ func (p *Pipeline) criticalBudget(o Options) time.Duration {
 // removed duplicate applyContent below this point
 
 func dedupeByContentSHA(in []model.SearchResult) []model.SearchResult {
-	seen := map[string]struct{}{}
+	seen := map[string]int{}
 	out := in[:0]
 	for _, r := range in {
 		if r.Content != nil && r.Content.MainText != "" {
 			h := sha256.Sum256([]byte(normalizeText(r.Content.MainText)))
 			key := hex.EncodeToString(h[:])
-			if _, dup := seen[key]; dup {
+			if winner, dup := seen[key]; dup {
+				out[winner].Provenance = mergeDiscoveryProvenance(out[winner].Provenance, r.Provenance)
+				syncLegacyRRFProvenance(&out[winner])
 				continue
 			}
-			seen[key] = struct{}{}
+			seen[key] = len(out)
 		}
 		out = append(out, r)
 	}
@@ -946,16 +1574,5 @@ func normalizeText(s string) string {
 }
 
 func mergeEngines(a, b []string) []string {
-	s := map[string]struct{}{}
-	for _, v := range a {
-		s[v] = struct{}{}
-	}
-	for _, v := range b {
-		s[v] = struct{}{}
-	}
-	out := make([]string, 0, len(s))
-	for k := range s {
-		out = append(out, k)
-	}
-	return out
+	return mergeEnginesStable(a, b)
 }
