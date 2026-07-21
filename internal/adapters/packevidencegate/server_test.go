@@ -261,7 +261,7 @@ func startTestServer(t *testing.T, options ServerOptions) (*Server, context.Canc
 
 func shortTempDir(t *testing.T) string {
 	t.Helper()
-	directory, err := os.MkdirTemp("/private/tmp", "fmg-")
+	directory, err := os.MkdirTemp(os.TempDir(), "fmg-")
 	if err != nil {
 		t.Fatal(err)
 	}
