@@ -22,8 +22,8 @@ services:
       FM_ADVANCED_SEARCH_CONCURRENCY: "${FM_ADVANCED_SEARCH_CONCURRENCY:-4}"
       FM_DISCOVERY_PACK_FILE: "${FM_DISCOVERY_PACK_FILE:-}"
       FM_DISCOVERY_ENABLED_PACKS: "${FM_DISCOVERY_ENABLED_PACKS:-general-open,developer,research,knowledge,fresh}"
-      FM_DISCOVERY_ENABLED_SOURCES: "${FM_DISCOVERY_ENABLED_SOURCES:-searxng,wikipedia,crossref}"
-      FM_DISCOVERY_PRIMARY_SOURCE: "${FM_DISCOVERY_PRIMARY_SOURCE:-searxng}"
+      FM_DISCOVERY_ENABLED_SOURCES: "${FM_DISCOVERY_ENABLED_SOURCES:-scrapling,searxng,wikipedia,crossref}"
+      FM_DISCOVERY_PRIMARY_SOURCE: "${FM_DISCOVERY_PRIMARY_SOURCE:-scrapling}"
       FM_DISCOVERY_PROVIDER_MAX_BODY: "${FM_DISCOVERY_PROVIDER_MAX_BODY:-2097152}"
       FM_OPEN_PACK_REGISTRY_FILE: "${FM_OPEN_PACK_REGISTRY_FILE:-}"
       FM_FEED_INDEX_FILE: "${FM_FEED_INDEX_FILE:-}"
@@ -35,6 +35,8 @@ services:
       FM_YACY_URL: "${FM_YACY_URL:-}"
       FM_YACY_RESOURCE: "${FM_YACY_RESOURCE:-local}"
       FM_YACY_ALLOW_INSECURE_HTTP: "${FM_YACY_ALLOW_INSECURE_HTTP:-false}"
+      FM_SCRAPLING_URL: "${FM_SCRAPLING_URL:-http://scrapling:8080}"
+      FM_SCRAPLING_ALLOW_INSECURE_HTTP: "${FM_SCRAPLING_ALLOW_INSECURE_HTTP:-true}"
       FM_COMPAT_ANSWER_PROVIDER: "${FM_COMPAT_ANSWER_PROVIDER:-}"
       FM_COMPAT_ANSWER_MAX_TOKENS: "${FM_COMPAT_ANSWER_MAX_TOKENS:-512}"
       FM_COMPAT_ANSWER_TIMEOUT: "${FM_COMPAT_ANSWER_TIMEOUT:-30s}"
@@ -88,8 +90,8 @@ services:
       # service below (enabled via the `render` profile) or leave
       # unset to disable. FM_RENDERER_AUTO turns on automatic retry
       # whenever the extractor flags a page as js_required.
-      FM_RENDERER_URL: "${FM_RENDERER_URL:-}"
-      FM_RENDERER_AUTO: "${FM_RENDERER_AUTO:-false}"
+      FM_RENDERER_URL: "${FM_RENDERER_URL:-http://scrapling:8080/v1/render}"
+      FM_RENDERER_AUTO: "${FM_RENDERER_AUTO:-true}"
       FM_RENDERER_TIMEOUT: "${FM_RENDERER_TIMEOUT:-20s}"
       FM_RENDERER_MAX_BODY: "${FM_RENDERER_MAX_BODY:-10485760}"
       FM_RENDERER_TOKEN: "${FM_RENDERER_TOKEN:-}"
@@ -129,6 +131,8 @@ services:
         condition: service_healthy
       searxng:
         condition: service_started
+      scrapling:
+        condition: service_healthy
     networks:
       - default
       - renderer
@@ -181,6 +185,42 @@ services:
       timeout: 3s
       retries: 10
 
+  # Primary headless discovery and JavaScript-render fallback. It keeps one
+  # persistent browser context with bounded concurrent pages; ordinary HTTP
+  # extraction remains in Fetchmark and reaches this service only on failure.
+  scrapling:
+    build:
+      context: ./scrapling
+      dockerfile: Dockerfile
+    image: fetchmark-scrapling:0.4.11
+    restart: unless-stopped
+    environment:
+      SCRAPLING_PROFILE_DIR: /data/profile
+      SCRAPLING_LOCALE: "${SCRAPLING_LOCALE:-en-US}"
+      SCRAPLING_TIMEZONE: "${SCRAPLING_TIMEZONE:-UTC}"
+      SCRAPLING_MAX_PAGES: "${SCRAPLING_MAX_PAGES:-4}"
+      SCRAPLING_DISCOVERY_PAGES: "${SCRAPLING_DISCOVERY_PAGES:-2}"
+      SCRAPLING_REQUEST_CONCURRENCY: "${SCRAPLING_REQUEST_CONCURRENCY:-8}"
+      SCRAPLING_EGRESS_PROXY_URL: "http://fetchmark:8081"
+    expose:
+      - "8080"
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    shm_size: 1gb
+    pids_limit: 512
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2).read()"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - scrapling-profile:/data
+
   # Headless renderer for JS-heavy pages. Opt-in via the `render`
   # compose profile:
   #     docker compose --profile render up -d
@@ -213,4 +253,5 @@ networks:
 volumes:
   fetchmark-data:
   fetchmark-crawler-data:
+  scrapling-profile:
   redis-data:

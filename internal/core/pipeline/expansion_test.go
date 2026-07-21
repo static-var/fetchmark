@@ -52,6 +52,17 @@ type expansionPlannerFunc func(search.Query) []discovery.Source
 
 func (f expansionPlannerFunc) Sources(query search.Query) []discovery.Source { return f(query) }
 
+type primaryExpansionPlanner struct {
+	primary discovery.Source
+	sources []discovery.Source
+}
+
+func (planner primaryExpansionPlanner) Sources(search.Query) []discovery.Source {
+	return append([]discovery.Source(nil), planner.sources...)
+}
+
+func (planner primaryExpansionPlanner) PrimarySource() discovery.Source { return planner.primary }
+
 func (f expansionBatchFunc) Search(ctx context.Context, q search.Query) ([]search.Hit, error) {
 	batch, err := f(ctx, q)
 	return batch.Hits, err
@@ -132,6 +143,68 @@ func TestBasicSearchUsesOneOriginalLanePerPlannedProvider(t *testing.T) {
 	}
 	if primaryCalls.Load() != 1 || extraCalls.Load() != 1 {
 		t.Fatalf("basic calls primary=%d extra=%d, want one original lane for each provider", primaryCalls.Load(), extraCalls.Load())
+	}
+}
+
+func TestBasicSearchSkipsSecondaryProvidersWhenPrimaryHasRelevantResults(t *testing.T) {
+	var secondaryCalls atomic.Int32
+	primary := expansionSearchFunc(func(context.Context, search.Query) ([]search.Hit, error) {
+		return []search.Hit{{
+			URL: "https://go.dev/doc/", Title: "Go concurrency patterns", Snippet: "Goroutines and channels",
+		}}, nil
+	})
+	secondary := expansionSearchFunc(func(context.Context, search.Query) ([]search.Hit, error) {
+		secondaryCalls.Add(1)
+		return []search.Hit{{URL: "https://secondary.example/result"}}, nil
+	})
+	primarySource := discovery.Source{ID: "scrapling-general", ProviderID: "scrapling", ProviderKind: "scrapling", Searcher: primary, Variants: []string{"original"}}
+	p := &Pipeline{
+		DiscoveryPlanner: primaryExpansionPlanner{
+			primary: primarySource,
+			sources: []discovery.Source{
+				primarySource,
+				{ID: "searxng-open", ProviderID: "searxng", ProviderKind: "searxng", Searcher: secondary, Variants: []string{"original"}},
+			},
+		},
+		AdvancedSearchConcurrency: 2,
+	}
+
+	candidates, err := p.searchCandidateSet(context.Background(), Options{Query: "Go concurrency patterns"}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondaryCalls.Load() != 0 || len(candidates.hits) != 1 || len(candidates.lanes) != 1 || candidates.lanes[0].Provider != "scrapling" {
+		t.Fatalf("candidates=%+v secondary_calls=%d", candidates, secondaryCalls.Load())
+	}
+}
+
+func TestBasicSearchUsesSecondaryProvidersWhenPrimaryResultsAreUnrelated(t *testing.T) {
+	var secondaryCalls atomic.Int32
+	primary := expansionSearchFunc(func(context.Context, search.Query) ([]search.Hit, error) {
+		return []search.Hit{{URL: "https://example.com/cooking", Title: "Cooking pasta"}}, nil
+	})
+	secondary := expansionSearchFunc(func(context.Context, search.Query) ([]search.Hit, error) {
+		secondaryCalls.Add(1)
+		return []search.Hit{{URL: "https://go.dev/doc/", Title: "Go concurrency patterns"}}, nil
+	})
+	primarySource := discovery.Source{ID: "scrapling-general", ProviderID: "scrapling", ProviderKind: "scrapling", Searcher: primary, Variants: []string{"original"}}
+	p := &Pipeline{
+		DiscoveryPlanner: primaryExpansionPlanner{
+			primary: primarySource,
+			sources: []discovery.Source{
+				primarySource,
+				{ID: "searxng-open", ProviderID: "searxng", ProviderKind: "searxng", Searcher: secondary, Variants: []string{"original"}},
+			},
+		},
+		AdvancedSearchConcurrency: 2,
+	}
+
+	candidates, err := p.searchCandidateSet(context.Background(), Options{Query: "Go concurrency patterns"}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondaryCalls.Load() != 1 || len(candidates.hits) != 2 || len(candidates.lanes) != 2 {
+		t.Fatalf("candidates=%+v secondary_calls=%d", candidates, secondaryCalls.Load())
 	}
 }
 

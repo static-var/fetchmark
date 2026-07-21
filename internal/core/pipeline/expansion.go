@@ -11,10 +11,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/staticvar/fetchmark/internal/adapters/cache"
 	"github.com/staticvar/fetchmark/internal/core/discovery"
 	"github.com/staticvar/fetchmark/internal/core/model"
+	corerank "github.com/staticvar/fetchmark/internal/core/rank"
 	"github.com/staticvar/fetchmark/internal/core/search"
 	"github.com/staticvar/fetchmark/internal/obs"
 )
@@ -96,7 +98,7 @@ func (p *Pipeline) searchCandidateSet(ctx context.Context, o Options, candidateC
 			if concurrency <= 0 {
 				concurrency = 1
 			}
-			return collectLaneOutcomes(ctx, executeDiscoveryLanes(ctx, lanes, concurrency), candidateCap)
+			return p.executeDiscoveryPlan(ctx, lanes, concurrency, candidateCap, base.Q)
 		}
 		started := time.Now()
 		hits, err := p.Searcher.Search(ctx, base)
@@ -117,8 +119,60 @@ func (p *Pipeline) searchCandidateSet(ctx context.Context, o Options, candidateC
 	if err != nil {
 		return candidateSet{}, err
 	}
-	outcomes := executeDiscoveryLanes(ctx, lanes, p.AdvancedSearchConcurrency)
-	return collectLaneOutcomes(ctx, outcomes, candidateCap)
+	return p.executeDiscoveryPlan(ctx, lanes, p.AdvancedSearchConcurrency, candidateCap, base.Q)
+}
+
+// executeDiscoveryPlan gives the configured Scrapling primary the first chance
+// to answer. Existing open providers remain a fallback when the primary is
+// degraded, empty, or has no result that passes Fetchmark's lexical confidence
+// policy. Other primary providers retain the existing parallel broker behavior.
+func (p *Pipeline) executeDiscoveryPlan(ctx context.Context, lanes []discoveryLane, concurrency, candidateCap int, query string) (candidateSet, error) {
+	primaryProvider := ""
+	if planner, ok := p.DiscoveryPlanner.(interface{ PrimarySource() discovery.Source }); ok {
+		primary := planner.PrimarySource()
+		if provenanceProvider(primary) == "scrapling" {
+			primaryProvider = "scrapling"
+		}
+	}
+	if primaryProvider == "" {
+		return collectLaneOutcomes(ctx, executeDiscoveryLanes(ctx, lanes, concurrency), candidateCap)
+	}
+
+	primaryLanes := make([]discoveryLane, 0, len(lanes))
+	secondaryLanes := make([]discoveryLane, 0, len(lanes))
+	for _, lane := range lanes {
+		if lane.provider == primaryProvider {
+			primaryLanes = append(primaryLanes, lane)
+		} else {
+			secondaryLanes = append(secondaryLanes, lane)
+		}
+	}
+	if len(primaryLanes) == 0 || len(secondaryLanes) == 0 {
+		return collectLaneOutcomes(ctx, executeDiscoveryLanes(ctx, lanes, concurrency), candidateCap)
+	}
+
+	primaryOutcomes := executeDiscoveryLanes(ctx, primaryLanes, concurrency)
+	primaryCandidates, primaryErr := collectLaneOutcomes(ctx, primaryOutcomes, candidateCap)
+	if primaryErr == nil && primaryCandidatesRelevant(query, primaryCandidates) {
+		return primaryCandidates, nil
+	}
+	secondaryOutcomes := executeDiscoveryLanes(ctx, secondaryLanes, concurrency)
+	return collectLaneOutcomes(ctx, append(primaryOutcomes, secondaryOutcomes...), candidateCap)
+}
+
+func primaryCandidatesRelevant(query string, candidates candidateSet) bool {
+	if len(candidates.hits) == 0 || (candidates.status != search.BatchHealthy && candidates.status != search.BatchPartial) {
+		return false
+	}
+	results := make([]model.SearchResult, 0, len(candidates.hits))
+	for _, hit := range candidates.hits {
+		results = append(results, model.SearchResult{
+			URL: hit.URL, Title: hit.Title, Snippet: hit.Snippet, Engines: append([]string(nil), hit.Engines...),
+			Provenance: append([]model.DiscoveryProvenance(nil), hit.Provenance...),
+		})
+	}
+	results = corerank.New().Score(query, results)
+	return len(corerank.FilterLowConfidence(query, results)) > 0
 }
 
 func collectLaneOutcomes(ctx context.Context, outcomes []laneOutcome, candidateCap int) (candidateSet, error) {
@@ -223,6 +277,7 @@ func discoveryLaneReport(outcome laneOutcome) search.DiscoveryLaneReport {
 		report.DiagnosticsTruncated = true
 		diagnostics = diagnostics[:maxDiscoveryDiagnosticsPerLane]
 	}
+	fallbackCount := 0
 	for _, diagnostic := range diagnostics {
 		retryAfter := diagnostic.RetryAfter
 		if retryAfter < 0 {
@@ -230,12 +285,20 @@ func discoveryLaneReport(outcome laneOutcome) search.DiscoveryLaneReport {
 		} else if retryAfter > maxDiscoveryRetryAfter {
 			retryAfter = maxDiscoveryRetryAfter
 		}
-		report.Diagnostics = append(report.Diagnostics, search.DiscoveryDiagnostic{
+		mapped := search.DiscoveryDiagnostic{
 			Source:       normalizeDiscoverySource(diagnostic.Source),
 			Reason:       normalizeDiscoverySource(diagnostic.Reason),
 			Retryable:    diagnostic.Retryable,
 			RetryAfterMS: retryAfter.Milliseconds(),
-		})
+		}
+		if fallback := diagnostic.Fallback; fallback != nil && fallbackCount < search.MaxDiscoveryFallbackCount &&
+			fallback.Format == "cleaned_dom" && fallback.Content != "" && len(fallback.Content) <= search.MaxDiscoveryFallbackBytes &&
+			utf8.ValidString(fallback.Content) && !strings.ContainsRune(fallback.Content, '\x00') {
+			copied := *fallback
+			mapped.Fallback = &copied
+			fallbackCount++
+		}
+		report.Diagnostics = append(report.Diagnostics, mapped)
 	}
 	if outcome.err != nil && len(report.Diagnostics) == 0 {
 		reason := "request_failed"

@@ -49,6 +49,7 @@ func TestBuildProducesStableNonSecretResolvedConfiguration(t *testing.T) {
 		FederationTrustRegistryFile: "/private/trust.json", OpenPackRegistryFile: "/private/packs.json",
 		CrossrefMailto: "secret-contact@example.com", PubMedEmail: "pubmed-secret@example.com",
 		YaCyURL: "http://private-yacy:8090", YaCyResource: "global", YaCyAllowInsecureHTTP: true,
+		ScraplingURL: "http://private-scrapling:8080", ScraplingAllowInsecureHTTP: true,
 	}
 
 	manifest, raw, digest, err := Build(cfg, spec)
@@ -68,7 +69,7 @@ func TestBuildProducesStableNonSecretResolvedConfiguration(t *testing.T) {
 		t.Fatalf("runtime controls missing: %+v", manifest)
 	}
 	for _, forbidden := range []string{
-		"secret", "private-searx", "private-yacy", "private-redis", "private-agent", "private.example",
+		"secret", "private-searx", "private-yacy", "private-scrapling", "private-redis", "private-agent", "private.example",
 		"denied.example", "/private/", "example.com", "http://", "redis://",
 	} {
 		if bytes.Contains(raw, []byte(forbidden)) {
@@ -86,6 +87,9 @@ func TestBuildProducesStableNonSecretResolvedConfiguration(t *testing.T) {
 	}
 	if manifest.NetworkPolicy.YaCyEndpointSHA256 == "" || manifest.NetworkPolicy.YaCyResource != "global" || !manifest.NetworkPolicy.YaCyAllowInsecureHTTP {
 		t.Fatalf("redacted YaCy configuration missing: %+v", manifest.NetworkPolicy)
+	}
+	if manifest.NetworkPolicy.ScraplingEndpointSHA256 == "" || !manifest.NetworkPolicy.ScraplingAllowInsecureHTTP {
+		t.Fatalf("redacted Scrapling configuration missing: %+v", manifest.NetworkPolicy)
 	}
 	if manifest.Renderer.EndpointSHA256 == "" || manifest.Renderer.EgressProxySHA256 == "" || !manifest.Renderer.EndpointCredentialsConfigured || !manifest.Renderer.EgressCredentialsConfigured || !manifest.Renderer.TokenConfigured {
 		t.Fatalf("redacted renderer identity missing: %+v", manifest.Renderer)

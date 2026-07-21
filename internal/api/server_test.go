@@ -161,7 +161,10 @@ func TestNativeSearchResponseExposesBoundedDiscoveryReport(t *testing.T) {
 		Lanes: []search.DiscoveryLaneReport{{
 			Provider: "wiby", Lane: "wiby-general", Variant: "original",
 			Status: search.BatchPartial, CandidateCount: 2, DurationMS: 25,
-			Diagnostics: []search.DiscoveryDiagnostic{{Source: "official_api", Reason: "malformed_results"}},
+			Diagnostics: []search.DiscoveryDiagnostic{{
+				Source: "google", Reason: "result_selector_miss",
+				Fallback: &search.ParseFallback{Format: "cleaned_dom", Content: "<main><h1>Parser changed</h1></main>"},
+			}},
 		}},
 	}
 	base := &fakePipeline{results: []model.SearchResult{{URL: "https://example.com"}}}
@@ -176,6 +179,9 @@ func TestNativeSearchResponseExposesBoundedDiscoveryReport(t *testing.T) {
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"discovery":{"status":"partial","lanes":[{"provider":"wiby"`) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"fallback":{"format":"cleaned_dom","content":"\u003cmain\u003e\u003ch1\u003eParser changed\u003c/h1\u003e\u003c/main\u003e"}`) {
+		t.Fatalf("cleaned DOM fallback missing: %s", rec.Body.String())
 	}
 }
 

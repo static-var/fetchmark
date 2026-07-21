@@ -61,6 +61,8 @@ type Config struct {
 	YaCyURL                     string        `env:"FM_YACY_URL"`
 	YaCyResource                string        `env:"FM_YACY_RESOURCE" envDefault:"local"`
 	YaCyAllowInsecureHTTP       bool          `env:"FM_YACY_ALLOW_INSECURE_HTTP" envDefault:"false"`
+	ScraplingURL                string        `env:"FM_SCRAPLING_URL"`
+	ScraplingAllowInsecureHTTP  bool          `env:"FM_SCRAPLING_ALLOW_INSECURE_HTTP" envDefault:"false"`
 	CompatAnswerProvider        string        `env:"FM_COMPAT_ANSWER_PROVIDER"`
 	CompatAnswerMaxTokens       int           `env:"FM_COMPAT_ANSWER_MAX_TOKENS" envDefault:"512"`
 	CompatAnswerTimeout         time.Duration `env:"FM_COMPAT_ANSWER_TIMEOUT"    envDefault:"30s"`
@@ -188,6 +190,7 @@ func Load() (Config, error) {
 	c.DiscoveryPrimarySource = strings.TrimSpace(c.DiscoveryPrimarySource)
 	c.YaCyURL = strings.TrimSpace(c.YaCyURL)
 	c.YaCyResource = strings.ToLower(strings.TrimSpace(c.YaCyResource))
+	c.ScraplingURL = strings.TrimSpace(c.ScraplingURL)
 	c.FeedIndexFile = strings.TrimSpace(c.FeedIndexFile)
 	// FM_SEARXNG_URLS wins when set; otherwise fall back to the single
 	// FM_SEARXNG_URL so existing deployments keep working unchanged. Discard
@@ -338,6 +341,9 @@ func (c *Config) validate() error {
 		if c.YaCyResource != "local" && c.YaCyResource != "global" {
 			return errors.New("FM_YACY_RESOURCE must be local or global")
 		}
+	}
+	if listContains(c.DiscoveryEnabledSources, "scrapling") && c.ScraplingURL == "" {
+		return errors.New("FM_SCRAPLING_URL is required when the scrapling discovery source is enabled")
 	}
 	if listContains(c.DiscoveryEnabledSources, "searxng") {
 		if len(c.SearxngURLs) == 0 {

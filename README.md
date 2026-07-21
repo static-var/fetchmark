@@ -209,6 +209,8 @@ All config is environment-driven. Copy `.env.example` and edit.
 | `FM_PUBMED_EMAIL` | _(unset)_ | Required plain operator/developer email when the native PubMed lane is enabled |
 | `FM_YACY_URL` / `_RESOURCE` | _(unset)_ / `local` | Explicit operator-controlled YaCy origin and `local` or `global` index mode |
 | `FM_YACY_ALLOW_INSECURE_HTTP` | `false` | Explicitly permit plain HTTP only on a trusted private service network |
+| `FM_SCRAPLING_URL` | _(unset)_ | Fixed origin for the optional operator-controlled Scrapling browser sidecar |
+| `FM_SCRAPLING_ALLOW_INSECURE_HTTP` | `false` | Explicitly permit sidecar HTTP only on a trusted private service network |
 | `FM_REDIS_URL`               | `redis://redis:6379/0`   | Redis cache/rate-limit state; falls back to in-memory when unreachable |
 | `FM_RATE_LIMIT_PER_SEC` / `_BURST` | `5` / `20`         | Default per-key token bucket          |
 | `FM_ARTIFACT_CONCURRENCY`    | `3`                      | Process-wide cold artifact workers    |
@@ -461,6 +463,42 @@ populated operator-controlled node and retain the runtime fingerprint, source
 contribution, latency, domain, and blind relevance evidence. See the official
 [YaCy project](https://yacy.net/), [FAQ](https://yacy.net/faq/), and
 [search API](https://wiki.yacy.net/index.php/Dev%3AAPIyacysearch).
+
+### Scrapling browser discovery and render fallback
+
+The Docker deployment runs Scrapling as Fetchmark's primary discovery lane. A
+single persistent headless Chromium context keeps a bounded page pool: Google
+and DuckDuckGo search concurrently, while separate page slots render
+JavaScript-dependent destination pages when ordinary HTTP extraction reports
+`js_required` or retains only metadata without a usable body.
+
+```bash
+docker compose -f deploy/docker-compose.yml up --build
+```
+
+The profile lives in the `scrapling-profile` volume and is never borrowed from a
+desktop browser. SearXNG and the open provider packs remain secondary: they run
+when Scrapling is empty, degraded, or has no result that passes Fetchmark's
+deterministic lexical confidence policy. Explicit engine controls still route
+through SearXNG because only that adapter can preserve its engine contract.
+
+`POST /v1/search` accepts only compiled-in search engines. `POST /v1/render`
+accepts destination URLs only through Fetchmark's renderer path and forces all
+browser traffic through Fetchmark's connection-time egress proxy, preserving
+redirect and DNS-rebinding SSRF protection. Robots checks still run before the
+renderer is called. CAPTCHA solving remains disabled.
+
+When a search-engine selector breaks, the sidecar reports
+`result_selector_miss` or `snippet_selector_miss` and includes a bounded cleaned
+DOM fallback in native discovery diagnostics. Scripts, styles, forms, input
+values, event handlers, embedded frames, and unsafe links are removed. This
+artifact is untrusted diagnostic input for an agent; it is never disguised as a
+ranked search result. Compatibility response shapes remain unchanged.
+
+The architecture is now the default Docker path, but the result-quality claim
+still depends on the retained fixed-suite evaluation: relevant-hit coverage,
+Precision@k, MRR, abstention, latency, and source contribution must be compared
+against the same baseline.
 
 ### Persistent local index (optional)
 

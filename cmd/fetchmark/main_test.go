@@ -277,6 +277,33 @@ func TestBuildDiscoveryPlannerRequiresExplicitYaCyHTTPOptIn(t *testing.T) {
 	}
 }
 
+func TestBuildDiscoveryPlannerBindsOptInScraplingLane(t *testing.T) {
+	cfg := discoveryTestConfig()
+	cfg.DiscoveryEnabledSources = append(cfg.DiscoveryEnabledSources, "scrapling")
+	cfg.ScraplingURL = "http://scrapling:8080"
+	cfg.ScraplingAllowInsecureHTTP = true
+	planner, _, err := buildDiscoveryPlanner(cfg, stubSearcher{}, &http.Client{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources := planner.Sources(search.Query{Q: "latest runtime release"})
+	for _, source := range sources {
+		if source.ID == "scrapling-general" && source.ProviderID == "scrapling" && source.ProviderKind == "scrapling" && reflect.DeepEqual(source.Engines, []string{"google", "duckduckgo"}) {
+			return
+		}
+	}
+	t.Fatalf("Scrapling lane missing or malformed: %+v", sources)
+}
+
+func TestBuildDiscoveryPlannerRequiresExplicitScraplingHTTPOptIn(t *testing.T) {
+	cfg := discoveryTestConfig()
+	cfg.DiscoveryEnabledSources = append(cfg.DiscoveryEnabledSources, "scrapling")
+	cfg.ScraplingURL = "http://scrapling:8080"
+	if _, _, err := buildDiscoveryPlanner(cfg, stubSearcher{}, &http.Client{}); err == nil || !strings.Contains(err.Error(), "insecure HTTP is explicitly enabled") {
+		t.Fatalf("buildDiscoveryPlanner error = %v", err)
+	}
+}
+
 func TestBuildDiscoveryPlannerAllowsExplicitNonSearxPrimaryWithoutSearxClient(t *testing.T) {
 	cfg := discoveryTestConfig()
 	cfg.DiscoveryEnabledSources = []string{"wikipedia"}

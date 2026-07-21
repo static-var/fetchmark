@@ -60,6 +60,13 @@ func TestValidateDiscoveryReportRejectsInvalidBoundsAndSemantics(t *testing.T) {
 			Provider: "wiby", Lane: "wiby-general", Variant: "original", Status: BatchDegradedEmpty,
 			Diagnostics: make([]DiscoveryDiagnostic, MaxDiscoveryDiagnosticsPerLane+1),
 		}}},
+		"oversized fallback": {Status: BatchDegradedEmpty, Lanes: []DiscoveryLaneReport{{
+			Provider: "wiby", Lane: "wiby-general", Variant: "original", Status: BatchDegradedEmpty,
+			Diagnostics: []DiscoveryDiagnostic{{
+				Reason:   "parser_failed",
+				Fallback: &ParseFallback{Format: "cleaned_dom", Content: strings.Repeat("x", MaxDiscoveryFallbackBytes+1)},
+			}},
+		}}},
 	}
 	tooManyLanes := make([]DiscoveryLaneReport, MaxDiscoveryLanes+1)
 	for index := range tooManyLanes {
@@ -79,14 +86,20 @@ func TestValidateDiscoveryReportRejectsInvalidBoundsAndSemantics(t *testing.T) {
 func TestValidatedDiscoveryReportDeepCopiesDiagnostics(t *testing.T) {
 	report := DiscoveryReport{Status: BatchDegradedEmpty, Lanes: []DiscoveryLaneReport{{
 		Provider: "wiby", Lane: "wiby-general", Variant: "original", Status: BatchDegradedEmpty,
-		Diagnostics: []DiscoveryDiagnostic{{Reason: "timeout"}},
+		Diagnostics: []DiscoveryDiagnostic{{
+			Reason: "timeout", Fallback: &ParseFallback{Format: "cleaned_dom", Content: "<main>fallback</main>"},
+		}},
 	}}}
 	cloned, err := ValidatedDiscoveryReport(report)
 	if err != nil {
 		t.Fatal(err)
 	}
 	report.Lanes[0].Diagnostics[0].Reason = "changed"
+	report.Lanes[0].Diagnostics[0].Fallback.Content = "changed"
 	if cloned.Lanes[0].Diagnostics[0].Reason != "timeout" {
 		t.Fatalf("clone mutated: %+v", cloned)
+	}
+	if cloned.Lanes[0].Diagnostics[0].Fallback.Content != "<main>fallback</main>" {
+		t.Fatalf("fallback clone mutated: %+v", cloned)
 	}
 }

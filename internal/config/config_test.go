@@ -62,8 +62,8 @@ func TestLoad_Defaults(t *testing.T) {
 	if c.DiscoveryCacheEntries != 256 || c.DiscoveryCacheBytes != 16<<20 || c.DiscoveryCacheMaxEntryBytes != 1<<20 || c.DiscoveryMaxInflight != 16 {
 		t.Errorf("discovery cache limits = (%d, %d, %d, %d)", c.DiscoveryCacheEntries, c.DiscoveryCacheBytes, c.DiscoveryCacheMaxEntryBytes, c.DiscoveryMaxInflight)
 	}
-	if c.DiscoveryProviderMaxBody != 2<<20 || c.CrossrefMailto != "" || c.PubMedEmail != "" || c.YaCyURL != "" || c.YaCyResource != "local" || c.YaCyAllowInsecureHTTP {
-		t.Errorf("native discovery defaults = (%d, %q, %q, %q, %q, %t)", c.DiscoveryProviderMaxBody, c.CrossrefMailto, c.PubMedEmail, c.YaCyURL, c.YaCyResource, c.YaCyAllowInsecureHTTP)
+	if c.DiscoveryProviderMaxBody != 2<<20 || c.CrossrefMailto != "" || c.PubMedEmail != "" || c.YaCyURL != "" || c.YaCyResource != "local" || c.YaCyAllowInsecureHTTP || c.ScraplingURL != "" || c.ScraplingAllowInsecureHTTP {
+		t.Errorf("native discovery defaults = %+v", c)
 	}
 	if c.OpenPackRegistryFile != "" {
 		t.Errorf("OpenPackRegistryFile default = %q", c.OpenPackRegistryFile)
@@ -108,6 +108,15 @@ func TestLoadRequiresYaCyEndpointWhenSourceIsEnabled(t *testing.T) {
 	t.Setenv("FM_DISCOVERY_PRIMARY_SOURCE", "yacy")
 	t.Setenv("FM_SEARXNG_URL", "")
 	if _, err := Load(); err == nil || err.Error() != "FM_YACY_URL is required when the yacy discovery source is enabled" {
+		t.Fatalf("Load error = %v", err)
+	}
+}
+
+func TestLoadRequiresScraplingEndpointWhenSourceIsEnabled(t *testing.T) {
+	t.Setenv("FM_DISCOVERY_ENABLED_SOURCES", "scrapling")
+	t.Setenv("FM_DISCOVERY_PRIMARY_SOURCE", "scrapling")
+	t.Setenv("FM_SEARXNG_URL", "")
+	if _, err := Load(); err == nil || err.Error() != "FM_SCRAPLING_URL is required when the scrapling discovery source is enabled" {
 		t.Fatalf("Load error = %v", err)
 	}
 }

@@ -632,6 +632,13 @@ func filterResultsByFormats(results []model.SearchResult, formats []string) {
 	keepJSON := requested["json"]
 
 	for i := range results {
+		// Plain text is valid Markdown. If structural Markdown conversion was
+		// unavailable but extraction produced a body, preserve useful content
+		// instead of returning metadata-only output for a markdown request.
+		if keepMarkdown && results[i].Markdown == "" && results[i].Content != nil &&
+			strings.TrimSpace(results[i].Content.MainText) != "" {
+			results[i].Markdown = results[i].Content.MainText
+		}
 		if !keepMarkdown {
 			results[i].Markdown = ""
 		}
@@ -1020,14 +1027,14 @@ func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.Sear
 			}
 		}
 
-		// Automatic render upgrade: when the first-pass extractor
-		// flagged js_required and the operator has opted into auto
-		// rendering, try the headless service. The plain blob is kept
+		// Automatic render upgrade: when the first-pass extractor flags
+		// js_required or retains metadata without any usable body, try the
+		// headless service. The plain blob is kept
 		// under the plain key so future non-render requests hit cache;
 		// the rendered blob is stored under a separate key so it does
 		// not clobber the cheap path.
 		if o.retentionIntent != retentionCurated && p.Renderer != nil && p.RendererAuto &&
-			c.UnsupportedReason == extractor.ReasonJSRequired {
+			contentNeedsBrowser(c) {
 			if _, rerr := p.tryAutoRender(ctx, o, r, cacheBypass); rerr == nil {
 				// r already updated in place by tryAutoRender.
 			}
@@ -1093,6 +1100,17 @@ func (p *Pipeline) fetchAndExtract(ctx context.Context, o Options, r *model.Sear
 		return fetchOutcome{raw: raw, fromCache: r.FromCache, unsupported: r.Unsupported, fetchMS: r.FetchMS}, nil
 	})
 	applyFetchOutcome(ctx, r, v)
+}
+
+func contentNeedsBrowser(content *model.Content) bool {
+	if content == nil {
+		return true
+	}
+	if content.UnsupportedReason == extractor.ReasonJSRequired {
+		return true
+	}
+	return content.UnsupportedReason == "" && strings.TrimSpace(content.MainText) == "" &&
+		strings.TrimSpace(content.Markdown) == ""
 }
 
 func applyFetchOutcome(ctx context.Context, r *model.SearchResult, v any) {

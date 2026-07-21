@@ -649,6 +649,22 @@ func TestPipeline_ParseFormatsMarkdownOnlyClearsDuplicateAndUnrequestedFields(t 
 	}
 }
 
+func TestPipeline_MarkdownFormatFallsBackToExtractedPlainText(t *testing.T) {
+	results := []model.SearchResult{{
+		URL:     "https://example.com/plain",
+		Content: &model.Content{MainText: "Extracted article text without structural markup."},
+	}}
+
+	filterResultsByFormats(results, []string{"markdown"})
+
+	if results[0].Markdown != "Extracted article text without structural markup." {
+		t.Fatalf("markdown fallback = %q", results[0].Markdown)
+	}
+	if results[0].Content.MainText != "" {
+		t.Fatalf("duplicate main text was not cleared: %+v", results[0].Content)
+	}
+}
+
 func TestPipeline_OutputBudgetCountsOnlyRequestedFormats(t *testing.T) {
 	u := "https://a.example/x"
 	p := &Pipeline{

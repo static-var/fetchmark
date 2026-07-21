@@ -124,6 +124,8 @@ type NetworkPolicy struct {
 	YaCyEndpointSHA256               string  `json:"yacy_endpoint_sha256,omitempty"`
 	YaCyResource                     string  `json:"yacy_resource,omitempty"`
 	YaCyAllowInsecureHTTP            bool    `json:"yacy_allow_insecure_http,omitempty"`
+	ScraplingEndpointSHA256          string  `json:"scrapling_endpoint_sha256,omitempty"`
+	ScraplingAllowInsecureHTTP       bool    `json:"scrapling_allow_insecure_http,omitempty"`
 }
 
 type endpointPolicy struct {
@@ -152,6 +154,7 @@ func Build(cfg config.Config, spec discovery.RegistrySpec) (Manifest, []byte, st
 	fetchProxy := redactEndpointPolicy("fetch-proxy", cfg.ProxyURL)
 	searxngPool := redactEndpointPolicy("searxng", cfg.SearxngURLs...)
 	yacyEndpoint := redactEndpointPolicy("yacy", cfg.YaCyURL)
+	scraplingEndpoint := redactEndpointPolicy("scrapling", cfg.ScraplingURL)
 	yacyResource := ""
 	yacyAllowInsecureHTTP := false
 	if strings.TrimSpace(cfg.YaCyURL) != "" {
@@ -212,7 +215,9 @@ func Build(cfg config.Config, spec discovery.RegistrySpec) (Manifest, []byte, st
 			ProviderContactConfigured: strings.TrimSpace(cfg.Contact) != "", CrossrefMailtoConfigured: strings.TrimSpace(cfg.CrossrefMailto) != "",
 			PubMedEmailConfigured: strings.TrimSpace(cfg.PubMedEmail) != "",
 			YaCyEndpointSHA256:    yacyEndpoint.SHA256, YaCyResource: yacyResource,
-			YaCyAllowInsecureHTTP: yacyAllowInsecureHTTP,
+			YaCyAllowInsecureHTTP:      yacyAllowInsecureHTTP,
+			ScraplingEndpointSHA256:    scraplingEndpoint.SHA256,
+			ScraplingAllowInsecureHTTP: cfg.ScraplingAllowInsecureHTTP,
 		},
 		StateLimitations: stateLimitations(cfg, sourceKinds),
 	}
@@ -449,6 +454,8 @@ func stateLimitations(cfg config.Config, sourceKinds map[string]string) []string
 			limitations = append(limitations, "federation_peer_index_state_not_snapshotted")
 		case "yacy":
 			limitations = append(limitations, "yacy_index_state_not_snapshotted")
+		case "scrapling":
+			limitations = append(limitations, "scrapling_browser_profile_not_snapshotted")
 		}
 	}
 	sort.Strings(limitations)

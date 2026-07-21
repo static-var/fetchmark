@@ -38,6 +38,7 @@ import (
 	"github.com/staticvar/fetchmark/internal/adapters/pubmed"
 	"github.com/staticvar/fetchmark/internal/adapters/renderer"
 	"github.com/staticvar/fetchmark/internal/adapters/robots"
+	"github.com/staticvar/fetchmark/internal/adapters/scrapling"
 	"github.com/staticvar/fetchmark/internal/adapters/searchbudget"
 	"github.com/staticvar/fetchmark/internal/adapters/searxng"
 	"github.com/staticvar/fetchmark/internal/adapters/stackexchange"
@@ -639,6 +640,21 @@ func buildDiscoveryPlannerFromSpec(cfg config.Config, searx search.Searcher, pro
 				RatePerSecond: sourceSpec.RatePerSecond, Burst: sourceSpec.Burst,
 				MaxConcurrency: sourceSpec.MaxConcurrency,
 			})
+		case "scrapling":
+			if id != "scrapling" {
+				return nil, nil, errors.New("configure discovery: Scrapling source must be named scrapling")
+			}
+			scraplingHTTP, clientErr := configuredInternalDiscoveryHTTPClient("Scrapling", cfg.ScraplingURL, time.Duration(sourceSpec.TimeoutMS)*time.Millisecond)
+			if clientErr != nil {
+				return nil, nil, fmt.Errorf("configure discovery source %q: %w", id, clientErr)
+			}
+			adapter, err = scrapling.New(scrapling.Options{
+				Endpoint: cfg.ScraplingURL, HTTPClient: scraplingHTTP,
+				AllowInsecureHTTP: cfg.ScraplingAllowInsecureHTTP,
+				MaxResults:        sourceSpec.MaxResults, MaxBodyBytes: cfg.DiscoveryProviderMaxBody,
+				RatePerSecond: sourceSpec.RatePerSecond, Burst: sourceSpec.Burst,
+				MaxConcurrency: sourceSpec.MaxConcurrency,
+			})
 		case "feedindex":
 			cacheAdapter = false
 			if id != "feedindex" {
@@ -734,9 +750,13 @@ func buildDiscoveryPlannerFromSpec(cfg config.Config, searx search.Searcher, pro
 }
 
 func configuredYaCyHTTPClient(rawEndpoint string, timeout time.Duration) (*http.Client, error) {
+	return configuredInternalDiscoveryHTTPClient("YaCy", rawEndpoint, timeout)
+}
+
+func configuredInternalDiscoveryHTTPClient(provider, rawEndpoint string, timeout time.Duration) (*http.Client, error) {
 	parsed, err := url.Parse(rawEndpoint)
 	if err != nil || parsed.Hostname() == "" {
-		return nil, errors.New("YaCy endpoint must contain a hostname")
+		return nil, fmt.Errorf("%s endpoint must contain a hostname", provider)
 	}
 	policy := egress.DefaultInternal()
 	policy.HostAllowlist = []string{parsed.Hostname()}

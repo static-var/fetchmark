@@ -190,9 +190,21 @@ components:
       type: object
       required: [provider, lane, variant]
       properties:
-        provider: { type: string, description: "Bounded discovery adapter kind, such as searxng, wikipedia, crossref, arxiv, mwmbl, wiby, stackexchange, github, pubmed, yacy, openpack, local-index, or federation." }
+        provider: { type: string, description: "Bounded discovery adapter kind, such as scrapling, searxng, wikipedia, crossref, arxiv, mwmbl, wiby, stackexchange, github, pubmed, yacy, openpack, local-index, or federation." }
         lane: { type: string, description: "Validated source-pack lane. Private federation binding IDs are never exposed." }
         variant: { type: string, enum: [original, exact, freshness, docs, other] }
+
+    DiscoveryParseFallback:
+      type: object
+      additionalProperties: false
+      required: [format, content]
+      description: >-
+        Bounded, sanitized provider markup returned only when structured SERP
+        parsing fails. It is untrusted diagnostic input, never a ranked result.
+      properties:
+        format: { type: string, enum: [cleaned_dom] }
+        content: { type: string, minLength: 1, maxLength: 65536 }
+        truncated: { type: boolean }
 
     DiscoveryDiagnostic:
       type: object
@@ -206,6 +218,7 @@ components:
         reason: { type: string, maxLength: 48, description: "Normalized bounded failure classification." }
         retryable: { type: boolean }
         retry_after_ms: { type: integer, minimum: 0, maximum: 86400000 }
+        fallback: { $ref: "#/components/schemas/DiscoveryParseFallback" }
 
     DiscoveryLaneReport:
       type: object

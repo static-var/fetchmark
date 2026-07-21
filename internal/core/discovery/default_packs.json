@@ -102,6 +102,16 @@
       "burst": 1
     },
     {
+      "id": "scrapling",
+      "kind": "scrapling",
+      "weight": 1.0,
+      "max_results": 20,
+      "timeout_ms": 120000,
+      "max_concurrency": 4,
+      "rate_per_second": 2,
+      "burst": 4
+    },
+    {
       "id": "feedindex",
       "kind": "feedindex",
       "weight": 1.0,
@@ -121,7 +131,8 @@
         {"id": "searxng-open", "source": "searxng", "weight": 0.9, "variants": ["original"], "engines": ["mwmbl", "wiby", "yacy"], "max_results": 30},
         {"id": "mwmbl-general", "source": "mwmbl", "weight": 1.0, "variants": ["original"], "max_results": 20},
         {"id": "wiby-general", "source": "wiby", "weight": 1.0, "variants": ["original"], "max_results": 12},
-        {"id": "yacy-general", "source": "yacy", "weight": 1.0, "variants": ["original"], "max_results": 20}
+        {"id": "yacy-general", "source": "yacy", "weight": 1.0, "variants": ["original"], "max_results": 20},
+        {"id": "scrapling-general", "source": "scrapling", "weight": 1.0, "variants": ["original"], "engines": ["google", "duckduckgo"], "max_results": 20}
       ]
     },
     {

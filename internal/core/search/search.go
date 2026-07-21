@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/staticvar/fetchmark/internal/core/model"
 )
@@ -80,6 +81,8 @@ const (
 	MaxDiscoveryCandidateCount     = 100
 	MaxDiscoveryDuration           = 24 * time.Hour
 	MaxDiscoveryRetryAfter         = 24 * time.Hour
+	MaxDiscoveryFallbackBytes      = 64 * 1024
+	MaxDiscoveryFallbackCount      = 1
 )
 
 // ValidBatchStatus reports whether status is one of the closed discovery
@@ -102,6 +105,15 @@ type ProviderDiagnostic struct {
 	Reason     string
 	Retryable  bool
 	RetryAfter time.Duration
+	Fallback   *ParseFallback
+}
+
+// ParseFallback preserves bounded, inert provider markup when a structured
+// parser fails. It is diagnostic input for agents, never a ranked search hit.
+type ParseFallback struct {
+	Format    string `json:"format"`
+	Content   string `json:"content"`
+	Truncated bool   `json:"truncated,omitempty"`
 }
 
 // DiscoveryDiagnostic is the bounded, transport-neutral diagnostic retained
@@ -109,10 +121,11 @@ type ProviderDiagnostic struct {
 // excluded so native responses cannot disclose internal endpoints or create
 // unbounded public data.
 type DiscoveryDiagnostic struct {
-	Source       string `json:"source,omitempty"`
-	Reason       string `json:"reason"`
-	Retryable    bool   `json:"retryable,omitempty"`
-	RetryAfterMS int64  `json:"retry_after_ms,omitempty"`
+	Source       string         `json:"source,omitempty"`
+	Reason       string         `json:"reason"`
+	Retryable    bool           `json:"retryable,omitempty"`
+	RetryAfterMS int64          `json:"retry_after_ms,omitempty"`
+	Fallback     *ParseFallback `json:"fallback,omitempty"`
 }
 
 // DiscoveryLaneReport records one trusted planner lane in deterministic plan
@@ -174,12 +187,21 @@ func ValidateDiscoveryReport(report DiscoveryReport) error {
 		if len(lane.Diagnostics) > MaxDiscoveryDiagnosticsPerLane {
 			return errors.New("too many lane diagnostics")
 		}
+		fallbackCount := 0
 		for _, diagnostic := range lane.Diagnostics {
 			if diagnostic.Source != "" && !validEvidenceToken(diagnostic.Source) {
 				return errors.New("invalid diagnostic source")
 			}
 			if !validEvidenceToken(diagnostic.Reason) || diagnostic.RetryAfterMS < 0 || diagnostic.RetryAfterMS > MaxDiscoveryRetryAfter.Milliseconds() {
 				return errors.New("invalid diagnostic reason or retry delay")
+			}
+			if diagnostic.Fallback != nil {
+				fallbackCount++
+				if fallbackCount > MaxDiscoveryFallbackCount || diagnostic.Fallback.Format != "cleaned_dom" ||
+					diagnostic.Fallback.Content == "" || len(diagnostic.Fallback.Content) > MaxDiscoveryFallbackBytes ||
+					!utf8.ValidString(diagnostic.Fallback.Content) || strings.ContainsRune(diagnostic.Fallback.Content, '\x00') {
+					return errors.New("invalid parser fallback")
+				}
 			}
 		}
 	}
@@ -201,6 +223,12 @@ func ValidatedDiscoveryReport(report DiscoveryReport) (DiscoveryReport, error) {
 	copy(cloned.Lanes, report.Lanes)
 	for index := range cloned.Lanes {
 		cloned.Lanes[index].Diagnostics = append([]DiscoveryDiagnostic(nil), report.Lanes[index].Diagnostics...)
+		for diagnosticIndex := range cloned.Lanes[index].Diagnostics {
+			if fallback := report.Lanes[index].Diagnostics[diagnosticIndex].Fallback; fallback != nil {
+				copied := *fallback
+				cloned.Lanes[index].Diagnostics[diagnosticIndex].Fallback = &copied
+			}
+		}
 	}
 	return cloned, nil
 }

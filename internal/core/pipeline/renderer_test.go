@@ -33,6 +33,18 @@ func (jsAwareExtractor) Extract(raw []byte, url string) (*model.Content, error) 
 	return &model.Content{URL: url, Title: "Rendered", MainText: s, Markdown: "# " + s}, nil
 }
 
+type metadataOnlyExtractor struct{}
+
+func (metadataOnlyExtractor) Extract(raw []byte, url string) (*model.Content, error) {
+	if string(raw) == "METADATA-ONLY" {
+		return &model.Content{
+			URL: url, Title: "Metadata only", Description: "No article body was extracted",
+			CleanedHTML: "<h1>Metadata only</h1>",
+		}, nil
+	}
+	return &model.Content{URL: url, Title: "Rendered", MainText: string(raw), Markdown: "# Rendered"}, nil
+}
+
 type stubRobots struct {
 	allowed   bool
 	calls     int
@@ -147,6 +159,26 @@ func TestPipeline_RendererAuto_UpgradesJSRequired(t *testing.T) {
 		t.Fatalf("auto-render did not trigger; hits=%d", rend.hits)
 	}
 	if out[0].Title != "Rendered" {
+		t.Fatalf("expected rendered content to win, got %+v", out[0])
+	}
+}
+
+func TestPipeline_RendererAuto_UpgradesMetadataOnlyExtraction(t *testing.T) {
+	rend := &stubRenderer{body: []byte("RENDERED body")}
+	p := &Pipeline{
+		Fetcher: stubFetcher{resp: map[string]fetcher.Result{
+			"https://spa.example/metadata": {Status: 200, Body: []byte("METADATA-ONLY")},
+		}},
+		Extractor:    metadataOnlyExtractor{},
+		Cache:        cache.New(nil, 0),
+		Renderer:     rend,
+		RendererAuto: true,
+	}
+	out := p.Parse(context.Background(), Options{URLs: []string{"https://spa.example/metadata"}})
+	if rend.hits != 1 {
+		t.Fatalf("metadata-only extraction did not trigger render; hits=%d", rend.hits)
+	}
+	if out[0].Content == nil || out[0].Content.Title != "Rendered" || out[0].Markdown == "" {
 		t.Fatalf("expected rendered content to win, got %+v", out[0])
 	}
 }
