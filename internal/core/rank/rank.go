@@ -12,17 +12,13 @@ import (
 	"html"
 	"math"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 	"unicode"
 
+	"github.com/staticvar/fetchmark/internal/core/discovery"
 	"github.com/staticvar/fetchmark/internal/core/model"
-)
-
-var (
-	twentyXXYearPattern    = regexp.MustCompile(`\b20[0-9]{2}\b`)
-	freshnessPhrasePattern = regexp.MustCompile(`\bthis (?:week|month)\b`)
+	"github.com/staticvar/fetchmark/internal/core/search"
 )
 
 // BM25 parameters (Okapi defaults).
@@ -413,26 +409,7 @@ func hasRecentPublishedAt(r model.SearchResult, now time.Time) bool {
 }
 
 func isFreshnessQuery(query string) bool {
-	q := strings.ToLower(query)
-	if freshnessPhrasePattern.MatchString(q) {
-		return true
-	}
-
-	tokens := tokenize(query)
-	markers := map[string]struct{}{
-		"current": {},
-		"latest":  {},
-		"recent":  {},
-		"new":     {},
-		"news":    {},
-		"today":   {},
-	}
-	for _, token := range tokens {
-		if _, ok := markers[token]; ok {
-			return true
-		}
-	}
-	return twentyXXYearPattern.MatchString(q)
+	return discovery.ProfileQuery(search.Query{Q: query}).Fresh
 }
 
 func isSocialHost(host string) bool {

@@ -84,8 +84,14 @@ func TestRankerPenalizesSocialResultsForFreshnessQueries(t *testing.T) {
 	}
 }
 
-func TestRankerDoesNotTreatFreshnessSubstringsAsFreshnessQueries(t *testing.T) {
-	for _, query := range []string{"renewable energy trends", "this weekend hiking routes"} {
+func TestRankerDoesNotTreatFreshnessSubstringsOrProperNounsAsFreshnessQueries(t *testing.T) {
+	for _, query := range []string{
+		"renewable energy trends",
+		"this weekend hiking routes",
+		"New York subway map",
+		"New Zealand visa requirements",
+		"New Balance shoes",
+	} {
 		t.Run(query, func(t *testing.T) {
 			results := []model.SearchResult{
 				{URL: "https://x.com/hiking/status/123", Title: query, Snippet: query},

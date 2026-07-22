@@ -29,6 +29,9 @@ func TestClassifyIntents(t *testing.T) {
 		{name: "fresh and research", q: search.Query{Q: "latest climate research papers 2026"}, want: []Intent{IntentGeneral, IntentFresh, IntentResearch}},
 		{name: "explicit time range", q: search.Query{Q: "bird flu", TimeRange: "day"}, want: []Intent{IntentGeneral, IntentFresh}},
 		{name: "new marker", q: search.Query{Q: "new bird flu guidance"}, want: []Intent{IntentGeneral, IntentFresh}},
+		{name: "new york proper noun", q: search.Query{Q: "New York subway map"}, want: []Intent{IntentGeneral}},
+		{name: "new zealand proper noun", q: search.Query{Q: "New Zealand visa requirements"}, want: []Intent{IntentGeneral}},
+		{name: "new balance proper noun", q: search.Query{Q: "New Balance shoes"}, want: []Intent{IntentGeneral}},
 		{name: "this week marker", q: search.Query{Q: "bird flu this week"}, want: []Intent{IntentGeneral, IntentFresh}},
 		{name: "this month marker", q: search.Query{Q: "bird flu this month"}, want: []Intent{IntentGeneral, IntentFresh}},
 		{name: "phrase prefix is not fresh", q: search.Query{Q: "this weekend hiking routes"}, want: []Intent{IntentGeneral}},
@@ -38,6 +41,27 @@ func TestClassifyIntents(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := ClassifyIntents(tt.q); !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("ClassifyIntents() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClassifyIntentsRequiresTechnicalContextForAmbiguousDeveloperWords(t *testing.T) {
+	tests := []struct {
+		query string
+		want  []Intent
+	}{
+		{query: "Java travel guide", want: []Intent{IntentGeneral}},
+		{query: "rust removal from steel", want: []Intent{IntentGeneral}},
+		{query: "how audiences react to advertising", want: []Intent{IntentGeneral}},
+		{query: "Java API documentation", want: []Intent{IntentGeneral, IntentDeveloper}},
+		{query: "Rust compiler error", want: []Intent{IntentGeneral, IntentDeveloper}},
+		{query: "React useEffect hook", want: []Intent{IntentGeneral, IntentDeveloper}},
+	}
+	for _, test := range tests {
+		t.Run(test.query, func(t *testing.T) {
+			if got := ClassifyIntents(search.Query{Q: test.query}); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("ClassifyIntents() = %v, want %v", got, test.want)
 			}
 		})
 	}

@@ -289,14 +289,19 @@ func (r *Registry) primaryFirst(planned []Source) []Source {
 // fresh, developer, research, or knowledge signal is present.
 func ProfileQuery(q search.Query) QueryProfile {
 	text := strings.ToLower(strings.Join(strings.Fields(q.Q), " "))
+	strongDeveloperSignal := containsAnyWord(text,
+		"api", "sdk", "docs", "documentation", "error", "install", "configure", "config", "golang", "python", "kotlin", "javascript", "typescript", "node", "cli",
+		"android", "jetpack", "abortcontroller", "docker", "buildkit", "kubernetes", "git", "sqlite", "postgresql", "github", "opentelemetry", "grpc", "gradle", "wasi", "webassembly",
+	) || containsPhrase(text, "swift actor")
+	ambiguousDeveloperSignal := containsAnyWord(text, "java", "rust", "react") && containsAnyWord(text,
+		"code", "coding", "compiler", "compile", "crate", "cargo", "maven", "jvm", "jsx", "function", "method", "class", "interface", "package", "library", "framework",
+		"programming", "developer", "tutorial", "type", "types", "hook", "hooks", "useeffect", "component", "components", "stream", "streams",
+	)
 	profile := QueryProfile{
 		Fresh: strings.TrimSpace(q.TimeRange) != "" ||
-			containsAnyWord(text, "latest", "recent", "new", "news", "today", "current") ||
+			containsAnyWord(text, "latest", "recent", "news", "today", "current") || contextualNewSignal(text) ||
 			freshnessPhrasePattern.MatchString(text) || yearPattern.MatchString(text),
-		Developer: containsAnyWord(text,
-			"api", "sdk", "docs", "documentation", "error", "install", "configure", "config", "golang", "python", "kotlin", "java", "javascript", "typescript", "node", "react", "cli",
-			"android", "jetpack", "rust", "abortcontroller", "docker", "buildkit", "kubernetes", "git", "sqlite", "postgresql", "github", "opentelemetry", "grpc", "gradle", "wasi", "webassembly",
-		) || containsPhrase(text, "swift actor"),
+		Developer: strongDeveloperSignal || ambiguousDeveloperSignal,
 		Research: containsAnyWord(text,
 			"doi", "paper", "papers", "journal", "citation", "citations", "research", "study", "studies", "preprint", "peer-reviewed",
 			"dataset", "datasets", "experiment", "experiments", "methodology", "benchmark", "benchmarks", "uncertainty",
@@ -309,6 +314,20 @@ func ProfileQuery(q search.Query) QueryProfile {
 	profile.Explore = strings.EqualFold(strings.TrimSpace(q.SearchDepth), "advanced") &&
 		!profile.Fresh && !profile.Developer && !profile.Research && !profile.Knowledge
 	return profile
+}
+
+func contextualNewSignal(text string) bool {
+	if !containsAnyWord(text, "new") {
+		return false
+	}
+	if containsPhrase(text, "what's new", "whats new", "what is new", "brand new") {
+		return true
+	}
+	return containsAnyWord(text,
+		"release", "released", "launch", "launched", "announcement", "announced", "update", "updated", "version", "edition",
+		"guidance", "policy", "policies", "rule", "rules", "regulation", "regulations", "report", "reports", "study", "studies",
+		"research", "finding", "findings", "discovery", "discoveries", "discovered", "feature", "features", "model", "models",
+	)
 }
 
 // ClassifyIntents returns stable order independent of map iteration. Developer

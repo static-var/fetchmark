@@ -343,6 +343,7 @@ var labelUIPage = template.Must(template.New("label-ui").Parse(`<!doctype html>
       row.case_id,
       row.intent,
       row.query,
+      row.case_sha256,
       row.url,
       row.title || "",
       row.domain || "",
@@ -482,6 +483,7 @@ var labelUIPage = template.Must(template.New("label-ui").Parse(`<!doctype html>
         case_id: row.case_id,
         intent: row.intent,
         query: row.query,
+        case_sha256: row.case_sha256,
         url: row.url,
         ...(row.title ? {title: row.title} : {}),
         ...(row.domain ? {domain: row.domain} : {}),
@@ -505,7 +507,7 @@ var labelUIPage = template.Must(template.New("label-ui").Parse(`<!doctype html>
     }
 
     function validateImportedDocument(document, row, index) {
-      if (!document || document.schema_version !== 1 || document.run_id !== data.run_id || document.case_id !== row.case_id || document.url !== row.url) {
+      if (!document || document.schema_version !== 1 || document.run_id !== data.run_id || document.case_id !== row.case_id || document.case_sha256 !== row.case_sha256 || document.url !== row.url) {
         throw new Error("row " + (index + 1) + " does not match this run");
       }
       for (const field of ["intent", "query", "title", "domain", "rank"]) {

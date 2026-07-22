@@ -404,6 +404,38 @@ func TestBasicSearchPreservesDeveloperProjectionWhenFreshnessAlsoMatches(t *test
 	}
 }
 
+func TestBasicSearchKeepsGeneralLaneForAmbiguousDeveloperWord(t *testing.T) {
+	searcher := &recordingExpansionSearcher{responses: func(search.Query) []search.Hit {
+		return []search.Hit{{URL: "https://travel.example/java/"}}
+	}}
+	spec, err := discovery.DefaultSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := discovery.NewRegistryFromSpec(
+		spec,
+		map[string]search.Searcher{"searxng": searcher},
+		"searxng",
+		[]string{"developer"},
+		[]string{"searxng"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Pipeline{Searcher: searcher, DiscoveryPlanner: registry, AdvancedSearchConcurrency: 2}
+	if _, err := p.searchCandidates(context.Background(), Options{Query: "Java travel guide"}, 7); err != nil {
+		t.Fatal(err)
+	}
+	queries := searcher.recordedQueries()
+	if len(queries) != 1 {
+		t.Fatalf("search calls = %d, want one general request: %+v", len(queries), queries)
+	}
+	got := queries[0]
+	if got.Q != "Java travel guide" || len(got.Engines) != 0 {
+		t.Fatalf("ambiguous developer query = %+v, want unchanged general search", got)
+	}
+}
+
 func TestBasicSearchRunsFederationLikeLaneOnlyWhenOriginalAllowed(t *testing.T) {
 	for _, test := range []struct {
 		name      string
