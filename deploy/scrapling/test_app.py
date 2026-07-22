@@ -284,6 +284,30 @@ class ScraplingSidecarTest(unittest.TestCase):
         self.assertNotEqual(owner[0], threading.get_ident())
         self.assertEqual(outcome.candidates[0]["title"], "owner thread")
 
+    def test_browser_worker_cancels_render_when_operation_deadline_expires(self):
+        started = threading.Event()
+        cancelled = threading.Event()
+
+        class FakeBrowser:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return None
+
+            async def render_url(self, url):
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.set()
+
+        with BrowserWorker(FakeBrowser, render_timeout_seconds=0.05) as worker:
+            with self.assertRaisesRegex(TimeoutError, "timed out"):
+                worker.render_url("https://example.com/slow")
+            self.assertTrue(started.is_set())
+            self.assertTrue(cancelled.wait(timeout=1), "render coroutine was not cancelled")
+
     def test_browser_worker_runs_multiple_pages_concurrently_on_one_async_session(self):
         lock = threading.Lock()
         active = 0

@@ -109,11 +109,12 @@ type sourceIndex struct {
 // feed separate makes topic routing authoritative and prevents an unrelated
 // feed from matching a broad freshness query.
 type Index struct {
-	mu        sync.RWMutex
-	sources   []*sourceIndex
-	generated time.Time
-	now       func() time.Time
-	closed    bool
+	mu             sync.RWMutex
+	sources        []*sourceIndex
+	generated      time.Time
+	maxSnapshotAge time.Duration
+	now            func() time.Time
+	closed         bool
 }
 
 var _ search.Searcher = (*Index)(nil)
@@ -173,7 +174,7 @@ func Open(options Options) (*Index, error) {
 		return nil, err
 	}
 
-	local := &Index{generated: generatedAt, now: clock}
+	local := &Index{generated: generatedAt, maxSnapshotAge: maxSnapshotAge, now: clock}
 	seenSources := make(map[string]struct{}, len(document.Sources))
 	totalDocuments := 0
 	for position := range document.Sources {
@@ -403,7 +404,12 @@ func (local *Index) SearchBatch(ctx context.Context, query search.Query) (search
 	}
 	sources := append([]*sourceIndex(nil), local.sources...)
 	now := local.now().UTC()
+	generated := local.generated
+	maxSnapshotAge := local.maxSnapshotAge
 	local.mu.RUnlock()
+	if generated.Before(now.Add(-maxSnapshotAge)) {
+		return expiredBatch(started, generated), nil
+	}
 
 	selected := selectedSources(text, sources)
 	if len(selected) == 0 {
@@ -543,6 +549,14 @@ func cloneMetadata(input map[string]string) map[string]string {
 
 func emptyBatch(started time.Time) search.SearchBatch {
 	return search.SearchBatch{Provider: providerID, Instance: providerID, Status: search.BatchAuthoritativeEmpty, Duration: time.Since(started)}
+}
+
+func expiredBatch(started time.Time, generated time.Time) search.SearchBatch {
+	instance := "snapshot@" + generated.Format(time.RFC3339)
+	return search.SearchBatch{
+		Provider: providerID, Instance: instance, Status: search.BatchDegradedEmpty, Duration: time.Since(started),
+		Diagnostics: []search.ProviderDiagnostic{{Provider: providerID, Instance: instance, Reason: "snapshot_expired"}},
+	}
 }
 
 func failedBatch(started time.Time, err error) (search.SearchBatch, error) {

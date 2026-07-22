@@ -75,6 +75,10 @@ func (p *Pipeline) searchCandidates(ctx context.Context, o Options, candidateCap
 }
 
 func (p *Pipeline) searchCandidateSet(ctx context.Context, o Options, candidateCap int) (candidateSet, error) {
+	requiredResults := o.MaxResults
+	if requiredResults <= 0 {
+		requiredResults = candidateCap
+	}
 	base := search.Query{
 		Q:              o.Query,
 		Engines:        o.Engines,
@@ -98,7 +102,7 @@ func (p *Pipeline) searchCandidateSet(ctx context.Context, o Options, candidateC
 			if concurrency <= 0 {
 				concurrency = 1
 			}
-			return p.executeDiscoveryPlan(ctx, lanes, concurrency, candidateCap, base.Q)
+			return p.executeDiscoveryPlan(ctx, lanes, concurrency, candidateCap, requiredResults, base.Q)
 		}
 		started := time.Now()
 		hits, err := p.Searcher.Search(ctx, base)
@@ -119,14 +123,15 @@ func (p *Pipeline) searchCandidateSet(ctx context.Context, o Options, candidateC
 	if err != nil {
 		return candidateSet{}, err
 	}
-	return p.executeDiscoveryPlan(ctx, lanes, p.AdvancedSearchConcurrency, candidateCap, base.Q)
+	return p.executeDiscoveryPlan(ctx, lanes, p.AdvancedSearchConcurrency, candidateCap, requiredResults, base.Q)
 }
 
 // executeDiscoveryPlan gives the configured Scrapling primary the first chance
 // to answer. Existing open providers remain a fallback when the primary is
-// degraded, empty, or has no result that passes Fetchmark's lexical confidence
-// policy. Other primary providers retain the existing parallel broker behavior.
-func (p *Pipeline) executeDiscoveryPlan(ctx context.Context, lanes []discoveryLane, concurrency, candidateCap int, query string) (candidateSet, error) {
+// degraded, empty, cannot fill the caller's result window, or has no result
+// that passes Fetchmark's lexical confidence policy. Other primary providers
+// retain the existing parallel broker behavior.
+func (p *Pipeline) executeDiscoveryPlan(ctx context.Context, lanes []discoveryLane, concurrency, candidateCap, requiredResults int, query string) (candidateSet, error) {
 	primaryProvider := ""
 	if planner, ok := p.DiscoveryPlanner.(interface{ PrimarySource() discovery.Source }); ok {
 		primary := planner.PrimarySource()
@@ -152,8 +157,10 @@ func (p *Pipeline) executeDiscoveryPlan(ctx context.Context, lanes []discoveryLa
 	}
 
 	primaryOutcomes := executeDiscoveryLanes(ctx, primaryLanes, concurrency)
-	primaryCandidates, primaryErr := collectLaneOutcomes(ctx, primaryOutcomes, candidateCap)
-	if primaryErr == nil && primaryCandidatesRelevant(query, primaryCandidates) {
+	primaryCandidates, primaryErr := summarizeLaneOutcomes(ctx, primaryOutcomes, candidateCap)
+	primaryFillsWindow := requiredResults <= 0 || len(primaryCandidates.hits) >= requiredResults
+	if primaryErr == nil && primaryFillsWindow && primaryCandidatesRelevant(query, primaryCandidates) {
+		observeLaneOutcomes(primaryOutcomes)
 		return primaryCandidates, nil
 	}
 	secondaryOutcomes := executeDiscoveryLanes(ctx, secondaryLanes, concurrency)
@@ -176,6 +183,17 @@ func primaryCandidatesRelevant(query string, candidates candidateSet) bool {
 }
 
 func collectLaneOutcomes(ctx context.Context, outcomes []laneOutcome, candidateCap int) (candidateSet, error) {
+	observeLaneOutcomes(outcomes)
+	return summarizeLaneOutcomes(ctx, outcomes, candidateCap)
+}
+
+func observeLaneOutcomes(outcomes []laneOutcome) {
+	for _, outcome := range outcomes {
+		observeLaneOutcome(outcome)
+	}
+}
+
+func summarizeLaneOutcomes(ctx context.Context, outcomes []laneOutcome, candidateCap int) (candidateSet, error) {
 	contextErr := ctx.Err()
 	all := make([]variantHits, 0, len(outcomes))
 	reports := make([]search.DiscoveryLaneReport, 0, len(outcomes))
@@ -184,7 +202,6 @@ func collectLaneOutcomes(ctx context.Context, outcomes []laneOutcome, candidateC
 	authoritative := false
 	failed := false
 	for _, outcome := range outcomes {
-		observeLaneOutcome(outcome)
 		reports = append(reports, discoveryLaneReport(outcome))
 		if outcome.err != nil {
 			failed = true
