@@ -225,14 +225,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv fu
 		ExpectedConfigurationSHA256: configurationSHA256,
 	}).Run(liveCtx, suite)
 	cancel()
-	writeErr := feval.WriteRecords(output, records)
-	if syncErr := output.Sync(); writeErr == nil {
-		writeErr = syncErr
-	}
-	if closeOutputErr := output.Close(); writeErr == nil {
-		writeErr = closeOutputErr
-	}
-	if writeErr != nil {
+	if writeErr := writeRunOutput(output, *outputPath, records); writeErr != nil {
 		fmt.Fprintf(stderr, "fetchmark-eval: write output: %v\n", writeErr)
 		return 1
 	}
@@ -248,6 +241,20 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv fu
 		return 1
 	}
 	return 0
+}
+
+func writeRunOutput(output *os.File, path string, records []feval.Record) error {
+	writeErr := feval.WriteRecords(output, records)
+	if syncErr := output.Sync(); writeErr == nil {
+		writeErr = syncErr
+	}
+	if closeErr := output.Close(); writeErr == nil {
+		writeErr = closeErr
+	}
+	if writeErr != nil {
+		_ = os.Remove(path)
+	}
+	return writeErr
 }
 
 func parseIntent(raw string) (feval.Intent, error) {

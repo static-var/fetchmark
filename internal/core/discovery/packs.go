@@ -309,9 +309,10 @@ func ProfileQuery(q search.Query) QueryProfile {
 	return profile
 }
 
-// ClassifyIntents returns stable order independent of map iteration. Strong
-// specialty intents suppress the broad knowledge/exploration lanes so an
-// advanced technical, fresh, or research request is not diluted by Wikipedia.
+// ClassifyIntents returns stable order independent of map iteration. Developer
+// and research intents suppress the broad knowledge lane, while freshness may
+// overlap with knowledge so historical years and ambiguous terms such as
+// "current" do not lose authoritative knowledge sources.
 func ClassifyIntents(q search.Query) []Intent {
 	profile := ProfileQuery(q)
 	intents := []Intent{IntentGeneral}
@@ -324,7 +325,7 @@ func ClassifyIntents(q search.Query) []Intent {
 	if profile.Research {
 		intents = append(intents, IntentResearch)
 	}
-	if profile.Knowledge && !profile.Fresh && !profile.Developer && !profile.Research {
+	if profile.Knowledge && !profile.Developer && !profile.Research {
 		intents = append(intents, IntentKnowledge)
 	}
 	if profile.Explore {

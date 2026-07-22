@@ -480,6 +480,24 @@ func TestRunRejectsAmbiguousOfflineModes(t *testing.T) {
 	}
 }
 
+func TestWriteRunOutputRemovesArtifactOnDurabilityFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "run.jsonl")
+	output, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := output.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeRunOutput(output, path, nil); err == nil {
+		t.Fatal("writeRunOutput succeeded with a closed output")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("failed output remains on disk: %v", err)
+	}
+}
+
 func writeSuite(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "queries.jsonl")

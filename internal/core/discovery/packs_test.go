@@ -24,6 +24,8 @@ func TestClassifyIntents(t *testing.T) {
 		{name: "developer", q: search.Query{Q: "Kotlin coroutine API documentation"}, want: []Intent{IntentGeneral, IntentDeveloper}},
 		{name: "research", q: search.Query{Q: "peer reviewed CRISPR DOI systematic review"}, want: []Intent{IntentGeneral, IntentResearch}},
 		{name: "knowledge", q: search.Query{Q: "who was Emmy Noether"}, want: []Intent{IntentGeneral, IntentKnowledge}},
+		{name: "historical knowledge with year", q: search.Query{Q: "What was the 2020 census?"}, want: []Intent{IntentGeneral, IntentFresh, IntentKnowledge}},
+		{name: "knowledge with ambiguous current term", q: search.Query{Q: "What is electric current?"}, want: []Intent{IntentGeneral, IntentFresh, IntentKnowledge}},
 		{name: "fresh and research", q: search.Query{Q: "latest climate research papers 2026"}, want: []Intent{IntentGeneral, IntentFresh, IntentResearch}},
 		{name: "explicit time range", q: search.Query{Q: "bird flu", TimeRange: "day"}, want: []Intent{IntentGeneral, IntentFresh}},
 		{name: "category research", q: search.Query{Q: "graph neural networks", Categories: []string{"science"}}, want: []Intent{IntentGeneral, IntentResearch}},
