@@ -7,6 +7,13 @@ import (
 	"testing"
 )
 
+const (
+	generalCaseSHA256   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	developerCaseSHA256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	freshCaseSHA256     = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	researchCaseSHA256  = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+)
+
 func TestRelevanceLabelsAreRunBoundAndScoreRankingAndSources(t *testing.T) {
 	records := labeledRecordsFixture()
 	labels, err := LoadRelevanceLabels(strings.NewReader(`
@@ -137,9 +144,9 @@ func TestPooledQrelsUseCrossRunIdealRankingAndAcceptConsistentDuplicates(t *test
 	records[0].ResultCount = 1
 	records[0].UniqueDomains = 1
 	qrels, err := LoadPooledRelevanceLabels(strings.NewReader(`
-{"schema_version":1,"run_id":"old-run","judgment_origin":"assistant_provisional","case_id":"general-001","intent":"general","query":"general query","url":"https://one.example/","relevance":2}
-{"schema_version":1,"run_id":"other-run","judgment_origin":"independent_human","case_id":"general-001","intent":"general","query":"general query","url":"https://best.example/","relevance":3}
-{"schema_version":1,"run_id":"third-run","judgment_origin":"assistant_provisional","case_id":"general-001","intent":"general","query":"general query","url":"https://best.example/","relevance":3}
+{"schema_version":1,"run_id":"old-run","judgment_origin":"assistant_provisional","case_id":"general-001","intent":"general","query":"general query","case_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","url":"https://one.example/","relevance":2}
+{"schema_version":1,"run_id":"other-run","judgment_origin":"independent_human","case_id":"general-001","intent":"general","query":"general query","case_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","url":"https://best.example/","relevance":3}
+{"schema_version":1,"run_id":"third-run","judgment_origin":"assistant_provisional","case_id":"general-001","intent":"general","query":"general query","case_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","url":"https://best.example/","relevance":3}
 `))
 	if err != nil {
 		t.Fatalf("LoadPooledRelevanceLabels: %v", err)
@@ -160,8 +167,8 @@ func TestPooledQrelsUseCrossRunIdealRankingAndAcceptConsistentDuplicates(t *test
 	}
 
 	_, err = LoadPooledRelevanceLabels(strings.NewReader(`
-{"schema_version":1,"run_id":"run-one","judgment_origin":"independent_human","case_id":"general-001","intent":"general","query":"general query","url":"https://one.example/","relevance":2}
-{"schema_version":1,"run_id":"run-two","judgment_origin":"independent_human","case_id":"general-001","intent":"general","query":"general query","url":"https://one.example/","relevance":3}
+{"schema_version":1,"run_id":"run-one","judgment_origin":"independent_human","case_id":"general-001","intent":"general","query":"general query","case_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","url":"https://one.example/","relevance":2}
+{"schema_version":1,"run_id":"run-two","judgment_origin":"independent_human","case_id":"general-001","intent":"general","query":"general query","case_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","url":"https://one.example/","relevance":3}
 `))
 	if err == nil {
 		t.Fatal("conflicting duplicate pooled judgments were accepted")
@@ -169,13 +176,14 @@ func TestPooledQrelsUseCrossRunIdealRankingAndAcceptConsistentDuplicates(t *test
 }
 
 func TestPooledQrelsRequireExactCaseAndJudgmentProvenance(t *testing.T) {
-	valid := `{"schema_version":1,"run_id":"run-a","judgment_origin":"independent_human","case_id":"general-001","intent":"general","query":"general query","url":"https://one.example/","relevance":2}`
+	valid := `{"schema_version":1,"run_id":"run-a","judgment_origin":"independent_human","case_id":"general-001","intent":"general","query":"general query","case_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","url":"https://one.example/","relevance":2}`
 	tests := map[string]string{
-		"missing source run": strings.Replace(valid, `"run_id":"run-a",`, "", 1),
-		"missing origin":     strings.Replace(valid, `"judgment_origin":"independent_human",`, "", 1),
-		"unknown origin":     strings.Replace(valid, "independent_human", "model_generated", 1),
-		"missing intent":     strings.Replace(valid, `"intent":"general",`, "", 1),
-		"missing query":      strings.Replace(valid, `"query":"general query",`, "", 1),
+		"missing source run":  strings.Replace(valid, `"run_id":"run-a",`, "", 1),
+		"missing origin":      strings.Replace(valid, `"judgment_origin":"independent_human",`, "", 1),
+		"unknown origin":      strings.Replace(valid, "independent_human", "model_generated", 1),
+		"missing intent":      strings.Replace(valid, `"intent":"general",`, "", 1),
+		"missing query":       strings.Replace(valid, `"query":"general query",`, "", 1),
+		"missing case digest": strings.Replace(valid, `"case_sha256":"`+generalCaseSHA256+`",`, "", 1),
 	}
 	for name, raw := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -193,20 +201,32 @@ func TestPooledQrelsRequireExactCaseAndJudgmentProvenance(t *testing.T) {
 	}
 }
 
+func TestPooledQrelsRejectChangedCompleteCaseIdentity(t *testing.T) {
+	records := labeledRecordsFixture()[:1]
+	label := PooledRelevanceLabel{
+		SchemaVersion: 1, SourceRunID: "source-run", JudgmentOrigin: JudgmentOriginIndependentHuman,
+		CaseID: records[0].CaseID, Intent: records[0].Intent, Query: records[0].Query,
+		CaseSHA256: strings.Repeat("f", 64), URL: records[0].Results[0].URL, Relevance: 3,
+	}
+	if _, err := ScoreRelevancePooled(records, []PooledRelevanceLabel{label}); err == nil {
+		t.Fatal("pooled judgment for a different complete evaluation case was accepted")
+	}
+}
+
 func TestPooledQrelsCountFailuresAndAbstentionsInAllQueryDenominator(t *testing.T) {
 	records := []Record{
 		{
-			SchemaVersion: 1, RunID: "run-a", CaseID: "general-001", Intent: IntentGeneral,
+			SchemaVersion: 1, RunID: "run-a", CaseSHA256: generalCaseSHA256, CaseID: "general-001", Intent: IntentGeneral,
 			Query: "general query", SearchDepth: "advanced", Attempted: true, HTTPStatus: 200,
 			NonEmpty: true, ResultCount: 1, UniqueDomains: 1,
 			Results: []ResultObservation{{URL: "https://one.example/", Domain: "one.example", Title: "One"}},
 		},
-		{SchemaVersion: 1, RunID: "run-a", CaseID: "fresh-001", Intent: IntentFresh, Query: "fresh query", SearchDepth: "advanced", Attempted: true, HTTPStatus: 200},
-		{SchemaVersion: 1, RunID: "run-a", CaseID: "developer-001", Intent: IntentDeveloper, Query: "developer query", SearchDepth: "advanced", Attempted: true, Error: "timeout"},
-		{SchemaVersion: 1, RunID: "run-a", CaseID: "research-001", Intent: IntentResearch, Query: "research query", SearchDepth: "advanced", Attempted: false, Error: "cancelled"},
+		{SchemaVersion: 1, RunID: "run-a", CaseSHA256: freshCaseSHA256, CaseID: "fresh-001", Intent: IntentFresh, Query: "fresh query", SearchDepth: "advanced", Attempted: true, HTTPStatus: 200},
+		{SchemaVersion: 1, RunID: "run-a", CaseSHA256: developerCaseSHA256, CaseID: "developer-001", Intent: IntentDeveloper, Query: "developer query", SearchDepth: "advanced", Attempted: true, Error: "timeout"},
+		{SchemaVersion: 1, RunID: "run-a", CaseSHA256: researchCaseSHA256, CaseID: "research-001", Intent: IntentResearch, Query: "research query", SearchDepth: "advanced", Attempted: false, Error: "cancelled"},
 	}
 	qrels, err := LoadPooledRelevanceLabels(strings.NewReader(
-		`{"schema_version":1,"run_id":"source-run","judgment_origin":"assistant_provisional","case_id":"general-001","intent":"general","query":"general query","url":"https://one.example/","relevance":3}`,
+		`{"schema_version":1,"run_id":"source-run","judgment_origin":"assistant_provisional","case_id":"general-001","intent":"general","query":"general query","case_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","url":"https://one.example/","relevance":3}`,
 	))
 	if err != nil {
 		t.Fatal(err)
@@ -236,7 +256,7 @@ func TestWriteLabelTemplateIsOrderedAndIntentionallyIncomplete(t *testing.T) {
 		t.Fatalf("WriteLabelTemplate: %v", err)
 	}
 	want := "\"case_id\":\"general-001\""
-	if !strings.Contains(output.String(), want) || !strings.Contains(output.String(), `"rank":1`) || !strings.Contains(output.String(), `"relevance":null`) {
+	if !strings.Contains(output.String(), want) || !strings.Contains(output.String(), `"case_sha256":"`+generalCaseSHA256+`"`) || !strings.Contains(output.String(), `"rank":1`) || !strings.Contains(output.String(), `"relevance":null`) {
 		t.Fatalf("template = %s", output.String())
 	}
 	if strings.Index(output.String(), "https://one.example/") > strings.Index(output.String(), "https://three.example/") {
@@ -295,7 +315,7 @@ func TestLabelTemplateBudgetRejectsAggregateExpansion(t *testing.T) {
 func labeledRecordsFixture() []Record {
 	return []Record{
 		{
-			SchemaVersion: 1, RunID: "run-a", CaseID: "general-001", Intent: IntentGeneral,
+			SchemaVersion: 1, RunID: "run-a", CaseSHA256: generalCaseSHA256, CaseID: "general-001", Intent: IntentGeneral,
 			Query: "general query", SearchDepth: "advanced", Attempted: true, HTTPStatus: 200,
 			NonEmpty: true, ResultCount: 2, UniqueDomains: 2, ProvenanceResults: 2, MultiSourceResults: 1,
 			Results: []ResultObservation{
@@ -304,7 +324,7 @@ func labeledRecordsFixture() []Record {
 			},
 		},
 		{
-			SchemaVersion: 1, RunID: "run-a", CaseID: "developer-001", Intent: IntentDeveloper,
+			SchemaVersion: 1, RunID: "run-a", CaseSHA256: developerCaseSHA256, CaseID: "developer-001", Intent: IntentDeveloper,
 			Query: "developer query", SearchDepth: "advanced", Attempted: true, HTTPStatus: 200,
 			NonEmpty: true, ResultCount: 1, UniqueDomains: 1, ProvenanceResults: 1,
 			Results: []ResultObservation{

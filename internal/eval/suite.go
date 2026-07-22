@@ -4,6 +4,8 @@ package eval
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,6 +51,17 @@ type Case struct {
 	TimeRange          string   `json:"time_range,omitempty"`
 	ExpectedDomains    []string `json:"expected_domains,omitempty"`
 	FreshnessSensitive bool     `json:"freshness_sensitive,omitempty"`
+}
+
+// CaseSHA256 binds relevance judgments to every fixed suite field, including
+// request controls that are intentionally not repeated in compact run records.
+func CaseSHA256(c Case) string {
+	raw, err := json.Marshal(c)
+	if err != nil {
+		panic(fmt.Sprintf("eval: encode fixed case identity: %v", err))
+	}
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:])
 }
 
 // Suite is a validated ordered collection of cases.

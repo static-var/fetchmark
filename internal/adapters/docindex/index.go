@@ -136,6 +136,15 @@ var _ search.Searcher = (*Index)(nil)
 var _ search.BatchSearcher = (*Index)(nil)
 var _ io.Closer = (*Index)(nil)
 
+// SnapshotSHA256 returns the identity of the exact immutable bytes admitted by
+// Open. Callers can bind evaluation identity to the loaded corpus without
+// rereading a replaceable path.
+func (local *Index) SnapshotSHA256() string {
+	local.mu.RLock()
+	defer local.mu.RUnlock()
+	return local.snapshotSHA256
+}
+
 // Open validates every source, field, URL, and indexing-policy assertion
 // before admitting any document. Unknown JSON fields and trailing data fail
 // closed, as do missing robots/noindex or ownership/license evidence.

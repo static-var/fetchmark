@@ -83,6 +83,7 @@ type Record struct {
 	ConfigurationID            string                  `json:"configuration_id,omitempty"`
 	BuildSHA256                string                  `json:"build_sha256,omitempty"`
 	ConfigurationSHA256        string                  `json:"configuration_sha256,omitempty"`
+	CaseSHA256                 string                  `json:"case_sha256,omitempty"`
 	CaseID                     string                  `json:"case_id"`
 	Intent                     Intent                  `json:"intent"`
 	Query                      string                  `json:"query"`
@@ -526,7 +527,7 @@ func validateSearchResponseEnvelope(c Case, response searchResponse) error {
 func baseRecord(c Case, runID, revision, configurationID string, started time.Time, failure string) Record {
 	return Record{
 		SchemaVersion: 1, RunID: runID, Revision: revision, ConfigurationID: configurationID,
-		CaseID: c.ID, Intent: c.Intent, Query: c.Query,
+		CaseSHA256: CaseSHA256(c), CaseID: c.ID, Intent: c.Intent, Query: c.Query,
 		Tags: append([]string(nil), c.Tags...), SearchDepth: c.SearchDepth,
 		ExpectedDomains: append([]string(nil), c.ExpectedDomains...), FreshnessSensitive: c.FreshnessSensitive,
 		StartedAt: started.UTC(), Error: failure,

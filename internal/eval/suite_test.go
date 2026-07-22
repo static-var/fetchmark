@@ -2,9 +2,47 @@ package eval
 
 import (
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestCaseSHA256BindsEveryFixedCaseField(t *testing.T) {
+	base := Case{
+		ID: "developer-001", Intent: IntentDeveloper, Query: "Kotlin coroutine cancellation",
+		Tags: []string{"kotlin", "docs"}, MaxResults: 10, SearchDepth: "advanced",
+		Engines: []string{"github"}, Categories: []string{"it"}, Language: "en", TimeRange: "month",
+		ExpectedDomains: []string{"kotlinlang.org"}, FreshnessSensitive: true,
+	}
+	baseDigest := CaseSHA256(base)
+	mutations := map[string]func(*Case){
+		"id":                  func(c *Case) { c.ID = "developer-002" },
+		"intent":              func(c *Case) { c.Intent = IntentGeneral },
+		"query":               func(c *Case) { c.Query += " guide" },
+		"tags":                func(c *Case) { c.Tags = []string{"docs"} },
+		"max results":         func(c *Case) { c.MaxResults++ },
+		"search depth":        func(c *Case) { c.SearchDepth = "basic" },
+		"engines":             func(c *Case) { c.Engines = []string{"gitlab"} },
+		"categories":          func(c *Case) { c.Categories = []string{"general"} },
+		"language":            func(c *Case) { c.Language = "de" },
+		"time range":          func(c *Case) { c.TimeRange = "day" },
+		"expected domains":    func(c *Case) { c.ExpectedDomains = []string{"go.dev"} },
+		"freshness sensitive": func(c *Case) { c.FreshnessSensitive = false },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			changed := base
+			changed.Tags = append([]string(nil), base.Tags...)
+			changed.Engines = append([]string(nil), base.Engines...)
+			changed.Categories = append([]string(nil), base.Categories...)
+			changed.ExpectedDomains = append([]string(nil), base.ExpectedDomains...)
+			mutate(&changed)
+			if reflect.DeepEqual(changed, base) || CaseSHA256(changed) == baseDigest {
+				t.Fatalf("%s did not change complete case identity", name)
+			}
+		})
+	}
+}
 
 func TestLoadSuiteValidatesAndPreservesCases(t *testing.T) {
 	raw := strings.NewReader(`

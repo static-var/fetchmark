@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/staticvar/fetchmark/internal/buildidentity"
 )
 
 const maxRelevanceLabels = 50_000
@@ -37,8 +39,9 @@ const (
 )
 
 // PooledRelevanceLabel is a provenance-bound relevance judgment that can be
-// reused across runs for the same fixed evaluation case and exact URL. Exact
-// intent and query metadata let scoring reject a pool built for another suite.
+// reused across runs for the same fixed evaluation case and exact URL. The
+// complete case digest plus intent/query metadata reject pools from another
+// suite revision or request-control configuration.
 type PooledRelevanceLabel struct {
 	SchemaVersion  int
 	SourceRunID    string
@@ -46,6 +49,7 @@ type PooledRelevanceLabel struct {
 	CaseID         string
 	Intent         Intent
 	Query          string
+	CaseSHA256     string
 	URL            string
 	Relevance      int
 }
@@ -57,6 +61,7 @@ type relevanceLabelDocument struct {
 	CaseID         string          `json:"case_id"`
 	Intent         *Intent         `json:"intent,omitempty"`
 	Query          *string         `json:"query,omitempty"`
+	CaseSHA256     *string         `json:"case_sha256,omitempty"`
 	URL            string          `json:"url"`
 	Title          *string         `json:"title,omitempty"`
 	Domain         *string         `json:"domain,omitempty"`
@@ -155,15 +160,17 @@ type pooledJudgmentSourceKey struct {
 }
 
 type pooledCaseMetadata struct {
-	intent Intent
-	query  string
+	intent     Intent
+	query      string
+	caseSHA256 string
 }
 
 type indexedResult struct {
-	result ResultObservation
-	intent Intent
-	query  string
-	rank   int
+	result     ResultObservation
+	intent     Intent
+	query      string
+	caseSHA256 string
+	rank       int
 }
 
 // LoadRelevanceLabels strictly decodes human judgments and binds every entry
@@ -216,6 +223,7 @@ func LoadRelevanceLabels(reader io.Reader, records []Record) ([]RelevanceLabel, 
 		}
 		if (document.Intent != nil && *document.Intent != observed.intent) ||
 			(document.Query != nil && *document.Query != observed.query) ||
+			(document.CaseSHA256 != nil && *document.CaseSHA256 != observed.caseSHA256) ||
 			(document.Title != nil && *document.Title != observed.result.Title) ||
 			(document.Domain != nil && *document.Domain != observed.result.Domain) ||
 			(document.Rank != nil && *document.Rank != observed.rank) {
@@ -241,9 +249,9 @@ func LoadRelevanceLabels(reader io.Reader, records []Record) ([]RelevanceLabel, 
 
 // LoadPooledRelevanceLabels decodes judgments that may have been concatenated
 // from multiple run-bound label artifacts. Every row must retain the exact
-// source run, fixed-suite intent/query, and judgment origin. Repeated URLs from
-// distinct source runs remain separate provenance records, while conflicting
-// grades for one case and URL are rejected.
+// source run, complete fixed-case digest, intent/query, and judgment origin.
+// Repeated URLs from distinct source runs remain separate provenance records,
+// while conflicting grades for one case and URL are rejected.
 func LoadPooledRelevanceLabels(reader io.Reader) ([]PooledRelevanceLabel, error) {
 	if reader == nil {
 		return nil, errors.New("eval: nil pooled relevance-label reader")
@@ -282,7 +290,7 @@ func LoadPooledRelevanceLabels(reader io.Reader) ([]PooledRelevanceLabel, error)
 		}
 		if document.SchemaVersion != 1 || strings.TrimSpace(document.RunID) == "" || document.RunID != strings.TrimSpace(document.RunID) ||
 			!validBaselineIdentity(document.RunID) || document.JudgmentOrigin == nil || !validJudgmentOrigin(*document.JudgmentOrigin) ||
-			document.Intent == nil || document.Query == nil || !caseIDPattern.MatchString(document.CaseID) ||
+			document.Intent == nil || document.Query == nil || document.CaseSHA256 == nil || !caseIDPattern.MatchString(document.CaseID) ||
 			document.Relevance == nil || *document.Relevance < 0 || *document.Relevance > 3 {
 			return nil, fmt.Errorf("eval: pooled relevance label line %d has invalid version, provenance, case metadata, or relevance", line)
 		}
@@ -296,7 +304,11 @@ func LoadPooledRelevanceLabels(reader io.Reader) ([]PooledRelevanceLabel, error)
 		if strings.TrimSpace(*document.Query) == "" {
 			return nil, fmt.Errorf("eval: pooled relevance label line %d has empty query metadata", line)
 		}
-		metadata := pooledCaseMetadata{intent: *document.Intent, query: *document.Query}
+		caseSHA256, ok := buildidentity.Parse(*document.CaseSHA256)
+		if !ok || caseSHA256 != *document.CaseSHA256 {
+			return nil, fmt.Errorf("eval: pooled relevance label line %d has invalid case_sha256", line)
+		}
+		metadata := pooledCaseMetadata{intent: *document.Intent, query: *document.Query, caseSHA256: caseSHA256}
 		if existing, present := metadataByCase[document.CaseID]; present && existing != metadata {
 			return nil, fmt.Errorf("eval: pooled relevance label line %d conflicts with case metadata", line)
 		}
@@ -304,7 +316,7 @@ func LoadPooledRelevanceLabels(reader io.Reader) ([]PooledRelevanceLabel, error)
 
 		key := resultKey{caseID: document.CaseID, url: document.URL}
 		if existing, duplicate := judgmentByResult[key]; duplicate {
-			if existing.Relevance != *document.Relevance || existing.Intent != *document.Intent || existing.Query != *document.Query {
+			if existing.Relevance != *document.Relevance || existing.Intent != *document.Intent || existing.Query != *document.Query || existing.CaseSHA256 != caseSHA256 {
 				return nil, fmt.Errorf("eval: pooled relevance label line %d conflicts with an earlier judgment", line)
 			}
 		}
@@ -320,6 +332,7 @@ func LoadPooledRelevanceLabels(reader io.Reader) ([]PooledRelevanceLabel, error)
 			CaseID:         document.CaseID,
 			Intent:         *document.Intent,
 			Query:          *document.Query,
+			CaseSHA256:     caseSHA256,
 			URL:            document.URL,
 			Relevance:      *document.Relevance,
 		}
@@ -354,6 +367,7 @@ type labelTemplateEntry struct {
 	CaseID        string `json:"case_id"`
 	Intent        Intent `json:"intent"`
 	Query         string `json:"query"`
+	CaseSHA256    string `json:"case_sha256,omitempty"`
 	URL           string `json:"url"`
 	Title         string `json:"title,omitempty"`
 	Domain        string `json:"domain,omitempty"`
@@ -428,7 +442,7 @@ func marshalLabelTemplateEntry(record Record, result ResultObservation, rank int
 func makeLabelTemplateEntry(record Record, result ResultObservation, rank int) labelTemplateEntry {
 	return labelTemplateEntry{
 		SchemaVersion: 1, RunID: record.RunID, CaseID: record.CaseID,
-		Intent: record.Intent, Query: record.Query, URL: result.URL,
+		Intent: record.Intent, Query: record.Query, CaseSHA256: record.CaseSHA256, URL: result.URL,
 		Title: result.Title, Domain: result.Domain, Rank: rank,
 	}
 }
@@ -470,7 +484,11 @@ func ScoreRelevancePooled(records []Record, labels []PooledRelevanceLabel) (Rele
 		return RelevanceSummary{}, errors.New("eval: pooled relevance labels are empty")
 	}
 	recordByCase := make(map[string]Record, len(records))
-	for _, record := range records {
+	for index, record := range records {
+		caseSHA256, ok := buildidentity.Parse(record.CaseSHA256)
+		if !ok || caseSHA256 != record.CaseSHA256 {
+			return RelevanceSummary{}, fmt.Errorf("eval: record %d is missing a valid case_sha256 required for pooled scoring", index+1)
+		}
 		recordByCase[record.CaseID] = record
 	}
 	pooledByResult := make(map[resultKey]int, len(labels))
@@ -484,16 +502,20 @@ func ScoreRelevancePooled(records []Record, labels []PooledRelevanceLabel) (Rele
 			strings.TrimSpace(label.Query) == "" || !caseIDPattern.MatchString(label.CaseID) || label.Relevance < 0 || label.Relevance > 3 {
 			return RelevanceSummary{}, fmt.Errorf("eval: pooled relevance label %d has invalid version, provenance, case metadata, or relevance", index+1)
 		}
+		caseSHA256, ok := buildidentity.Parse(label.CaseSHA256)
+		if !ok || caseSHA256 != label.CaseSHA256 {
+			return RelevanceSummary{}, fmt.Errorf("eval: pooled relevance label %d has invalid case_sha256", index+1)
+		}
 		parsed, parseErr := url.Parse(label.URL)
 		if parseErr != nil || parsed.User != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 			return RelevanceSummary{}, fmt.Errorf("eval: pooled relevance label %d has invalid URL", index+1)
 		}
 		if record, exists := recordByCase[label.CaseID]; exists {
-			if label.Intent != record.Intent || label.Query != record.Query {
+			if label.Intent != record.Intent || label.Query != record.Query || label.CaseSHA256 != record.CaseSHA256 {
 				return RelevanceSummary{}, fmt.Errorf("eval: pooled relevance label %d does not match run case metadata", index+1)
 			}
 		}
-		metadata := pooledCaseMetadata{intent: label.Intent, query: label.Query}
+		metadata := pooledCaseMetadata{intent: label.Intent, query: label.Query, caseSHA256: label.CaseSHA256}
 		if existing, present := metadataByCase[label.CaseID]; present && existing != metadata {
 			return RelevanceSummary{}, fmt.Errorf("eval: pooled relevance label %d conflicts with case metadata", index+1)
 		}
@@ -829,7 +851,7 @@ func indexRunResults(records []Record) (string, map[resultKey]indexedResult, err
 			if _, duplicate := results[key]; duplicate {
 				return "", nil, fmt.Errorf("eval: record %d repeats result URL", recordIndex+1)
 			}
-			results[key] = indexedResult{result: result, intent: record.Intent, query: record.Query, rank: resultIndex + 1}
+			results[key] = indexedResult{result: result, intent: record.Intent, query: record.Query, caseSHA256: record.CaseSHA256, rank: resultIndex + 1}
 		}
 	}
 	return runID, results, nil

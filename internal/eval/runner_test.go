@@ -67,6 +67,9 @@ func TestRunnerRecordsOrderedObservableResults(t *testing.T) {
 	if len(records) != 2 || records[0].CaseID != "general-001" || records[1].CaseID != "developer-001" {
 		t.Fatalf("record order = %+v", records)
 	}
+	if records[0].CaseSHA256 != CaseSHA256(suite.Cases[0]) || records[1].CaseSHA256 != CaseSHA256(suite.Cases[1]) {
+		t.Fatalf("record case identity = %q / %q", records[0].CaseSHA256, records[1].CaseSHA256)
+	}
 	if !records[0].NonEmpty || records[0].UniqueDomains != 1 || records[0].ExtractionSuccesses != 1 || records[0].PublishedResults != 1 {
 		t.Fatalf("first record = %+v", records[0])
 	}

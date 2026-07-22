@@ -138,11 +138,6 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	_, evaluationConfiguration, evaluationConfigurationSHA, err := evaluationmanifest.Build(cfg, evaluationSpec)
-	if err != nil {
-		return fmt.Errorf("build evaluation configuration: %w", err)
-	}
-	log.Info("evaluation configuration resolved", "sha256", evaluationConfigurationSHA)
 	if buildIdentityErr != nil {
 		log.Warn("build identity unavailable", "error", buildIdentityErr)
 	}
@@ -225,7 +220,8 @@ func run() error {
 	providerExternal := egress.DefaultExternal()
 	providerExternal.DialTimeout = cfg.HeaderTimeout
 	providerExternal.ResponseHeaderTimeout = cfg.HeaderTimeout
-	discoveryPlanner, primaryDiscovery, err := buildDiscoveryPlannerFromSpec(cfg, searxSearcher, providerExternal.HTTPClient(10*time.Second), federationRuntime, evaluationSpec)
+	runtimeBindings := evaluationmanifest.RuntimeBindings{}
+	discoveryPlanner, primaryDiscovery, err := buildDiscoveryPlannerFromSpec(cfg, searxSearcher, providerExternal.HTTPClient(10*time.Second), federationRuntime, evaluationSpec, &runtimeBindings)
 	if err != nil {
 		return err
 	}
@@ -236,6 +232,11 @@ func run() error {
 			}
 		}()
 	}
+	_, evaluationConfiguration, evaluationConfigurationSHA, err := evaluationmanifest.BuildWithRuntimeBindings(cfg, evaluationSpec, runtimeBindings)
+	if err != nil {
+		return fmt.Errorf("build evaluation configuration: %w", err)
+	}
+	log.Info("evaluation configuration resolved", "sha256", evaluationConfigurationSHA)
 	rchk := robots.New(external.HTTPClient(5*time.Second), time.Hour, 0)
 	fx, err := fetcher.New(fetcher.Options{
 		Policy: external,
@@ -510,10 +511,10 @@ func buildDiscoveryPlannerWithFederation(cfg config.Config, searx search.Searche
 	if err != nil {
 		return nil, nil, err
 	}
-	return buildDiscoveryPlannerFromSpec(cfg, searx, providerHTTP, federationRuntime, spec)
+	return buildDiscoveryPlannerFromSpec(cfg, searx, providerHTTP, federationRuntime, spec, nil)
 }
 
-func buildDiscoveryPlannerFromSpec(cfg config.Config, searx search.Searcher, providerHTTP *http.Client, federationRuntime *configuredFederation, spec discovery.RegistrySpec) (registry *discovery.Registry, primary search.Searcher, err error) {
+func buildDiscoveryPlannerFromSpec(cfg config.Config, searx search.Searcher, providerHTTP *http.Client, federationRuntime *configuredFederation, spec discovery.RegistrySpec, runtimeBindings *evaluationmanifest.RuntimeBindings) (registry *discovery.Registry, primary search.Searcher, err error) {
 	var closers []io.Closer
 	defer func() {
 		if err != nil {
@@ -680,6 +681,9 @@ func buildDiscoveryPlannerFromSpec(cfg config.Config, searx search.Searcher, pro
 				return nil, nil, fmt.Errorf("configure discovery source %q: %w", id, openErr)
 			}
 			closers = append(closers, opened)
+			if runtimeBindings != nil {
+				runtimeBindings.OfficialDocIndexSnapshotSHA256 = opened.SnapshotSHA256()
+			}
 			adapter, err = searchbudget.New(opened, searchbudget.Options{
 				RatePerSecond: sourceSpec.RatePerSecond, Burst: sourceSpec.Burst,
 				MaxConcurrency: sourceSpec.MaxConcurrency,

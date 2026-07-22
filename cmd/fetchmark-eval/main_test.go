@@ -348,8 +348,8 @@ func TestRunAnalyzesRecordsAgainstPooledCrossRunQrels(t *testing.T) {
 	recordsPath := writeRecords(t)
 	qrelsPath := filepath.Join(t.TempDir(), "qrels.jsonl")
 	qrels := strings.Join([]string{
-		`{"schema_version":1,"run_id":"older-run","judgment_origin":"assistant_provisional","case_id":"general-001","intent":"general","query":"query","url":"https://one.example/","relevance":2}`,
-		`{"schema_version":1,"run_id":"other-run","judgment_origin":"independent_human","case_id":"general-001","intent":"general","query":"query","url":"https://better.example/","relevance":3}`,
+		`{"schema_version":1,"run_id":"older-run","judgment_origin":"assistant_provisional","case_id":"general-001","intent":"general","query":"query","case_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","url":"https://one.example/","relevance":2}`,
+		`{"schema_version":1,"run_id":"other-run","judgment_origin":"independent_human","case_id":"general-001","intent":"general","query":"query","case_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","url":"https://better.example/","relevance":3}`,
 	}, "\n") + "\n"
 	if err := os.WriteFile(qrelsPath, []byte(qrels), 0o600); err != nil {
 		t.Fatal(err)
@@ -531,7 +531,7 @@ func writeRecords(t *testing.T) string {
 		t.Fatal(err)
 	}
 	records := []feval.Record{{
-		SchemaVersion: 1, RunID: "run-a", CaseID: "general-001", Intent: feval.IntentGeneral,
+		SchemaVersion: 1, RunID: "run-a", CaseSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", CaseID: "general-001", Intent: feval.IntentGeneral,
 		Query: "query", SearchDepth: "basic", Attempted: true, HTTPStatus: 200,
 		NonEmpty: true, ResultCount: 1, UniqueDomains: 1,
 		Results: []feval.ResultObservation{{URL: "https://one.example/", Domain: "one.example", Title: "One"}},

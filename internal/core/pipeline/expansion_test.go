@@ -369,6 +369,41 @@ func TestBasicSearchUsesMatchingSpecialtyProjectionWhenPackHasNoOriginalLane(t *
 	}
 }
 
+func TestBasicSearchPreservesDeveloperProjectionWhenFreshnessAlsoMatches(t *testing.T) {
+	searcher := &recordingExpansionSearcher{responses: func(search.Query) []search.Hit {
+		return []search.Hit{{URL: "https://go.dev/doc/"}}
+	}}
+	spec, err := discovery.DefaultSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := discovery.NewRegistryFromSpec(
+		spec,
+		map[string]search.Searcher{"searxng": searcher},
+		"searxng",
+		[]string{"developer", "fresh"},
+		[]string{"searxng"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Pipeline{Searcher: searcher, DiscoveryPlanner: registry, AdvancedSearchConcurrency: 2}
+	query := "latest Kubernetes API documentation"
+	if _, err := p.searchCandidates(context.Background(), Options{Query: query, TimeRange: "month"}, 7); err != nil {
+		t.Fatal(err)
+	}
+	queries := searcher.recordedQueries()
+	if len(queries) != 1 {
+		t.Fatalf("search calls = %d, want one developer projection: %+v", len(queries), queries)
+	}
+	got := queries[0]
+	wantEngines := []string{"github", "gitlab", "stackoverflow"}
+	if !reflect.DeepEqual(got.Engines, wantEngines) || got.TimeRange != "month" ||
+		strings.Contains(strings.ToLower(got.Q), "news") || !strings.Contains(strings.ToLower(got.Q), "official") {
+		t.Fatalf("overlapping developer/fresh query = %+v, want developer controls without the freshness projection", got)
+	}
+}
+
 func TestBasicSearchRunsFederationLikeLaneOnlyWhenOriginalAllowed(t *testing.T) {
 	for _, test := range []struct {
 		name      string

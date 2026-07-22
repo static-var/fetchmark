@@ -22,6 +22,9 @@ func TestOpenSearchesImmutableOfficialMetadataWithProvenance(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = index.Close() })
+	if got := index.SnapshotSHA256(); len(got) != 64 {
+		t.Fatalf("snapshot SHA-256 = %q", got)
+	}
 
 	batch, err := index.SearchBatch(context.Background(), search.Query{
 		Q: "How do Kotlin coroutines handle cooperative cancellation?", MaxResults: 5,

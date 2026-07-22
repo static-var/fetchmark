@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -30,6 +32,7 @@ import (
 	"github.com/staticvar/fetchmark/internal/core/indexpack"
 	"github.com/staticvar/fetchmark/internal/core/pipeline"
 	"github.com/staticvar/fetchmark/internal/core/search"
+	"github.com/staticvar/fetchmark/internal/evaluationmanifest"
 )
 
 type stubSearcher struct{}
@@ -113,7 +116,7 @@ func TestBuildDiscoveryPlannerFromSpecDoesNotRereadConfigurationFile(t *testing.
 	if err != nil {
 		t.Fatalf("DefaultSpec: %v", err)
 	}
-	planner, primary, err := buildDiscoveryPlannerFromSpec(cfg, stubSearcher{}, &http.Client{}, nil, spec)
+	planner, primary, err := buildDiscoveryPlannerFromSpec(cfg, stubSearcher{}, &http.Client{}, nil, spec, nil)
 	if err != nil {
 		t.Fatalf("buildDiscoveryPlannerFromSpec: %v", err)
 	}
@@ -458,9 +461,18 @@ func TestBuildDiscoveryPlannerOpensOptInOfficialDocIndex(t *testing.T) {
 	cfg := discoveryTestConfig()
 	cfg.DiscoveryEnabledSources = append(cfg.DiscoveryEnabledSources, "docindex")
 	cfg.OfficialDocIndexFile = snapshotPath
-	planner, primary, err := buildDiscoveryPlanner(cfg, stubSearcher{}, &http.Client{})
+	spec, err := discovery.DefaultSpec()
 	if err != nil {
 		t.Fatal(err)
+	}
+	runtimeBindings := evaluationmanifest.RuntimeBindings{}
+	planner, primary, err := buildDiscoveryPlannerFromSpec(cfg, stubSearcher{}, &http.Client{}, nil, spec, &runtimeBindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSnapshotSHA256 := sha256.Sum256(raw)
+	if got, want := runtimeBindings.OfficialDocIndexSnapshotSHA256, hex.EncodeToString(wantSnapshotSHA256[:]); got != want {
+		t.Fatalf("loaded document snapshot binding = %q, want %q", got, want)
 	}
 	closer, ok := primary.(io.Closer)
 	if !ok {

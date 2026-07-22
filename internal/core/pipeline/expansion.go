@@ -419,15 +419,15 @@ func basicQueryVariants(base search.Query) []queryVariant {
 	}
 	profile := discovery.ProfileQuery(base)
 	variants := make([]queryVariant, 0, 3)
-	if profile.Fresh {
-		q := base
-		q.Q = freshnessVariant(base.Q)
-		variants = append(variants, queryVariant{label: "freshness", weight: 1, query: q})
-	}
 	if profile.Developer {
 		q := base
 		q.Q = docsVariant(base.Q)
 		variants = append(variants, queryVariant{label: "docs", weight: 1, query: q})
+	}
+	if profile.Fresh {
+		q := base
+		q.Q = freshnessVariant(base.Q)
+		variants = append(variants, queryVariant{label: "freshness", weight: 1, query: q})
 	}
 	return append(variants, original)
 }
