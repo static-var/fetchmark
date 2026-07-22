@@ -119,6 +119,24 @@ func TestAttachQueryChunksPhraseBoostRequiresTokenBoundaries(t *testing.T) {
 	}
 }
 
+func TestAttachQueryChunksFallsBackForProperNameStopWords(t *testing.T) {
+	results := []model.SearchResult{{
+		Content: &model.Content{MainText: strings.Join([]string{
+			"Research teams catalogued archival recordings without naming performers.",
+			"The Who recorded live performances throughout the band's early career.",
+		}, "\n\n")},
+	}}
+
+	attachQueryChunks(results, "The Who", 1)
+
+	if len(results[0].Chunks) != 1 {
+		t.Fatalf("chunks = %+v, want 1", results[0].Chunks)
+	}
+	if !strings.Contains(results[0].Chunks[0].Text, "The Who") {
+		t.Fatalf("proper-name query should retain its matching passage: %+v", results[0].Chunks)
+	}
+}
+
 func TestSplitChunksDoesNotBreakUTF8(t *testing.T) {
 	text := strings.Repeat("界", maxChunkChars+10)
 
