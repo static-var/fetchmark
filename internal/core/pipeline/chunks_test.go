@@ -25,6 +25,24 @@ func TestAttachQueryChunksPhraseMatchOutranksBagOfTerms(t *testing.T) {
 	}
 }
 
+func TestAttachQueryChunksIgnoresQuestionScaffolding(t *testing.T) {
+	results := []model.SearchResult{{
+		Content: &model.Content{MainText: strings.Join([]string{
+			"How do users interact with readers? How do teams interact with readers?",
+			"SQLite WAL checkpoints coordinate reader access while a transaction remains active.",
+		}, "\n\n")},
+	}}
+
+	attachQueryChunks(results, "How do SQLite WAL checkpoints interact with readers?", 2)
+
+	if len(results[0].Chunks) != 2 {
+		t.Fatalf("chunks = %+v, want 2", results[0].Chunks)
+	}
+	if !strings.Contains(results[0].Chunks[0].Text, "SQLite WAL checkpoints") {
+		t.Fatalf("topical terms should outrank repeated question scaffolding: %+v", results[0].Chunks)
+	}
+}
+
 func TestAttachQueryChunksTermFrequencyBeatsOneOffLongChunk(t *testing.T) {
 	results := []model.SearchResult{{
 		Content: &model.Content{MainText: strings.Join([]string{

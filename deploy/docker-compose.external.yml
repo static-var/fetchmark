@@ -27,6 +27,7 @@ services:
       FM_DISCOVERY_PROVIDER_MAX_BODY: "${FM_DISCOVERY_PROVIDER_MAX_BODY:-2097152}"
       FM_OPEN_PACK_REGISTRY_FILE: "${FM_OPEN_PACK_REGISTRY_FILE:-}"
       FM_FEED_INDEX_FILE: "${FM_FEED_INDEX_FILE:-}"
+      FM_OFFICIAL_DOC_INDEX_FILE: "${FM_OFFICIAL_DOC_INDEX_FILE:-}"
       FM_FEDERATION_IDENTITY_FILE: "${FM_FEDERATION_IDENTITY_FILE:-}"
       FM_FEDERATION_TRUST_REGISTRY_FILE: "${FM_FEDERATION_TRUST_REGISTRY_FILE:-}"
       FM_FEDERATION_LISTEN_ADDR: "${FM_FEDERATION_LISTEN_ADDR:-}"
@@ -123,6 +124,7 @@ services:
       - default
       - renderer
     volumes:
+      - "${FM_OFFICIAL_DOC_INDEX_HOST_DIR:-./official-docs}:/etc/fetchmark/official-docs:ro"
       - fetchmark-data:/var/lib/fetchmark
 
   crawler:

@@ -43,6 +43,16 @@ func TestValidateDiscoveryReportAggregateMatrix(t *testing.T) {
 	}
 }
 
+func TestValidateDiscoveryReportAcceptsConceptVariant(t *testing.T) {
+	report := DiscoveryReport{Status: BatchHealthy, Lanes: []DiscoveryLaneReport{{
+		Provider: "mwmbl", Lane: "mwmbl-general", Variant: "concept",
+		Status: BatchHealthy, CandidateCount: 1,
+	}}}
+	if err := ValidateDiscoveryReport(report); err != nil {
+		t.Fatalf("concept discovery report rejected: %v", err)
+	}
+}
+
 func TestValidateDiscoveryReportRejectsInvalidBoundsAndSemantics(t *testing.T) {
 	valid := DiscoveryLaneReport{Provider: "wiby", Lane: "wiby-general", Variant: "original", Status: BatchHealthy, CandidateCount: 1}
 	tests := map[string]DiscoveryReport{

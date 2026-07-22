@@ -4,9 +4,9 @@ import (
 	"math"
 	"sort"
 	"strings"
-	"unicode"
 
 	"github.com/staticvar/fetchmark/internal/core/model"
+	corerank "github.com/staticvar/fetchmark/internal/core/rank"
 )
 
 const maxChunkChars = 500
@@ -191,28 +191,7 @@ func newChunkQuery(s string) chunkQuery {
 }
 
 func chunkTokens(s string) []string {
-	fields := strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
-	})
-	out := make([]string, 0, len(fields))
-	for _, token := range fields {
-		token = normalizeChunkToken(token)
-		if token == "" {
-			continue
-		}
-		out = append(out, token)
-	}
-	return out
-}
-
-func normalizeChunkToken(token string) string {
-	if len(token) < 2 {
-		return ""
-	}
-	if strings.HasSuffix(token, "s") && len(token) > 3 {
-		token = strings.TrimSuffix(token, "s")
-	}
-	return token
+	return corerank.TopicalTokens(s)
 }
 
 func tokenCounts(tokens []string) map[string]int {

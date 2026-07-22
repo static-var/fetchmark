@@ -312,13 +312,16 @@ func metricCounterValue(t *testing.T, metric interface{ Write(*dto.Metric) error
 	return value.GetCounter().GetValue()
 }
 
-func TestBasicSearchFallsBackToPrimaryWhenPlannedLanesAreAdvancedOnly(t *testing.T) {
+func TestBasicSearchUsesMatchingSpecialtyProjectionWhenPackHasNoOriginalLane(t *testing.T) {
 	for _, test := range []struct {
-		pack  string
-		query string
+		pack          string
+		query         string
+		lane          string
+		variant       string
+		wantQueryPart string
 	}{
-		{pack: "developer", query: "golang api"},
-		{pack: "fresh", query: "latest security news 2026"},
+		{pack: "developer", query: "golang api", lane: "searxng-developer", variant: "docs", wantQueryPart: "official docs"},
+		{pack: "fresh", query: "latest security news 2026", lane: "searxng-fresh", variant: "freshness", wantQueryPart: "recent updates"},
 	} {
 		t.Run(test.pack, func(t *testing.T) {
 			primary := &recordingExpansionSearcher{responses: func(search.Query) []search.Hit {
@@ -351,16 +354,16 @@ func TestBasicSearchFallsBackToPrimaryWhenPlannedLanesAreAdvancedOnly(t *testing
 			if len(hits) != 1 || hits[0].URL != "https://primary.example/result" {
 				t.Fatalf("hits = %+v, want primary fallback result", hits)
 			}
-			wantProvenance := []model.DiscoveryProvenance{{Provider: "searxng", Lane: "searxng", Variant: "original"}}
-			if !reflect.DeepEqual(hits[0].Provenance, wantProvenance) || hits[0].Metadata["rrf_sources"] != "searxng:original" {
-				t.Fatalf("fallback provenance = %#v metadata=%#v, want %#v", hits[0].Provenance, hits[0].Metadata, wantProvenance)
+			wantProvenance := []model.DiscoveryProvenance{{Provider: "searxng", Lane: test.lane, Variant: test.variant}}
+			if !reflect.DeepEqual(hits[0].Provenance, wantProvenance) || hits[0].Metadata["rrf_sources"] != test.lane+":"+test.variant {
+				t.Fatalf("specialty provenance = %#v metadata=%#v, want %#v", hits[0].Provenance, hits[0].Metadata, wantProvenance)
 			}
 			queries := primary.recordedQueries()
 			if len(queries) != 1 {
-				t.Fatalf("primary calls = %d, want one original request", len(queries))
+				t.Fatalf("primary calls = %d, want one specialty request", len(queries))
 			}
-			if got := queries[0]; got.Q != test.query || got.ExactMatch || got.MaxResults != 7 {
-				t.Fatalf("primary query = %+v, want unchanged basic query", got)
+			if got := queries[0]; !strings.Contains(strings.ToLower(got.Q), test.wantQueryPart) || got.ExactMatch || got.MaxResults != 7 {
+				t.Fatalf("primary query = %+v, want %s projection containing %q", got, test.variant, test.wantQueryPart)
 			}
 		})
 	}

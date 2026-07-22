@@ -23,6 +23,7 @@ import (
 	"github.com/staticvar/fetchmark/internal/adapters/cache"
 	"github.com/staticvar/fetchmark/internal/adapters/crossref"
 	"github.com/staticvar/fetchmark/internal/adapters/discoverycache"
+	"github.com/staticvar/fetchmark/internal/adapters/docindex"
 	"github.com/staticvar/fetchmark/internal/adapters/egress"
 	"github.com/staticvar/fetchmark/internal/adapters/egressproxy"
 	"github.com/staticvar/fetchmark/internal/adapters/extractor"
@@ -661,6 +662,20 @@ func buildDiscoveryPlannerFromSpec(cfg config.Config, searx search.Searcher, pro
 				return nil, nil, errors.New("configure discovery: feed index source must be named feedindex")
 			}
 			opened, openErr := feedindex.Open(feedindex.Options{Path: cfg.FeedIndexFile})
+			if openErr != nil {
+				return nil, nil, fmt.Errorf("configure discovery source %q: %w", id, openErr)
+			}
+			closers = append(closers, opened)
+			adapter, err = searchbudget.New(opened, searchbudget.Options{
+				RatePerSecond: sourceSpec.RatePerSecond, Burst: sourceSpec.Burst,
+				MaxConcurrency: sourceSpec.MaxConcurrency,
+			})
+		case "docindex":
+			cacheAdapter = false
+			if id != "docindex" {
+				return nil, nil, errors.New("configure discovery: official document index source must be named docindex")
+			}
+			opened, openErr := docindex.Open(docindex.Options{Path: cfg.OfficialDocIndexFile})
 			if openErr != nil {
 				return nil, nil, fmt.Errorf("configure discovery source %q: %w", id, openErr)
 			}

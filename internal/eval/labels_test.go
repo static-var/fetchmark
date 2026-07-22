@@ -2,6 +2,7 @@ package eval
 
 import (
 	"bytes"
+	"math"
 	"strings"
 	"testing"
 )
@@ -77,6 +78,156 @@ func TestPartialLabelsReportCoverageWithoutInventingRankingGrades(t *testing.T) 
 	if report.RelevantHitCases != 1 || report.RelevantHitCoverageRate != 0.5 || report.MeanPrecisionAt5 != 0 {
 		t.Fatalf("partial precision-first report = %+v", report)
 	}
+	if report.AllEligibleRankingComplete || report.AllEligibleRankingCases != 0 ||
+		report.AllEligibleRelevantResultsAt5 != nil || report.AllEligibleRelevantYieldAt5 != nil ||
+		report.AllEligibleMeanPrecisionAt5 != nil || report.AllEligibleMeanNDCGAt10 != nil ||
+		report.AllEligibleMeanReciprocalRank != nil {
+		t.Fatalf("partial labels produced all-eligible ranking metrics = %+v", report)
+	}
+	if report.AllQueryRankingComplete || report.AllQueryRankingCases != 0 ||
+		report.AllQueryRelevantResultsAt5 != nil || report.AllQueryRelevantYieldAt5 != nil ||
+		report.AllQueryMeanPrecisionAt5 != nil || report.AllQueryMeanNDCGAt10 != nil ||
+		report.AllQueryMeanReciprocalRank != nil {
+		t.Fatalf("partial labels produced all-query ranking metrics = %+v", report)
+	}
+}
+
+func TestAllEligibleMetricsCountEmptyCasesAndUseFiveResultPrecisionDenominator(t *testing.T) {
+	records := append(labeledRecordsFixture(), Record{
+		SchemaVersion: 1, RunID: "run-a", CaseID: "fresh-001", Intent: IntentFresh,
+		Query: "fresh query", SearchDepth: "advanced", Attempted: true, HTTPStatus: 200,
+		NonEmpty: false, ResultCount: 0,
+	})
+	labels, err := LoadRelevanceLabels(strings.NewReader(`
+{"schema_version":1,"run_id":"run-a","case_id":"general-001","url":"https://one.example/","relevance":3}
+{"schema_version":1,"run_id":"run-a","case_id":"general-001","url":"https://two.example/","relevance":0}
+{"schema_version":1,"run_id":"run-a","case_id":"developer-001","url":"https://three.example/","relevance":2}
+`), records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := ScoreRelevance(records, labels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.AllEligibleRankingComplete || report.AllEligibleRankingCases != 3 {
+		t.Fatalf("all-eligible completeness = %+v", report)
+	}
+	if report.AllEligibleRelevantResultsAt5 == nil || *report.AllEligibleRelevantResultsAt5 != 2 || report.AllEligibleRelevantYieldAt5 == nil ||
+		!closeEnough(*report.AllEligibleRelevantYieldAt5, 2.0/3.0) {
+		t.Fatalf("all-eligible relevant yield = %+v", report)
+	}
+	if report.AllEligibleMeanPrecisionAt5 == nil || !closeEnough(*report.AllEligibleMeanPrecisionAt5, 2.0/15.0) {
+		t.Fatalf("all-eligible fixed-denominator precision = %+v", report)
+	}
+	if report.AllEligibleMeanNDCGAt10 == nil || !closeEnough(*report.AllEligibleMeanNDCGAt10, 2.0/3.0) ||
+		report.AllEligibleMeanReciprocalRank == nil || !closeEnough(*report.AllEligibleMeanReciprocalRank, 2.0/3.0) {
+		t.Fatalf("all-eligible ranking = %+v", report)
+	}
+	fresh := report.ByIntent[IntentFresh]
+	if !fresh.AllEligibleRankingComplete || fresh.AllEligibleRankingCases != 1 ||
+		fresh.AllEligibleMeanPrecisionAt5 == nil || *fresh.AllEligibleMeanPrecisionAt5 != 0 {
+		t.Fatalf("empty fresh intent was not scored as an abstention: %+v", fresh)
+	}
+}
+
+func TestPooledQrelsUseCrossRunIdealRankingAndAcceptConsistentDuplicates(t *testing.T) {
+	records := labeledRecordsFixture()[:1]
+	records[0].Results = records[0].Results[:1]
+	records[0].ResultCount = 1
+	records[0].UniqueDomains = 1
+	qrels, err := LoadPooledRelevanceLabels(strings.NewReader(`
+{"schema_version":1,"run_id":"old-run","judgment_origin":"assistant_provisional","case_id":"general-001","intent":"general","query":"general query","url":"https://one.example/","relevance":2}
+{"schema_version":1,"run_id":"other-run","judgment_origin":"independent_human","case_id":"general-001","intent":"general","query":"general query","url":"https://best.example/","relevance":3}
+{"schema_version":1,"run_id":"third-run","judgment_origin":"assistant_provisional","case_id":"general-001","intent":"general","query":"general query","url":"https://best.example/","relevance":3}
+`))
+	if err != nil {
+		t.Fatalf("LoadPooledRelevanceLabels: %v", err)
+	}
+	if len(qrels) != 3 || qrels[0].SourceRunID != "old-run" || qrels[0].JudgmentOrigin != JudgmentOriginAssistantProvisional {
+		t.Fatalf("pooled qrels provenance = %#v", qrels)
+	}
+	report, err := ScoreRelevancePooled(records, qrels)
+	if err != nil {
+		t.Fatalf("ScoreRelevancePooled: %v", err)
+	}
+	wantNDCG := discountedGain([]int{2}) / discountedGain([]int{3, 2})
+	if report.NDCGIdealScope != "pooled" || report.MeanNDCGAt10 != wantNDCG {
+		t.Fatalf("pooled ranking report = %+v", report)
+	}
+	if report.AllEligibleMeanNDCGAt10 == nil || *report.AllEligibleMeanNDCGAt10 != wantNDCG {
+		t.Fatalf("all-eligible pooled NDCG = %+v", report)
+	}
+
+	_, err = LoadPooledRelevanceLabels(strings.NewReader(`
+{"schema_version":1,"run_id":"run-one","judgment_origin":"independent_human","case_id":"general-001","intent":"general","query":"general query","url":"https://one.example/","relevance":2}
+{"schema_version":1,"run_id":"run-two","judgment_origin":"independent_human","case_id":"general-001","intent":"general","query":"general query","url":"https://one.example/","relevance":3}
+`))
+	if err == nil {
+		t.Fatal("conflicting duplicate pooled judgments were accepted")
+	}
+}
+
+func TestPooledQrelsRequireExactCaseAndJudgmentProvenance(t *testing.T) {
+	valid := `{"schema_version":1,"run_id":"run-a","judgment_origin":"independent_human","case_id":"general-001","intent":"general","query":"general query","url":"https://one.example/","relevance":2}`
+	tests := map[string]string{
+		"missing source run": strings.Replace(valid, `"run_id":"run-a",`, "", 1),
+		"missing origin":     strings.Replace(valid, `"judgment_origin":"independent_human",`, "", 1),
+		"unknown origin":     strings.Replace(valid, "independent_human", "model_generated", 1),
+		"missing intent":     strings.Replace(valid, `"intent":"general",`, "", 1),
+		"missing query":      strings.Replace(valid, `"query":"general query",`, "", 1),
+	}
+	for name, raw := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := LoadPooledRelevanceLabels(strings.NewReader(raw)); err == nil {
+				t.Fatal("invalid pooled qrels metadata was accepted")
+			}
+		})
+	}
+	qrels, err := LoadPooledRelevanceLabels(strings.NewReader(strings.Replace(valid, "general query", "different query", 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ScoreRelevancePooled(labeledRecordsFixture(), qrels); err == nil {
+		t.Fatal("pooled qrels with a mismatched fixed-suite query were accepted")
+	}
+}
+
+func TestPooledQrelsCountFailuresAndAbstentionsInAllQueryDenominator(t *testing.T) {
+	records := []Record{
+		{
+			SchemaVersion: 1, RunID: "run-a", CaseID: "general-001", Intent: IntentGeneral,
+			Query: "general query", SearchDepth: "advanced", Attempted: true, HTTPStatus: 200,
+			NonEmpty: true, ResultCount: 1, UniqueDomains: 1,
+			Results: []ResultObservation{{URL: "https://one.example/", Domain: "one.example", Title: "One"}},
+		},
+		{SchemaVersion: 1, RunID: "run-a", CaseID: "fresh-001", Intent: IntentFresh, Query: "fresh query", SearchDepth: "advanced", Attempted: true, HTTPStatus: 200},
+		{SchemaVersion: 1, RunID: "run-a", CaseID: "developer-001", Intent: IntentDeveloper, Query: "developer query", SearchDepth: "advanced", Attempted: true, Error: "timeout"},
+		{SchemaVersion: 1, RunID: "run-a", CaseID: "research-001", Intent: IntentResearch, Query: "research query", SearchDepth: "advanced", Attempted: false, Error: "cancelled"},
+	}
+	qrels, err := LoadPooledRelevanceLabels(strings.NewReader(
+		`{"schema_version":1,"run_id":"source-run","judgment_origin":"assistant_provisional","case_id":"general-001","intent":"general","query":"general query","url":"https://one.example/","relevance":3}`,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := ScoreRelevancePooled(records, qrels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.RelevantHitCases != 1 || report.RelevantHitCoverageRate != 0.25 {
+		t.Fatalf("relevant-hit gate excluded failures or abstentions: %+v", report)
+	}
+	if !report.AllQueryRankingComplete || report.AllQueryRankingCases != 4 ||
+		report.AllQueryMeanPrecisionAt5 == nil || *report.AllQueryMeanPrecisionAt5 != 0.05 ||
+		report.AllQueryMeanNDCGAt10 == nil || *report.AllQueryMeanNDCGAt10 != 0.25 ||
+		report.AllQueryMeanReciprocalRank == nil || *report.AllQueryMeanReciprocalRank != 0.25 {
+		t.Fatalf("all-query abstention metrics = %+v", report)
+	}
+}
+
+func closeEnough(left, right float64) bool {
+	return math.Abs(left-right) < 1e-12
 }
 
 func TestWriteLabelTemplateIsOrderedAndIntentionallyIncomplete(t *testing.T) {

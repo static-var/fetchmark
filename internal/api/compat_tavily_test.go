@@ -25,7 +25,8 @@ func TestTavilyCompatSearchTranslatesCanonicalPipeline(t *testing.T) {
 		"query":"open search", "search_depth":"advanced", "max_results":5,
 		"time_range":"month", "include_domains":["example.com"],
 		"exclude_domains":["blocked.example"], "chunks_per_source":2,
-		"include_raw_content":"markdown", "include_answer":true, "include_usage":true
+		"include_raw_content":"markdown", "include_answer":true, "include_usage":true,
+		"exact_match":true
 	}`))
 	request.Header.Set("Authorization", "Bearer k1")
 	recorder := httptest.NewRecorder()
@@ -33,7 +34,7 @@ func TestTavilyCompatSearchTranslatesCanonicalPipeline(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
-	if pipe.searchCalls != 1 || pipe.lastOpts.SearchDepth != "advanced" || pipe.lastOpts.MaxResults != 5 || pipe.lastOpts.TimeRange != "month" || pipe.lastOpts.ChunksPerSource != 2 {
+	if pipe.searchCalls != 1 || pipe.lastOpts.SearchDepth != "advanced" || pipe.lastOpts.MaxResults != 5 || pipe.lastOpts.TimeRange != "month" || pipe.lastOpts.ChunksPerSource != 2 || !pipe.lastOpts.ExactMatch {
 		t.Fatalf("pipeline options = %+v calls=%d", pipe.lastOpts, pipe.searchCalls)
 	}
 	if len(pipe.lastOpts.IncludeDomains) != 1 || len(pipe.lastOpts.ExcludeDomains) != 1 {
@@ -69,6 +70,42 @@ func TestTavilyCompatSearchTranslatesCanonicalPipeline(t *testing.T) {
 	}
 	if response.Usage["credits"] != 0 {
 		t.Fatalf("usage = %v", response.Usage)
+	}
+}
+
+func TestTavilyCompatBasicExactMatchReachesCanonicalPipelineUnchanged(t *testing.T) {
+	pipe := &fakePipeline{}
+	router := compatTestRouter(pipe)
+	const query = "current SQLite WAL behavior"
+	request := httptest.NewRequest(http.MethodPost, "/compat/tavily/search", strings.NewReader(`{
+		"query":"current SQLite WAL behavior", "search_depth":"basic", "exact_match":true
+	}`))
+	request.Header.Set("Authorization", "Bearer k1")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if pipe.searchCalls != 1 || pipe.lastOpts.Query != query || pipe.lastOpts.SearchDepth != "basic" || !pipe.lastOpts.ExactMatch {
+		t.Fatalf("pipeline options = %+v calls=%d", pipe.lastOpts, pipe.searchCalls)
+	}
+}
+
+func TestTavilyCompatAdvancedExactMatchReachesCanonicalPipelineUnchanged(t *testing.T) {
+	pipe := &fakePipeline{}
+	router := compatTestRouter(pipe)
+	const query = "current SQLite WAL behavior"
+	request := httptest.NewRequest(http.MethodPost, "/compat/tavily/search", strings.NewReader(`{
+		"query":"current SQLite WAL behavior", "search_depth":"advanced", "exact_match":true
+	}`))
+	request.Header.Set("Authorization", "Bearer k1")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if pipe.searchCalls != 1 || pipe.lastOpts.Query != query || pipe.lastOpts.SearchDepth != "advanced" || !pipe.lastOpts.ExactMatch {
+		t.Fatalf("pipeline options = %+v calls=%d", pipe.lastOpts, pipe.searchCalls)
 	}
 }
 
@@ -197,7 +234,7 @@ func TestTavilyCompatAdvancedAnswerRequiresExplicitProvider(t *testing.T) {
 	}
 }
 
-func compatTestRouter(pipe *fakePipeline) http.Handler {
+func compatTestRouter(pipe PipelineRunner) http.Handler {
 	return NewRouter(Deps{
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Config: config.Config{

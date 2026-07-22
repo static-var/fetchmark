@@ -438,6 +438,46 @@ func TestDecodeSearchResponseRejectsOversizedBody(t *testing.T) {
 	}
 }
 
+func TestRunnerRejectsInconsistentSearchResponseEnvelope(t *testing.T) {
+	tests := map[string]struct {
+		body       string
+		maxResults int
+	}{
+		"mismatched query echo": {body: `{"query":"different","count":0,"results":[]}`, maxResults: 1},
+		"count mismatch":        {body: `{"query":"expected","count":1,"results":[]}`, maxResults: 1},
+		"over requested limit":  {body: `{"query":"expected","count":2,"results":[{"url":"https://one.example/"},{"url":"https://two.example/"}]}`, maxResults: 1},
+		"malformed URL":         {body: `{"query":"expected","count":1,"results":[{"url":"http://[::1"}]}`, maxResults: 1},
+		"non-http URL":          {body: `{"query":"expected","count":1,"results":[{"url":"ftp://example.com/file"}]}`, maxResults: 1},
+		"userinfo URL":          {body: `{"query":"expected","count":1,"results":[{"url":"https://user:secret@example.com/"}]}`, maxResults: 1},
+		"empty URL":             {body: `{"query":"expected","count":1,"results":[{"url":""}]}`, maxResults: 1},
+		"empty URL host":        {body: `{"query":"expected","count":1,"results":[{"url":"https:///path"}]}`, maxResults: 1},
+		"duplicate exact URL":   {body: `{"query":"expected","count":2,"results":[{"url":"https://one.example/"},{"url":"https://one.example/"}]}`, maxResults: 2},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(test.body)),
+				}, nil
+			})}
+			suite := Suite{Cases: []Case{{
+				ID: "general-001", Intent: IntentGeneral, Query: "expected", Tags: []string{"general"}, MaxResults: test.maxResults, SearchDepth: "basic",
+			}}}
+			records, _, err := (Runner{
+				Endpoint: "http://example.invalid/v1/search", Client: client, RunID: "invalid-envelope",
+			}).Run(context.Background(), suite)
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if len(records) != 1 || records[0].Error != "invalid_response" || records[0].ResultCount != 0 || len(records[0].Results) != 0 {
+				t.Fatalf("inconsistent response was accepted: %+v", records)
+			}
+		})
+	}
+}
+
 func TestSummarizeComputesRatesLatencyAndIntentBreakdown(t *testing.T) {
 	records := []Record{
 		{Intent: IntentGeneral, Attempted: true, DurationMS: 10, HTTPStatus: 200, NonEmpty: true, ResultCount: 2, ExtractionSuccesses: 1, UniqueDomains: 2},
@@ -541,6 +581,34 @@ func TestEvaluatorMarksLegacyLaneProviderUnavailable(t *testing.T) {
 	summary := Summarize([]Record{{Intent: IntentGeneral, Attempted: true, HTTPStatus: 200, ResultCount: 1, Results: observed}})
 	if len(summary.SourceContributions) != 0 || summary.LaneContributions["unavailable/searxng-open:original"] != 1 {
 		t.Fatalf("legacy summary invented provider identity: %+v", summary)
+	}
+}
+
+func TestEvaluatorAcceptsTypedAndLegacyConceptProvenance(t *testing.T) {
+	observed := observeResults([]model.SearchResult{
+		{
+			URL: "https://typed.example/doc",
+			Provenance: []model.DiscoveryProvenance{{
+				Provider: "mwmbl", Lane: "mwmbl-general", Variant: "concept",
+			}},
+		},
+		{
+			URL: "https://legacy.example/doc",
+			Metadata: map[string]string{
+				"rrf_sources": "mwmbl-general:concept",
+			},
+		},
+	})
+	for index, result := range observed {
+		if result.ProvenanceMalformed || len(result.Sources) != 1 || result.Sources[0].Variant != "concept" {
+			t.Fatalf("concept observation %d = %#v", index, result)
+		}
+	}
+	if observed[0].Sources[0].Provider != "mwmbl" || observed[0].Sources[0].ProviderUnavailable {
+		t.Fatalf("typed concept provider = %#v", observed[0].Sources[0])
+	}
+	if !observed[1].Sources[0].ProviderUnavailable {
+		t.Fatalf("legacy concept provider availability = %#v", observed[1].Sources[0])
 	}
 }
 

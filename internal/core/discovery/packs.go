@@ -27,6 +27,18 @@ const (
 	IntentExplore   Intent = "explore"
 )
 
+// QueryProfile is the shared deterministic interpretation of query text and
+// controls. Discovery routing and query expansion both consume this profile so
+// a term recognized as fresh or developer-facing cannot be lost at the next
+// planning stage.
+type QueryProfile struct {
+	Fresh     bool
+	Developer bool
+	Research  bool
+	Knowledge bool
+	Explore   bool
+}
+
 // Source is a trusted process-registered discovery provider. Fields after
 // Weight are optional lane controls populated by a source pack.
 type Source struct {
@@ -272,33 +284,51 @@ func (r *Registry) primaryFirst(planned []Source) []Source {
 	return append([]Source{cloneSource(r.primary)}, planned...)
 }
 
-// ClassifyIntents returns stable order independent of map iteration.
-func ClassifyIntents(q search.Query) []Intent {
+// ProfileQuery extracts overlapping specialty signals, then applies routing
+// precedence. Advanced depth is an exploration hint only when no stronger
+// fresh, developer, research, or knowledge signal is present.
+func ProfileQuery(q search.Query) QueryProfile {
 	text := strings.ToLower(strings.Join(strings.Fields(q.Q), " "))
-	intents := []Intent{IntentGeneral}
-	if strings.EqualFold(strings.TrimSpace(q.SearchDepth), "advanced") {
-		intents = append(intents, IntentExplore)
+	profile := QueryProfile{
+		Fresh: strings.TrimSpace(q.TimeRange) != "" || containsAnyWord(text, "latest", "recent", "news", "today", "current") || yearPattern.MatchString(text),
+		Developer: containsAnyWord(text,
+			"api", "sdk", "docs", "documentation", "error", "install", "configure", "config", "golang", "python", "kotlin", "java", "javascript", "typescript", "node", "react", "cli",
+			"android", "jetpack", "rust", "abortcontroller", "docker", "buildkit", "kubernetes", "git", "sqlite", "postgresql", "github", "opentelemetry", "grpc", "gradle", "wasi", "webassembly",
+		) || containsPhrase(text, "swift actor"),
+		Research: containsAnyWord(text,
+			"doi", "paper", "papers", "journal", "citation", "citations", "research", "study", "studies", "preprint", "peer-reviewed",
+			"dataset", "datasets", "experiment", "experiments", "methodology", "benchmark", "benchmarks", "uncertainty",
+			"meta-analysis", "meta-analyses",
+		) || containsPhrase(text,
+			"systematic review", "meta analysis", "peer reviewed", "evidence links", "evidence supports", "evidence connects", "how accurately",
+		) || hasCategory(q.Categories, "science", "research"),
+		Knowledge: containsPhrase(text, "who is", "who was", "what is", "what was", "define ", "meaning of", "history of", "biography of"),
 	}
-	if strings.TrimSpace(q.TimeRange) != "" || containsAnyWord(text, "latest", "recent", "news", "today", "current") || yearPattern.MatchString(text) {
+	profile.Explore = strings.EqualFold(strings.TrimSpace(q.SearchDepth), "advanced") &&
+		!profile.Fresh && !profile.Developer && !profile.Research && !profile.Knowledge
+	return profile
+}
+
+// ClassifyIntents returns stable order independent of map iteration. Strong
+// specialty intents suppress the broad knowledge/exploration lanes so an
+// advanced technical, fresh, or research request is not diluted by Wikipedia.
+func ClassifyIntents(q search.Query) []Intent {
+	profile := ProfileQuery(q)
+	intents := []Intent{IntentGeneral}
+	if profile.Fresh {
 		intents = append(intents, IntentFresh)
 	}
-	if containsAnyWord(text,
-		"api", "sdk", "docs", "documentation", "error", "install", "configure", "config", "golang", "python", "kotlin", "java", "javascript", "typescript", "node", "react", "cli",
-		"android", "jetpack", "rust", "abortcontroller", "docker", "buildkit", "kubernetes", "git", "sqlite", "postgresql", "github", "opentelemetry", "grpc", "gradle", "wasi", "webassembly",
-	) || containsPhrase(text, "swift actor") {
+	if profile.Developer {
 		intents = append(intents, IntentDeveloper)
 	}
-	if containsAnyWord(text,
-		"doi", "paper", "papers", "journal", "citation", "citations", "research", "study", "studies", "preprint", "peer-reviewed",
-		"dataset", "datasets", "experiment", "experiments", "methodology", "benchmark", "benchmarks", "uncertainty",
-		"meta-analysis", "meta-analyses",
-	) || containsPhrase(text,
-		"systematic review", "meta analysis", "peer reviewed", "evidence links", "evidence supports", "evidence connects", "how accurately",
-	) || hasCategory(q.Categories, "science", "research") {
+	if profile.Research {
 		intents = append(intents, IntentResearch)
 	}
-	if containsPhrase(text, "who is", "who was", "what is", "what was", "define ", "meaning of", "history of", "biography of") {
+	if profile.Knowledge && !profile.Fresh && !profile.Developer && !profile.Research {
 		intents = append(intents, IntentKnowledge)
+	}
+	if profile.Explore {
+		intents = append(intents, IntentExplore)
 	}
 	return intents
 }
@@ -394,7 +424,7 @@ func validateSourceRef(pack string, ref SourceRef) error {
 	}
 	for _, variant := range ref.Variants {
 		switch variant {
-		case "original", "exact", "freshness", "docs":
+		case "original", "exact", "freshness", "docs", "concept":
 		default:
 			return fmt.Errorf("discovery: pack %q has invalid variant %q", pack, variant)
 		}

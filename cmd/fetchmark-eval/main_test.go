@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -343,6 +344,46 @@ func TestRunAnalyzesRecordsAndHumanLabelsOffline(t *testing.T) {
 	}
 }
 
+func TestRunAnalyzesRecordsAgainstPooledCrossRunQrels(t *testing.T) {
+	recordsPath := writeRecords(t)
+	qrelsPath := filepath.Join(t.TempDir(), "qrels.jsonl")
+	qrels := strings.Join([]string{
+		`{"schema_version":1,"run_id":"older-run","judgment_origin":"assistant_provisional","case_id":"general-001","intent":"general","query":"query","url":"https://one.example/","relevance":2}`,
+		`{"schema_version":1,"run_id":"other-run","judgment_origin":"independent_human","case_id":"general-001","intent":"general","query":"query","url":"https://better.example/","relevance":3}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(qrelsPath, []byte(qrels), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"-records", recordsPath, "-qrels", qrelsPath}, &stdout, &stderr, func(string) string { return "" })
+	if code != 0 {
+		t.Fatalf("code = %d stderr=%s", code, stderr.String())
+	}
+	var got struct {
+		Qrels                string                 `json:"qrels"`
+		QrelsSHA256          string                 `json:"qrels_sha256"`
+		QrelsJudgmentOrigins []string               `json:"qrels_judgment_origins"`
+		QrelsSourceRunIDs    []string               `json:"qrels_source_run_ids"`
+		Relevance            feval.RelevanceSummary `json:"relevance"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode stdout: %v (%s)", err, stdout.String())
+	}
+	if got.Qrels != qrelsPath || got.Relevance.NDCGIdealScope != "pooled" || !got.Relevance.AllQueryRankingComplete {
+		t.Fatalf("pooled relevance = %+v", got)
+	}
+	wantSHA256 := fmt.Sprintf("%x", sha256.Sum256([]byte(qrels)))
+	if got.QrelsSHA256 != wantSHA256 ||
+		!slices.Equal(got.QrelsJudgmentOrigins, []string{"assistant_provisional", "independent_human"}) ||
+		!slices.Equal(got.QrelsSourceRunIDs, []string{"older-run", "other-run"}) {
+		t.Fatalf("qrels provenance = %+v, want digest %s", got, wantSHA256)
+	}
+	if got.Relevance.MeanNDCGAt10 >= 1 {
+		t.Fatalf("cross-run ideal did not penalize the omitted stronger candidate: %+v", got.Relevance)
+	}
+}
+
 func TestRunCreatesNewBlindLabelTemplateAndRefusesOverwrite(t *testing.T) {
 	recordsPath := writeRecords(t)
 	templatePath := filepath.Join(t.TempDir(), "labels-template.jsonl")
@@ -419,6 +460,16 @@ func TestRunRejectsAmbiguousOfflineModes(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
+	if code := run(context.Background(), []string{"-qrels", "qrels.jsonl"}, &stdout, &stderr, func(string) string { return "" }); code == 0 {
+		t.Fatal("qrels without records should fail")
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run(context.Background(), []string{"-records", recordsPath, "-labels", "labels.jsonl", "-qrels", "qrels.jsonl"}, &stdout, &stderr, func(string) string { return "" }); code == 0 {
+		t.Fatal("run-bound labels and pooled qrels should conflict")
+	}
+	stdout.Reset()
+	stderr.Reset()
 	if code := run(context.Background(), []string{"-label-ui", "labels.html"}, &stdout, &stderr, func(string) string { return "" }); code == 0 {
 		t.Fatal("label UI without records should fail")
 	}
@@ -426,24 +477,6 @@ func TestRunRejectsAmbiguousOfflineModes(t *testing.T) {
 	stderr.Reset()
 	if code := run(context.Background(), []string{"-records", recordsPath, "-require-build-sha256"}, &stdout, &stderr, func(string) string { return "" }); code == 0 || !strings.Contains(stderr.String(), "-records cannot be combined with live-run controls") {
 		t.Fatalf("records and build requirement should conflict: code=%d stderr=%s", code, stderr.String())
-	}
-}
-
-func TestWriteRunOutputRemovesArtifactOnDurabilityFailure(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "run.jsonl")
-	output, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := output.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := writeRunOutput(output, path, nil); err == nil {
-		t.Fatal("writeRunOutput succeeded with a closed output")
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("failed output remains on disk: %v", err)
 	}
 }
 

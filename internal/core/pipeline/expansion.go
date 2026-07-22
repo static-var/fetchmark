@@ -336,21 +336,19 @@ func (p *Pipeline) basicLanes(base search.Query) ([]discoveryLane, error) {
 	if err != nil {
 		return nil, err
 	}
-	hasOriginal := false
+	preferences := basicQueryVariants(base)
+	hasPlannedLane := false
 	for _, source := range sources {
-		if source.Searcher != nil && sourceAllowsVariant(source, "original") {
-			hasOriginal = true
+		if source.Searcher == nil {
+			continue
+		}
+		if _, _, ok := bestBasicVariant(source, preferences); ok {
+			hasPlannedLane = true
 			break
 		}
 	}
-	if !hasOriginal && p.Searcher != nil {
-		// Packs may intentionally contain only advanced variants such as docs or
-		// freshness. Basic search still needs one unchanged request, so fall back
-		// to the operator-selected primary without changing the advanced plan.
-		fallback := DiscoverySource{
-			ID: "primary", ProviderID: "primary", Searcher: p.Searcher,
-			Weight: 1, Variants: []string{"original"},
-		}
+	if !hasPlannedLane && p.Searcher != nil {
+		fallback := DiscoverySource{ID: "primary", ProviderID: "primary", Searcher: p.Searcher, Weight: 1, Variants: []string{"original"}}
 		if planner, ok := p.DiscoveryPlanner.(interface{ PrimarySource() discovery.Source }); ok {
 			fallback = planner.PrimarySource()
 			fallback.Variants = []string{"original"}
@@ -366,10 +364,15 @@ func (p *Pipeline) basicLanes(base search.Query) ([]discoveryLane, error) {
 			Weight: 1, Variants: []string{"original"},
 		})
 	}
-	lanes := make([]discoveryLane, 0, len(sources))
-	seenProviders := make(map[string]struct{}, len(sources))
+	type basicSelection struct {
+		source   DiscoverySource
+		variant  queryVariant
+		priority int
+	}
+	selections := make([]basicSelection, 0, len(sources))
+	providerPositions := make(map[string]int, len(sources))
 	for _, source := range sources {
-		if source.Searcher == nil || !sourceAllowsVariant(source, "original") {
+		if source.Searcher == nil {
 			continue
 		}
 		provider := source.ProviderID
@@ -377,22 +380,73 @@ func (p *Pipeline) basicLanes(base search.Query) ([]discoveryLane, error) {
 			provider = source.ID
 		}
 		provider = normalizeDiscoverySource(provider)
-		if _, duplicate := seenProviders[provider]; duplicate {
+		priority, variant, ok := bestBasicVariant(source, preferences)
+		if !ok {
 			continue
 		}
-		seenProviders[provider] = struct{}{}
-		query := applySourceControls(base, source)
-		weight := source.Weight
+		if position, exists := providerPositions[provider]; exists {
+			if priority < selections[position].priority {
+				selections[position] = basicSelection{source: source, variant: variant, priority: priority}
+			}
+			continue
+		}
+		providerPositions[provider] = len(selections)
+		selections = append(selections, basicSelection{source: source, variant: variant, priority: priority})
+	}
+	lanes := make([]discoveryLane, 0, len(selections))
+	for _, selection := range selections {
+		query := applySourceControls(selection.variant.query, selection.source)
+		weight := selection.source.Weight * selection.variant.weight
 		if weight <= 0 {
 			weight = 1
 		}
 		lanes = append(lanes, discoveryLane{
-			provider: provenanceProvider(source), lane: provenanceLane(source),
-			variant: "original", weight: weight,
-			query: query, searcher: source.Searcher, timeout: source.Timeout,
+			provider: provenanceProvider(selection.source), lane: provenanceLane(selection.source),
+			variant: selection.variant.label, weight: weight,
+			query: query, searcher: selection.source.Searcher, timeout: selection.source.Timeout,
 		})
 	}
 	return lanes, nil
+}
+
+// basicQueryVariants keeps basic search to one lane per provider, while still
+// allowing the best matching specialty pack to use its deterministic query
+// projection. Explicit engine selection stays pinned to the unchanged query.
+func basicQueryVariants(base search.Query) []queryVariant {
+	original := queryVariant{label: "original", weight: 1, query: base}
+	if len(base.Engines) > 0 || base.ExactMatch {
+		return []queryVariant{original}
+	}
+	profile := discovery.ProfileQuery(base)
+	variants := make([]queryVariant, 0, 3)
+	if profile.Fresh {
+		q := base
+		q.Q = freshnessVariant(base.Q)
+		variants = append(variants, queryVariant{label: "freshness", weight: 1, query: q})
+	}
+	if profile.Developer {
+		q := base
+		q.Q = docsVariant(base.Q)
+		variants = append(variants, queryVariant{label: "docs", weight: 1, query: q})
+	}
+	return append(variants, original)
+}
+
+func bestBasicVariant(source DiscoverySource, preferences []queryVariant) (int, queryVariant, bool) {
+	for priority, variant := range preferences {
+		if variant.label == "original" {
+			if sourceAllowsVariant(source, variant.label) {
+				return priority, variant, true
+			}
+			continue
+		}
+		// Undeclared variant lists preserve the historical original-only basic
+		// behavior. Specialty projections require an explicit pack contract.
+		if len(source.Variants) > 0 && sourceAllowsVariant(source, variant.label) {
+			return priority, variant, true
+		}
+	}
+	return 0, queryVariant{}, false
 }
 
 func (p *Pipeline) plannedSources(base search.Query) ([]DiscoverySource, error) {
@@ -478,6 +532,9 @@ func applySourceControls(query search.Query, source DiscoverySource) search.Quer
 }
 
 func sourceAllowsVariant(source DiscoverySource, variant string) bool {
+	if variant == "concept" && len(source.Variants) == 0 {
+		return false
+	}
 	if len(source.Variants) == 0 {
 		return true
 	}
@@ -624,7 +681,7 @@ func normalizeDiscoverySource(source string) string {
 
 func normalizeDiscoveryVariant(variant string) string {
 	switch variant {
-	case "original", "exact", "freshness", "docs":
+	case "original", "exact", "freshness", "docs", "concept":
 		return variant
 	default:
 		return "other"
@@ -712,7 +769,10 @@ func isAdvancedSearchDepth(depth string) bool {
 }
 
 func advancedQueryVariants(base search.Query) []queryVariant {
-	variants := make([]queryVariant, 0, 4)
+	if base.ExactMatch {
+		return []queryVariant{{label: "original", weight: 1, query: base}}
+	}
+	variants := make([]queryVariant, 0, 5)
 	seen := map[string]struct{}{}
 	add := func(label string, q search.Query) {
 		q.Q = strings.Join(strings.Fields(q.Q), " ")
@@ -733,12 +793,16 @@ func advancedQueryVariants(base search.Query) []queryVariant {
 		q.ExactMatch = true
 		add("exact", q)
 	}
-	if strings.TrimSpace(base.TimeRange) != "" || isFreshnessQuery(base.Q) {
+	q := base
+	q.Q = conceptVariant(base.Q)
+	add("concept", q)
+	profile := discovery.ProfileQuery(base)
+	if profile.Fresh {
 		q := base
 		q.Q = freshnessVariant(base.Q)
 		add("freshness", q)
 	}
-	if isDeveloperDocsQuery(base.Q) {
+	if profile.Developer {
 		q := base
 		q.Q = docsVariant(base.Q)
 		add("docs", q)
@@ -750,16 +814,34 @@ func queryTerms(q string) []string {
 	return strings.Fields(strings.TrimSpace(q))
 }
 
-var yearTokenPattern = regexp.MustCompile(`\b20[0-9]{2}\b`)
+var conceptTokenPattern = regexp.MustCompile(`[A-Za-z0-9][A-Za-z0-9._+#/-]*`)
 
-func isFreshnessQuery(q string) bool {
-	lower := strings.ToLower(q)
-	for _, token := range []string{"latest", "recent", "news", "today"} {
-		if containsWord(lower, token) {
-			return true
+var conceptStopTokens = map[string]struct{}{
+	"a": {}, "an": {}, "the": {}, "how": {}, "why": {}, "what": {},
+	"which": {}, "when": {}, "where": {}, "who": {}, "do": {}, "does": {},
+	"did": {}, "are": {}, "is": {}, "was": {}, "were": {}, "be": {},
+	"been": {}, "being": {}, "can": {}, "could": {}, "should": {}, "would": {},
+	"have": {}, "has": {}, "had": {}, "i": {}, "we": {}, "you": {},
+	"it": {}, "they": {}, "this": {}, "that": {}, "these": {}, "those": {},
+	"to": {}, "into": {}, "from": {}, "of": {}, "for": {}, "with": {},
+	"without": {}, "during": {}, "across": {}, "between": {}, "among": {},
+	"over": {}, "under": {}, "through": {}, "throughout": {}, "by": {},
+	"at": {}, "on": {}, "in": {}, "and": {}, "or": {}, "but": {},
+	"so": {}, "than": {}, "then": {}, "instead": {}, "while": {},
+}
+
+func conceptVariant(q string) string {
+	tokens := conceptTokenPattern.FindAllString(q, -1)
+	concepts := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		if _, remove := conceptStopTokens[strings.ToLower(token)]; !remove {
+			concepts = append(concepts, token)
 		}
 	}
-	return yearTokenPattern.MatchString(lower)
+	if len(concepts) < 2 {
+		return q
+	}
+	return strings.Join(concepts, " ")
 }
 
 func freshnessVariant(q string) string {
@@ -772,20 +854,6 @@ func freshnessVariant(q string) string {
 	default:
 		return q + " recent updates"
 	}
-}
-
-func isDeveloperDocsQuery(q string) bool {
-	lower := strings.ToLower(q)
-	for _, token := range []string{
-		"api", "sdk", "docs", "documentation", "error", "install", "configure",
-		"config", "golang", "python", "kotlin", "java", "javascript",
-		"typescript", "node", "react", "cli",
-	} {
-		if containsWord(lower, token) {
-			return true
-		}
-	}
-	return false
 }
 
 func docsVariant(q string) string {
