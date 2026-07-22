@@ -292,7 +292,7 @@ func ProfileQuery(q search.Query) QueryProfile {
 	profile := QueryProfile{
 		Fresh: strings.TrimSpace(q.TimeRange) != "" ||
 			containsAnyWord(text, "latest", "recent", "new", "news", "today", "current") ||
-			containsPhrase(text, "this week", "this month") || yearPattern.MatchString(text),
+			freshnessPhrasePattern.MatchString(text) || yearPattern.MatchString(text),
 		Developer: containsAnyWord(text,
 			"api", "sdk", "docs", "documentation", "error", "install", "configure", "config", "golang", "python", "kotlin", "java", "javascript", "typescript", "node", "react", "cli",
 			"android", "jetpack", "rust", "abortcontroller", "docker", "buildkit", "kubernetes", "git", "sqlite", "postgresql", "github", "opentelemetry", "grpc", "gradle", "wasi", "webassembly",
@@ -336,7 +336,10 @@ func ClassifyIntents(q search.Query) []Intent {
 	return intents
 }
 
-var yearPattern = regexp.MustCompile(`\b20[0-9]{2}\b`)
+var (
+	yearPattern            = regexp.MustCompile(`\b20[0-9]{2}\b`)
+	freshnessPhrasePattern = regexp.MustCompile(`\bthis (?:week|month)\b`)
+)
 
 func containsAnyWord(text string, words ...string) bool {
 	fields := strings.FieldsFunc(text, func(r rune) bool {

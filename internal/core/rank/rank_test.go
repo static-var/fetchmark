@@ -85,14 +85,17 @@ func TestRankerPenalizesSocialResultsForFreshnessQueries(t *testing.T) {
 }
 
 func TestRankerDoesNotTreatFreshnessSubstringsAsFreshnessQueries(t *testing.T) {
-	results := []model.SearchResult{
-		{URL: "https://x.com/energy/status/123", Title: "Renewable energy trends", Snippet: "renewable energy trends"},
-		{URL: "https://example.org/renewable-energy-trends", Title: "Renewable energy trends", Snippet: "renewable energy trends"},
-	}
-
-	r := New().Score("renewable energy trends", results)
-	if r[0].URL != "https://x.com/energy/status/123" {
-		t.Fatalf("renewable should not trigger freshness penalties; got %q first", r[0].URL)
+	for _, query := range []string{"renewable energy trends", "this weekend hiking routes"} {
+		t.Run(query, func(t *testing.T) {
+			results := []model.SearchResult{
+				{URL: "https://x.com/hiking/status/123", Title: query, Snippet: query},
+				{URL: "https://example.org/hiking-routes", Title: query, Snippet: query},
+			}
+			r := New().Score(query, results)
+			if r[0].URL != "https://x.com/hiking/status/123" {
+				t.Fatalf("freshness substring should not trigger penalties; got %q first", r[0].URL)
+			}
+		})
 	}
 }
 

@@ -31,6 +31,7 @@ func TestClassifyIntents(t *testing.T) {
 		{name: "new marker", q: search.Query{Q: "new bird flu guidance"}, want: []Intent{IntentGeneral, IntentFresh}},
 		{name: "this week marker", q: search.Query{Q: "bird flu this week"}, want: []Intent{IntentGeneral, IntentFresh}},
 		{name: "this month marker", q: search.Query{Q: "bird flu this month"}, want: []Intent{IntentGeneral, IntentFresh}},
+		{name: "phrase prefix is not fresh", q: search.Query{Q: "this weekend hiking routes"}, want: []Intent{IntentGeneral}},
 		{name: "category research", q: search.Query{Q: "graph neural networks", Categories: []string{"science"}}, want: []Intent{IntentGeneral, IntentResearch}},
 	}
 	for _, tt := range tests {

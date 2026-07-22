@@ -49,6 +49,15 @@ func TestRelevanceControlsPreserveEveryTextFreshnessMarker(t *testing.T) {
 	}
 }
 
+func TestRelevanceControlsRejectFreshnessPhrasePrefixes(t *testing.T) {
+	recorder := &relevanceControlRecorder{}
+	p := &Pipeline{Ranker: recorder}
+	p.process(context.Background(), Options{}, nil, "this weekend hiking routes")
+	if recorder.legacyCall || recorder.controls.Fresh {
+		t.Fatalf("ranker call legacy=%v controls=%+v query=%q", recorder.legacyCall, recorder.controls, recorder.query)
+	}
+}
+
 func TestRelevanceControlsRankRecentArticleFirstForTimeRange(t *testing.T) {
 	now := time.Now().UTC()
 	recent := now.Add(-24 * time.Hour)

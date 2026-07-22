@@ -20,7 +20,10 @@ import (
 	"github.com/staticvar/fetchmark/internal/core/model"
 )
 
-var twentyXXYearPattern = regexp.MustCompile(`\b20[0-9]{2}\b`)
+var (
+	twentyXXYearPattern    = regexp.MustCompile(`\b20[0-9]{2}\b`)
+	freshnessPhrasePattern = regexp.MustCompile(`\bthis (?:week|month)\b`)
+)
 
 // BM25 parameters (Okapi defaults).
 const (
@@ -411,11 +414,8 @@ func hasRecentPublishedAt(r model.SearchResult, now time.Time) bool {
 
 func isFreshnessQuery(query string) bool {
 	q := strings.ToLower(query)
-	phraseMarkers := []string{"this week", "this month"}
-	for _, marker := range phraseMarkers {
-		if strings.Contains(q, marker) {
-			return true
-		}
+	if freshnessPhrasePattern.MatchString(q) {
+		return true
 	}
 
 	tokens := tokenize(query)
