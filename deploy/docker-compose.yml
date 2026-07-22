@@ -91,7 +91,7 @@ services:
       # unset to disable. FM_RENDERER_AUTO turns on automatic retry
       # whenever the extractor flags a page as js_required.
       FM_RENDERER_URL: "${FM_RENDERER_URL:-http://scrapling:8080/v1/render}"
-      FM_RENDERER_AUTO: "${FM_RENDERER_AUTO:-true}"
+      FM_RENDERER_AUTO: "${FM_RENDERER_AUTO:-false}"
       FM_RENDERER_TIMEOUT: "${FM_RENDERER_TIMEOUT:-20s}"
       FM_RENDERER_MAX_BODY: "${FM_RENDERER_MAX_BODY:-10485760}"
       FM_RENDERER_TOKEN: "${FM_RENDERER_TOKEN:-}"
@@ -201,6 +201,9 @@ services:
       SCRAPLING_MAX_PAGES: "${SCRAPLING_MAX_PAGES:-4}"
       SCRAPLING_DISCOVERY_PAGES: "${SCRAPLING_DISCOVERY_PAGES:-2}"
       SCRAPLING_REQUEST_CONCURRENCY: "${SCRAPLING_REQUEST_CONCURRENCY:-8}"
+      # Finish before Fetchmark's default 20-second renderer deadline so a
+      # disconnected caller cannot leave work occupying the browser queue.
+      SCRAPLING_RENDER_TIMEOUT_SECONDS: "${SCRAPLING_RENDER_TIMEOUT_SECONDS:-19}"
       SCRAPLING_EGRESS_PROXY_URL: "http://fetchmark:8081"
     expose:
       - "8080"

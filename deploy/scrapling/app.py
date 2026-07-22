@@ -11,7 +11,7 @@ import os
 import re
 import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -560,8 +560,11 @@ def _report_parser_error(engine: str, reason: str, raw_page_url: object, candida
 class BrowserWorker:
     """Owns one asynchronous Playwright session on a dedicated event-loop thread."""
 
-    def __init__(self, browser_factory: Callable[[], ScraplingBrowser]):
+    def __init__(self, browser_factory: Callable[[], ScraplingBrowser], render_timeout_seconds: float = 19.0):
+        if render_timeout_seconds <= 0:
+            raise ValueError("render timeout must be positive")
         self._browser_factory = browser_factory
+        self._render_timeout_seconds = render_timeout_seconds
         self._ready = threading.Event()
         self._startup_error: BaseException | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -591,7 +594,11 @@ class BrowserWorker:
         if self._loop is None or self._browser is None:
             raise RuntimeError("Scrapling browser is not ready")
         future = asyncio.run_coroutine_threadsafe(self._browser.render_url(url), self._loop)
-        return future.result()
+        try:
+            return future.result(timeout=self._render_timeout_seconds)
+        except FutureTimeoutError as error:
+            future.cancel()
+            raise TimeoutError("Scrapling render timed out") from error
 
     def _run(self) -> None:
         loop = asyncio.new_event_loop()
@@ -735,6 +742,7 @@ def main() -> None:
     max_pages = max(2, min(int(os.environ.get("SCRAPLING_MAX_PAGES", "4")), 16))
     discovery_pages = max(1, min(int(os.environ.get("SCRAPLING_DISCOVERY_PAGES", "2")), max_pages - 1))
     request_concurrency = max(1, min(int(os.environ.get("SCRAPLING_REQUEST_CONCURRENCY", "8")), 64))
+    render_timeout_seconds = max(1.0, min(float(os.environ.get("SCRAPLING_RENDER_TIMEOUT_SECONDS", "19")), 120.0))
     egress_proxy_url = os.environ.get("SCRAPLING_EGRESS_PROXY_URL", "")
     browser_factory = lambda: ScraplingBrowser(
         profile_dir,
@@ -744,7 +752,7 @@ def main() -> None:
         discovery_pages=discovery_pages,
         egress_proxy_url=egress_proxy_url,
     )
-    with BrowserWorker(browser_factory) as browser:
+    with BrowserWorker(browser_factory, render_timeout_seconds=render_timeout_seconds) as browser:
         SidecarHandler.service = SearchService(browser.fetch_engine, max_workers=discovery_pages)
         SidecarHandler.render_url = browser.render_url
         SidecarHandler.request_slots = threading.BoundedSemaphore(request_concurrency)

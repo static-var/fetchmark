@@ -153,7 +153,8 @@ func (p *Pipeline) executeDiscoveryPlan(ctx context.Context, lanes []discoveryLa
 
 	primaryOutcomes := executeDiscoveryLanes(ctx, primaryLanes, concurrency)
 	primaryCandidates, primaryErr := collectLaneOutcomes(ctx, primaryOutcomes, candidateCap)
-	if primaryErr == nil && primaryCandidatesRelevant(query, primaryCandidates) {
+	primaryFillsWindow := candidateCap <= 0 || len(primaryCandidates.hits) >= candidateCap
+	if primaryErr == nil && primaryFillsWindow && primaryCandidatesRelevant(query, primaryCandidates) {
 		return primaryCandidates, nil
 	}
 	secondaryOutcomes := executeDiscoveryLanes(ctx, secondaryLanes, concurrency)

@@ -169,11 +169,43 @@ func TestBasicSearchSkipsSecondaryProvidersWhenPrimaryHasRelevantResults(t *test
 		AdvancedSearchConcurrency: 2,
 	}
 
-	candidates, err := p.searchCandidateSet(context.Background(), Options{Query: "Go concurrency patterns"}, 10)
+	candidates, err := p.searchCandidateSet(context.Background(), Options{Query: "Go concurrency patterns"}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if secondaryCalls.Load() != 0 || len(candidates.hits) != 1 || len(candidates.lanes) != 1 || candidates.lanes[0].Provider != "scrapling" {
+		t.Fatalf("candidates=%+v secondary_calls=%d", candidates, secondaryCalls.Load())
+	}
+}
+
+func TestBasicSearchUsesSecondaryProvidersWhenPrimaryUnderfillsCandidateWindow(t *testing.T) {
+	var secondaryCalls atomic.Int32
+	primary := expansionSearchFunc(func(context.Context, search.Query) ([]search.Hit, error) {
+		return []search.Hit{{
+			URL: "https://go.dev/doc/", Title: "Go concurrency patterns", Snippet: "Goroutines and channels",
+		}}, nil
+	})
+	secondary := expansionSearchFunc(func(context.Context, search.Query) ([]search.Hit, error) {
+		secondaryCalls.Add(1)
+		return []search.Hit{{URL: "https://secondary.example/result", Title: "More Go concurrency patterns"}}, nil
+	})
+	primarySource := discovery.Source{ID: "scrapling-general", ProviderID: "scrapling", ProviderKind: "scrapling", Searcher: primary, Variants: []string{"original"}}
+	p := &Pipeline{
+		DiscoveryPlanner: primaryExpansionPlanner{
+			primary: primarySource,
+			sources: []discovery.Source{
+				primarySource,
+				{ID: "searxng-open", ProviderID: "searxng", ProviderKind: "searxng", Searcher: secondary, Variants: []string{"original"}},
+			},
+		},
+		AdvancedSearchConcurrency: 2,
+	}
+
+	candidates, err := p.searchCandidateSet(context.Background(), Options{Query: "Go concurrency patterns"}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondaryCalls.Load() != 1 || len(candidates.hits) != 2 || len(candidates.lanes) != 2 {
 		t.Fatalf("candidates=%+v secondary_calls=%d", candidates, secondaryCalls.Load())
 	}
 }

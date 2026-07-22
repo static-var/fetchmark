@@ -37,3 +37,13 @@ func TestComposeFilesExposeEveryRuntimeVariable(t *testing.T) {
 		}
 	}
 }
+
+func TestComposeKeepsAutomaticBrowserRenderingOptIn(t *testing.T) {
+	body, err := os.ReadFile("../../deploy/docker-compose.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `FM_RENDERER_AUTO: "${FM_RENDERER_AUTO:-false}"`) {
+		t.Fatal("docker-compose.yml must default FM_RENDERER_AUTO to false")
+	}
+}

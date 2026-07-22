@@ -48,6 +48,31 @@ func TestOpenSearchRoutesTopicsAndRanksLatestStableRelease(t *testing.T) {
 	}
 }
 
+func TestSearchBatchStopsServingSnapshotAfterFreshnessWindow(t *testing.T) {
+	now := time.Date(2026, 7, 20, 0, 0, 0, 0, time.UTC)
+	maxAge := 2 * time.Hour
+	path := writeSnapshot(t, makeSnapshot(now, "https://updates.example/feed.xml", []string{"example"}, []map[string]any{
+		feedDocument(now, "https://updates.example/item", "Example update", "Relevant summary.", now.Add(-time.Hour)),
+	}))
+	index, err := Open(Options{Path: path, Now: now, MaxSnapshotAge: maxAge})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = index.Close() })
+	index.now = func() time.Time { return now.Add(maxAge + time.Minute) }
+
+	batch, err := index.SearchBatch(context.Background(), search.Query{Q: "latest example update", MaxResults: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if batch.Status != search.BatchDegradedEmpty || len(batch.Hits) != 0 {
+		t.Fatalf("expired batch = %#v", batch)
+	}
+	if len(batch.Diagnostics) != 1 || batch.Diagnostics[0].Reason != "snapshot_expired" {
+		t.Fatalf("expired diagnostics = %#v", batch.Diagnostics)
+	}
+}
+
 func TestOpenFailsClosedOnUnsafeOrUnprovenSnapshot(t *testing.T) {
 	now := time.Date(2026, 7, 20, 0, 0, 0, 0, time.UTC)
 	tests := map[string]func(map[string]any){
