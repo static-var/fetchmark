@@ -478,9 +478,11 @@ docker compose -f deploy/docker-compose.yml up --build
 
 The profile lives in the `scrapling-profile` volume and is never borrowed from a
 desktop browser. SearXNG and the open provider packs remain secondary: they run
-when Scrapling is empty, degraded, or has no result that passes Fetchmark's
-deterministic lexical confidence policy. Explicit engine controls still route
-through SearXNG because only that adapter can preserve its engine contract.
+when Scrapling is empty, degraded, has no result that passes Fetchmark's
+deterministic lexical confidence policy, or cannot fill the caller's requested
+result window. The internal ranking headroom does not by itself disclose a
+query to secondary providers. Explicit engine controls still route through
+SearXNG because only that adapter can preserve its engine contract.
 
 `POST /v1/search` accepts only compiled-in search engines. `POST /v1/render`
 accepts destination URLs only through Fetchmark's renderer path and forces all

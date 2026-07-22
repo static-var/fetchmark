@@ -47,3 +47,26 @@ func TestComposeKeepsAutomaticBrowserRenderingOptIn(t *testing.T) {
 		t.Fatal("docker-compose.yml must default FM_RENDERER_AUTO to false")
 	}
 }
+
+func TestComposeDocumentsCoupledRendererDeadlines(t *testing.T) {
+	compose, err := os.ReadFile("../../deploy/docker-compose.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	environment, err := os.ReadFile("../../.env.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"FM_RENDERER_TIMEOUT=20s",
+		"SCRAPLING_RENDER_TIMEOUT_SECONDS=19",
+		"Change both renderer deadlines together",
+	} {
+		if !strings.Contains(string(environment), required) {
+			t.Fatalf(".env.example missing %q", required)
+		}
+	}
+	if !strings.Contains(string(compose), "must remain below FM_RENDERER_TIMEOUT") {
+		t.Fatal("docker-compose.yml must document the sidecar timeout relationship")
+	}
+}

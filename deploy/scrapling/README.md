@@ -20,7 +20,9 @@ the target origin. When enabled, Fetchmark calls this fallback when ordinary
 extraction reports `js_required` or returns metadata without a usable body;
 plain extracted text is returned as valid Markdown without invoking the
 browser again. The sidecar cancels renders after 19 seconds by default, just
-inside Fetchmark's default 20-second renderer deadline.
+inside Fetchmark's default 20-second renderer deadline. Operators changing
+`FM_RENDERER_TIMEOUT` must also set `SCRAPLING_RENDER_TIMEOUT_SECONDS` to a
+slightly smaller value so the sidecar cancels work before Fetchmark disconnects.
 Challenge pages are reported as degraded diagnostics rather than empty success.
 Zero parsed anchors are also degraded because selector drift is not proof of an
 authoritative empty result set. Parser drift additionally returns a bounded,

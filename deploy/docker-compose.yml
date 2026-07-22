@@ -201,8 +201,8 @@ services:
       SCRAPLING_MAX_PAGES: "${SCRAPLING_MAX_PAGES:-4}"
       SCRAPLING_DISCOVERY_PAGES: "${SCRAPLING_DISCOVERY_PAGES:-2}"
       SCRAPLING_REQUEST_CONCURRENCY: "${SCRAPLING_REQUEST_CONCURRENCY:-8}"
-      # Finish before Fetchmark's default 20-second renderer deadline so a
-      # disconnected caller cannot leave work occupying the browser queue.
+      # This must remain below FM_RENDERER_TIMEOUT so abandoned work is
+      # cancelled before Fetchmark disconnects. Change both values together.
       SCRAPLING_RENDER_TIMEOUT_SECONDS: "${SCRAPLING_RENDER_TIMEOUT_SECONDS:-19}"
       SCRAPLING_EGRESS_PROXY_URL: "http://fetchmark:8081"
     expose:

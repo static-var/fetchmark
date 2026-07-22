@@ -12,10 +12,12 @@ import (
 	"testing"
 	"time"
 
+	dto "github.com/prometheus/client_model/go"
 	"github.com/staticvar/fetchmark/internal/adapters/cache"
 	"github.com/staticvar/fetchmark/internal/core/discovery"
 	"github.com/staticvar/fetchmark/internal/core/model"
 	"github.com/staticvar/fetchmark/internal/core/search"
+	"github.com/staticvar/fetchmark/internal/obs"
 )
 
 type recordingExpansionSearcher struct {
@@ -210,6 +212,67 @@ func TestBasicSearchUsesSecondaryProvidersWhenPrimaryUnderfillsCandidateWindow(t
 	}
 }
 
+func TestBasicSearchObservesUnderfilledPrimaryLaneOnce(t *testing.T) {
+	const laneID = "scrapling-underfill-observation"
+	primaryCounter := obs.DiscoveryLaneTotal.WithLabelValues("scrapling", laneID, "original", string(search.BatchHealthy))
+	before := metricCounterValue(t, primaryCounter)
+	primary := expansionSearchFunc(func(context.Context, search.Query) ([]search.Hit, error) {
+		return []search.Hit{{URL: "https://go.dev/doc/", Title: "Go concurrency patterns"}}, nil
+	})
+	secondary := expansionSearchFunc(func(context.Context, search.Query) ([]search.Hit, error) {
+		return []search.Hit{{URL: "https://secondary.example/result", Title: "More Go concurrency patterns"}}, nil
+	})
+	primarySource := discovery.Source{ID: laneID, ProviderID: "scrapling", ProviderKind: "scrapling", Searcher: primary, Variants: []string{"original"}}
+	p := &Pipeline{DiscoveryPlanner: primaryExpansionPlanner{
+		primary: primarySource,
+		sources: []discovery.Source{
+			primarySource,
+			{ID: "searxng-observation", ProviderID: "searxng", ProviderKind: "searxng", Searcher: secondary, Variants: []string{"original"}},
+		},
+	}}
+
+	if _, err := p.searchCandidateSet(context.Background(), Options{Query: "Go concurrency patterns", MaxResults: 2}, 2); err != nil {
+		t.Fatal(err)
+	}
+	if delta := metricCounterValue(t, primaryCounter) - before; delta != 1 {
+		t.Fatalf("primary lane observation delta = %v, want 1", delta)
+	}
+}
+
+func TestBasicSearchDoesNotExposeDefaultQueryForCandidateHeadroom(t *testing.T) {
+	var secondaryCalls atomic.Int32
+	primary := expansionSearchFunc(func(context.Context, search.Query) ([]search.Hit, error) {
+		hits := make([]search.Hit, 20)
+		for i := range hits {
+			hits[i] = search.Hit{URL: fmt.Sprintf("https://go.dev/doc/%d", i), Title: "Go concurrency patterns"}
+		}
+		return hits, nil
+	})
+	secondary := expansionSearchFunc(func(context.Context, search.Query) ([]search.Hit, error) {
+		secondaryCalls.Add(1)
+		return []search.Hit{{URL: "https://secondary.example/result"}}, nil
+	})
+	primarySource := discovery.Source{
+		ID: "scrapling-general", ProviderID: "scrapling", ProviderKind: "scrapling", Searcher: primary,
+		Variants: []string{"original"}, MaxResults: 20,
+	}
+	p := &Pipeline{DiscoveryPlanner: primaryExpansionPlanner{
+		primary: primarySource,
+		sources: []discovery.Source{
+			primarySource,
+			{ID: "searxng-open", ProviderID: "searxng", ProviderKind: "searxng", Searcher: secondary, Variants: []string{"original"}},
+		},
+	}}
+
+	candidates, err := p.searchCandidateSet(context.Background(), Options{Query: "Go concurrency patterns", MaxResults: 10}, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondaryCalls.Load() != 0 || len(candidates.hits) != 20 {
+		t.Fatalf("candidates=%d secondary_calls=%d", len(candidates.hits), secondaryCalls.Load())
+	}
+}
+
 func TestBasicSearchUsesSecondaryProvidersWhenPrimaryResultsAreUnrelated(t *testing.T) {
 	var secondaryCalls atomic.Int32
 	primary := expansionSearchFunc(func(context.Context, search.Query) ([]search.Hit, error) {
@@ -238,6 +301,15 @@ func TestBasicSearchUsesSecondaryProvidersWhenPrimaryResultsAreUnrelated(t *test
 	if secondaryCalls.Load() != 1 || len(candidates.hits) != 2 || len(candidates.lanes) != 2 {
 		t.Fatalf("candidates=%+v secondary_calls=%d", candidates, secondaryCalls.Load())
 	}
+}
+
+func metricCounterValue(t *testing.T, metric interface{ Write(*dto.Metric) error }) float64 {
+	t.Helper()
+	value := new(dto.Metric)
+	if err := metric.Write(value); err != nil {
+		t.Fatal(err)
+	}
+	return value.GetCounter().GetValue()
 }
 
 func TestBasicSearchFallsBackToPrimaryWhenPlannedLanesAreAdvancedOnly(t *testing.T) {
