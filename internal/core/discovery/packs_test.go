@@ -28,6 +28,9 @@ func TestClassifyIntents(t *testing.T) {
 		{name: "knowledge with ambiguous current term", q: search.Query{Q: "What is electric current?"}, want: []Intent{IntentGeneral, IntentFresh, IntentKnowledge}},
 		{name: "fresh and research", q: search.Query{Q: "latest climate research papers 2026"}, want: []Intent{IntentGeneral, IntentFresh, IntentResearch}},
 		{name: "explicit time range", q: search.Query{Q: "bird flu", TimeRange: "day"}, want: []Intent{IntentGeneral, IntentFresh}},
+		{name: "new marker", q: search.Query{Q: "new bird flu guidance"}, want: []Intent{IntentGeneral, IntentFresh}},
+		{name: "this week marker", q: search.Query{Q: "bird flu this week"}, want: []Intent{IntentGeneral, IntentFresh}},
+		{name: "this month marker", q: search.Query{Q: "bird flu this month"}, want: []Intent{IntentGeneral, IntentFresh}},
 		{name: "category research", q: search.Query{Q: "graph neural networks", Categories: []string{"science"}}, want: []Intent{IntentGeneral, IntentResearch}},
 	}
 	for _, tt := range tests {

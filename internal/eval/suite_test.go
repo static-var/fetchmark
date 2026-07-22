@@ -66,9 +66,10 @@ func TestLoadSuiteRejectsDuplicateAndInvalidCases(t *testing.T) {
 	tests := map[string]string{
 		"duplicate id": `{"id":"general-001","intent":"general","query":"a","max_results":10,"search_depth":"basic"}
 {"id":"general-001","intent":"general","query":"b","max_results":10,"search_depth":"basic"}`,
-		"unknown intent": `{"id":"other-001","intent":"other","query":"a","max_results":10,"search_depth":"basic"}`,
-		"empty query":    `{"id":"general-001","intent":"general","query":" ","max_results":10,"search_depth":"basic"}`,
-		"bad depth":      `{"id":"general-001","intent":"general","query":"a","max_results":10,"search_depth":"deep"}`,
+		"unknown intent":        `{"id":"other-001","intent":"other","query":"a","max_results":10,"search_depth":"basic"}`,
+		"empty query":           `{"id":"general-001","intent":"general","query":" ","max_results":10,"search_depth":"basic"}`,
+		"query edge whitespace": `{"id":"general-001","intent":"general","query":" query ","tags":["test"],"max_results":10,"search_depth":"basic"}`,
+		"bad depth":             `{"id":"general-001","intent":"general","query":"a","max_results":10,"search_depth":"deep"}`,
 	}
 	for name, raw := range tests {
 		t.Run(name, func(t *testing.T) {

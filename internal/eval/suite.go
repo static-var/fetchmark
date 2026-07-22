@@ -134,8 +134,12 @@ func (s Suite) Validate() error {
 		if !strings.HasPrefix(c.ID, string(c.Intent)+"-") {
 			return fmt.Errorf("eval: case %q does not match intent %q", c.ID, c.Intent)
 		}
-		if strings.TrimSpace(c.Query) == "" {
+		trimmedQuery := strings.TrimSpace(c.Query)
+		if trimmedQuery == "" {
 			return fmt.Errorf("eval: case %q has empty query", c.ID)
+		}
+		if c.Query != trimmedQuery {
+			return fmt.Errorf("eval: case %q query has leading or trailing whitespace", c.ID)
 		}
 		if c.MaxResults < 1 || c.MaxResults > 50 {
 			return fmt.Errorf("eval: case %q max_results must be 1..50", c.ID)

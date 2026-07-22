@@ -2,6 +2,7 @@ package eval
 
 import (
 	"bytes"
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -198,6 +199,42 @@ func TestPooledQrelsRequireExactCaseAndJudgmentProvenance(t *testing.T) {
 	}
 	if _, err := ScoreRelevancePooled(labeledRecordsFixture(), qrels); err == nil {
 		t.Fatal("pooled qrels with a mismatched fixed-suite query were accepted")
+	}
+}
+
+func TestPooledQrelsRejectChangedOriginForSameSourceJudgment(t *testing.T) {
+	raw := strings.Join([]string{
+		`{"schema_version":1,"run_id":"source-run","judgment_origin":"assistant_provisional","case_id":"general-001","intent":"general","query":"general query","case_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","url":"https://one.example/","relevance":2}`,
+		`{"schema_version":1,"run_id":"source-run","judgment_origin":"independent_human","case_id":"general-001","intent":"general","query":"general query","case_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","url":"https://one.example/","relevance":2}`,
+	}, "\n")
+	if _, err := LoadPooledRelevanceLabels(strings.NewReader(raw)); err == nil {
+		t.Fatal("one source judgment was accepted with conflicting origins")
+	}
+
+	record := labeledRecordsFixture()[0]
+	base := PooledRelevanceLabel{
+		SchemaVersion: 1, SourceRunID: "source-run", JudgmentOrigin: JudgmentOriginAssistantProvisional,
+		CaseID: record.CaseID, Intent: record.Intent, Query: record.Query, CaseSHA256: record.CaseSHA256,
+		URL: record.Results[0].URL, Relevance: 2,
+	}
+	changed := base
+	changed.JudgmentOrigin = JudgmentOriginIndependentHuman
+	if _, err := ScoreRelevancePooled([]Record{record}, []PooledRelevanceLabel{base, changed}); err == nil {
+		t.Fatal("programmatic pooled scoring accepted conflicting origins for one source judgment")
+	}
+}
+
+func TestPooledQrelsAcceptMoreThanOneMaximumRunArtifact(t *testing.T) {
+	var raw strings.Builder
+	for index := 0; index <= maxRelevanceLabels; index++ {
+		fmt.Fprintf(&raw, `{"schema_version":1,"run_id":"source-%05d","judgment_origin":"assistant_provisional","case_id":"general-001","intent":"general","query":"general query","case_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","url":"https://one.example/","relevance":2}`+"\n", index)
+	}
+	labels, err := LoadPooledRelevanceLabels(strings.NewReader(raw.String()))
+	if err != nil {
+		t.Fatalf("cross-run pool above one-run capacity: %v", err)
+	}
+	if len(labels) != maxRelevanceLabels+1 {
+		t.Fatalf("pooled labels = %d", len(labels))
 	}
 }
 

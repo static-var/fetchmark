@@ -15,7 +15,11 @@ import (
 	"github.com/staticvar/fetchmark/internal/buildidentity"
 )
 
-const maxRelevanceLabels = 50_000
+const (
+	maxRelevanceLabels = 50_000
+	// Bound cross-run provenance separately from one maximum-size run.
+	maxPooledRelevanceLabels = maxRelevanceLabels * 5
+)
 
 // RelevanceLabel is one human judgment bound to an exact run, case, and
 // returned URL. Relevance uses a deliberately small ordinal scale:
@@ -155,8 +159,7 @@ type resultKey struct {
 
 type pooledJudgmentSourceKey struct {
 	resultKey
-	runID  string
-	origin JudgmentOrigin
+	runID string
 }
 
 type pooledCaseMetadata struct {
@@ -260,7 +263,7 @@ func LoadPooledRelevanceLabels(reader io.Reader) ([]PooledRelevanceLabel, error)
 	scanner.Buffer(make([]byte, 64*1024), maxEvaluationArtifactLineSize)
 	labels := make([]PooledRelevanceLabel, 0)
 	judgmentByResult := make(map[resultKey]PooledRelevanceLabel)
-	seenSources := make(map[pooledJudgmentSourceKey]struct{})
+	originBySource := make(map[pooledJudgmentSourceKey]JudgmentOrigin)
 	metadataByCase := make(map[string]pooledCaseMetadata)
 	totalBytes := 0
 	for line := 1; scanner.Scan(); line++ {
@@ -272,8 +275,8 @@ func LoadPooledRelevanceLabels(reader io.Reader) ([]PooledRelevanceLabel, error)
 		if raw == "" {
 			continue
 		}
-		if len(labels) >= maxRelevanceLabels {
-			return nil, fmt.Errorf("eval: pooled relevance labels exceed %d entries", maxRelevanceLabels)
+		if len(labels) >= maxPooledRelevanceLabels {
+			return nil, fmt.Errorf("eval: pooled relevance labels exceed %d entries", maxPooledRelevanceLabels)
 		}
 		var document relevanceLabelDocument
 		decoder := json.NewDecoder(strings.NewReader(raw))
@@ -320,11 +323,14 @@ func LoadPooledRelevanceLabels(reader io.Reader) ([]PooledRelevanceLabel, error)
 				return nil, fmt.Errorf("eval: pooled relevance label line %d conflicts with an earlier judgment", line)
 			}
 		}
-		sourceKey := pooledJudgmentSourceKey{resultKey: key, runID: document.RunID, origin: *document.JudgmentOrigin}
-		if _, duplicate := seenSources[sourceKey]; duplicate {
+		sourceKey := pooledJudgmentSourceKey{resultKey: key, runID: document.RunID}
+		if existingOrigin, duplicate := originBySource[sourceKey]; duplicate {
+			if existingOrigin != *document.JudgmentOrigin {
+				return nil, fmt.Errorf("eval: pooled relevance label line %d changes a source judgment origin", line)
+			}
 			return nil, fmt.Errorf("eval: pooled relevance label line %d duplicates a source judgment", line)
 		}
-		seenSources[sourceKey] = struct{}{}
+		originBySource[sourceKey] = *document.JudgmentOrigin
 		label := PooledRelevanceLabel{
 			SchemaVersion:  1,
 			SourceRunID:    document.RunID,
@@ -483,6 +489,9 @@ func ScoreRelevancePooled(records []Record, labels []PooledRelevanceLabel) (Rele
 	if len(labels) == 0 {
 		return RelevanceSummary{}, errors.New("eval: pooled relevance labels are empty")
 	}
+	if len(labels) > maxPooledRelevanceLabels {
+		return RelevanceSummary{}, fmt.Errorf("eval: pooled relevance labels exceed %d entries", maxPooledRelevanceLabels)
+	}
 	recordByCase := make(map[string]Record, len(records))
 	for index, record := range records {
 		caseSHA256, ok := buildidentity.Parse(record.CaseSHA256)
@@ -492,7 +501,7 @@ func ScoreRelevancePooled(records []Record, labels []PooledRelevanceLabel) (Rele
 		recordByCase[record.CaseID] = record
 	}
 	pooledByResult := make(map[resultKey]int, len(labels))
-	seenSources := make(map[pooledJudgmentSourceKey]struct{}, len(labels))
+	originBySource := make(map[pooledJudgmentSourceKey]JudgmentOrigin, len(labels))
 	metadataByCase := make(map[string]pooledCaseMetadata)
 	idealByCase := make(map[string][]int)
 	for index, label := range labels {
@@ -529,11 +538,14 @@ func ScoreRelevancePooled(records []Record, labels []PooledRelevanceLabel) (Rele
 			pooledByResult[key] = label.Relevance
 			idealByCase[label.CaseID] = append(idealByCase[label.CaseID], label.Relevance)
 		}
-		sourceKey := pooledJudgmentSourceKey{resultKey: key, runID: label.SourceRunID, origin: label.JudgmentOrigin}
-		if _, duplicate := seenSources[sourceKey]; duplicate {
+		sourceKey := pooledJudgmentSourceKey{resultKey: key, runID: label.SourceRunID}
+		if existingOrigin, duplicate := originBySource[sourceKey]; duplicate {
+			if existingOrigin != label.JudgmentOrigin {
+				return RelevanceSummary{}, fmt.Errorf("eval: pooled relevance label %d changes a source judgment origin", index+1)
+			}
 			return RelevanceSummary{}, fmt.Errorf("eval: pooled relevance label %d duplicates a source judgment", index+1)
 		}
-		seenSources[sourceKey] = struct{}{}
+		originBySource[sourceKey] = label.JudgmentOrigin
 	}
 	labelByResult := make(map[resultKey]int)
 	for key, grade := range pooledByResult {

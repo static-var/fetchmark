@@ -36,6 +36,19 @@ func TestRelevanceControlsPassExplicitFreshnessToRanker(t *testing.T) {
 	}
 }
 
+func TestRelevanceControlsPreserveEveryTextFreshnessMarker(t *testing.T) {
+	for _, query := range []string{"new bird flu guidance", "bird flu this week", "bird flu this month"} {
+		t.Run(query, func(t *testing.T) {
+			recorder := &relevanceControlRecorder{}
+			p := &Pipeline{Ranker: recorder}
+			p.process(context.Background(), Options{}, nil, query)
+			if recorder.legacyCall || !recorder.controls.Fresh {
+				t.Fatalf("ranker call legacy=%v controls=%+v query=%q", recorder.legacyCall, recorder.controls, recorder.query)
+			}
+		})
+	}
+}
+
 func TestRelevanceControlsRankRecentArticleFirstForTimeRange(t *testing.T) {
 	now := time.Now().UTC()
 	recent := now.Add(-24 * time.Hour)
