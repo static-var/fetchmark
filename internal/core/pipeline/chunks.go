@@ -7,14 +7,16 @@ import (
 	"unicode"
 
 	"github.com/staticvar/fetchmark/internal/core/model"
+	corerank "github.com/staticvar/fetchmark/internal/core/rank"
 )
 
 const maxChunkChars = 500
 
 type chunkQuery struct {
-	terms   map[string]struct{}
-	ordered []string
-	phrases []string
+	terms          map[string]struct{}
+	ordered        []string
+	phrases        []string
+	useBroadTokens bool
 }
 
 func attachQueryChunks(results []model.SearchResult, query string, perSource int) {
@@ -129,7 +131,7 @@ func runeLen(s string) int {
 }
 
 func scoreChunk(query chunkQuery, text, context string) float64 {
-	tokens := chunkTokens(text)
+	tokens := chunkTokensForQuery(query, text)
 	if len(tokens) == 0 {
 		return 0
 	}
@@ -157,7 +159,7 @@ func scoreChunk(query chunkQuery, text, context string) float64 {
 	}
 
 	if context != "" {
-		contextCounts := tokenCounts(chunkTokens(context))
+		contextCounts := tokenCounts(chunkTokensForQuery(query, context))
 		var contextBoost float64
 		for term, count := range counts {
 			if _, ok := query.terms[term]; !ok || count == 0 {
@@ -173,39 +175,55 @@ func scoreChunk(query chunkQuery, text, context string) float64 {
 	return score * chunkLengthMultiplier(len(tokens))
 }
 
-func chunkTerms(s string) map[string]struct{} {
+func chunkTerms(tokens []string) map[string]struct{} {
 	out := map[string]struct{}{}
-	for _, token := range chunkTokens(s) {
+	for _, token := range tokens {
 		out[token] = struct{}{}
 	}
 	return out
 }
 
 func newChunkQuery(s string) chunkQuery {
-	ordered := dedupeOrderedTokens(chunkTokens(s))
+	tokens := chunkTokens(s)
+	useBroadTokens := len(tokens) == 0
+	if useBroadTokens {
+		tokens = broadChunkTokens(s)
+	}
+	ordered := dedupeOrderedTokens(tokens)
 	return chunkQuery{
-		terms:   chunkTerms(s),
-		ordered: ordered,
-		phrases: chunkPhrases(ordered),
+		terms:          chunkTerms(ordered),
+		ordered:        ordered,
+		phrases:        chunkPhrases(ordered),
+		useBroadTokens: useBroadTokens,
 	}
 }
 
 func chunkTokens(s string) []string {
+	return corerank.TopicalTokens(s)
+}
+
+func chunkTokensForQuery(query chunkQuery, s string) []string {
+	if query.useBroadTokens {
+		return broadChunkTokens(s)
+	}
+	return chunkTokens(s)
+}
+
+func broadChunkTokens(s string) []string {
 	fields := strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
 	out := make([]string, 0, len(fields))
 	for _, token := range fields {
-		token = normalizeChunkToken(token)
-		if token == "" {
-			continue
+		token = normalizeBroadChunkToken(token)
+		if token != "" {
+			out = append(out, token)
 		}
-		out = append(out, token)
 	}
 	return out
 }
 
-func normalizeChunkToken(token string) string {
+func normalizeBroadChunkToken(token string) string {
 	if len(token) < 2 {
 		return ""
 	}

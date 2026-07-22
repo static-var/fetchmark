@@ -154,17 +154,51 @@ go run ./cmd/fetchmark-eval \
   > fetchmark-summary-20260718T000000Z.json
 ```
 
+For a before/after comparison, build one provenance-annotated pooled qrels
+JSONL from the completed label artifacts and score each run against that same
+pool:
+
+```bash
+go run ./cmd/fetchmark-eval \
+  -records fetchmark-eval-after.jsonl \
+  -qrels fetchmark-pooled-qrels.jsonl \
+  > fetchmark-summary-after.json
+```
+
+Every pooled row must retain its source `run_id`, exact `intent` and `query`,
+and a `judgment_origin` of either `assistant_provisional` or
+`independent_human`. This keeps assistant-generated tuning evidence distinct
+from independent human ground truth. Rows are keyed for scoring by fixed case
+ID and exact URL; consistent judgments from distinct source runs retain their
+provenance, while conflicting grades are rejected. When qrels are used, the
+ideal NDCG@10 ranking includes every uniquely judged URL for that case, so a
+run is penalized for omitting a stronger result found by another run. The CLI
+report includes the exact qrels SHA-256, sorted judgment origins, and sorted
+source run IDs. `-labels` and `-qrels` are mutually exclusive; legacy
+run-bound `-labels` files remain supported without pooled provenance fields.
+
 Offline loading rejects unknown fields, mixed runs, duplicate cases/results,
 invalid URLs, inconsistent counts, unknown judgments, duplicate judgments,
 unfilled grades, and artifacts that exceed the shared per-row or aggregate
 budgets. A run is accepted only when its generated label template fits those
 same limits. Relevant-hit coverage is the operative discovery-quality measure:
-a query is covered only when at least one supplied judgment is grade 2 or 3.
+a query is covered only when at least one supplied judgment is grade 2 or 3,
+and its denominator is every fixed-suite record. Failed, timed-out, canceled,
+not-started, empty, and abstained cases therefore contribute zero rather than
+disappearing from the gate.
 Raw non-empty coverage remains an availability diagnostic and is not evidence
 that Fetchmark answered the query. Precision@5, NDCG@10, and reciprocal rank
 include only successful non-empty cases whose returned results are fully
 labeled; a missing label is never silently converted to grade zero. Relevant
 result counts and mean grades are also reported by exact source and lane.
+
+The operative `all_query_*` metrics also use every fixed-suite record as the
+denominator. Their Precision@5 denominator is always five result slots per
+query; relevant yield@5 is the average number of relevant top-five results per
+query. They are emitted as `null` with `all_query_ranking_complete: false` only
+when a successful non-empty result is still unjudged. Failures and abstentions
+are known zeroes. The `all_eligible_*` fields remain success-only diagnostics
+and must not be used as the product-quality gate.
 
 Live runs depend on current web and deployment state, so they are evidence
 artifacts rather than unit-test expectations. Preserve the raw run JSONL,

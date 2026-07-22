@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "generated_at": "2026-07-20T00:00:00Z",
+  "operator": {
+    "name": "Fetchmark test operator",
+    "contact_url": "https://fetchmark.dev/contact",
+    "policy_url": "https://fetchmark.dev/discovery-policy"
+  },
+  "sources": [
+    {
+      "id": "kotlin",
+      "owner": "JetBrains",
+      "source_url": "https://kotlinlang.org/sitemap.xml",
+      "allowed_hosts": ["kotlinlang.org"],
+      "license": "Apache-2.0",
+      "license_url": "https://www.apache.org/licenses/LICENSE-2.0",
+      "policy_url": "https://kotlinlang.org/docs/faq.html",
+      "observed_at": "2026-07-19T23:00:00Z",
+      "robots_observed_at": "2026-07-19T23:00:00Z",
+      "robots_allowed": true,
+      "noindex": false,
+      "x_robots_noindex": false,
+      "documents": [
+        {
+          "url": "https://kotlinlang.org/docs/cancellation-and-timeouts.html",
+          "title": "Cancellation and timeouts",
+          "headings": ["Cancelling coroutine execution", "Cancellation is cooperative"],
+          "language": "en",
+          "safety_classification": "safe",
+          "observed_at": "2026-07-19T23:00:00Z",
+          "robots_observed_at": "2026-07-19T23:00:00Z",
+          "robots_allowed": true,
+          "noindex": false,
+          "x_robots_noindex": false
+        },
+        {
+          "url": "https://kotlinlang.org/docs/coroutines-guide.html",
+          "title": "Coroutines guide",
+          "headings": ["Coroutine basics", "Cancellation and timeouts"],
+          "language": "en",
+          "safety_classification": "safe",
+          "observed_at": "2026-07-19T23:00:00Z",
+          "robots_observed_at": "2026-07-19T23:00:00Z",
+          "robots_allowed": true,
+          "noindex": false,
+          "x_robots_noindex": false
+        }
+      ]
+    }
+  ]
+}

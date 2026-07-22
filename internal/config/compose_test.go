@@ -38,6 +38,26 @@ func TestComposeFilesExposeEveryRuntimeVariable(t *testing.T) {
 	}
 }
 
+func TestComposeMountsOfficialDocIndexDirectoryReadOnly(t *testing.T) {
+	const mount = `${FM_OFFICIAL_DOC_INDEX_HOST_DIR:-./official-docs}:/etc/fetchmark/official-docs:ro`
+	for _, path := range []string{"../../deploy/docker-compose.yml", "../../deploy/docker-compose.external.yml"} {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(body), mount) {
+			t.Errorf("%s missing read-only official-doc-index mount", path)
+		}
+	}
+	example, err := os.ReadFile("../../.env.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(example), "FM_OFFICIAL_DOC_INDEX_HOST_DIR=") || !strings.Contains(string(example), "FM_OFFICIAL_DOC_INDEX_FILE=") {
+		t.Fatal(".env.example does not document both host mount and container snapshot path")
+	}
+}
+
 func TestComposeKeepsAutomaticBrowserRenderingOptIn(t *testing.T) {
 	body, err := os.ReadFile("../../deploy/docker-compose.yml")
 	if err != nil {

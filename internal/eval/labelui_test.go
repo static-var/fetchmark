@@ -59,6 +59,9 @@ func TestWriteLabelUIIsSelfContainedBlindAndRunBound(t *testing.T) {
 	if payload.Rows[0].URL != "https://one.example/" || payload.Rows[2].URL != "https://three.example/" {
 		t.Fatalf("row order changed: %+v", payload.Rows)
 	}
+	if payload.Rows[0].CaseSHA256 != generalCaseSHA256 {
+		t.Fatalf("case digest missing from payload: %+v", payload.Rows[0])
+	}
 	if payload.Rows[0].Relevance != nil {
 		t.Fatalf("new UI contained a completed grade: %+v", payload.Rows[0])
 	}
@@ -93,6 +96,9 @@ func TestWriteLabelUIUsesRovingRailAndAnnouncesResultChanges(t *testing.T) {
 		`row.schema_version,`,
 		`row.intent,`,
 		`row.query,`,
+		`row.case_sha256,`,
+		`case_sha256: row.case_sha256,`,
+		`document.case_sha256 !== row.case_sha256`,
 		`row.rank`,
 	} {
 		if !strings.Contains(html, required) {

@@ -312,13 +312,16 @@ func metricCounterValue(t *testing.T, metric interface{ Write(*dto.Metric) error
 	return value.GetCounter().GetValue()
 }
 
-func TestBasicSearchFallsBackToPrimaryWhenPlannedLanesAreAdvancedOnly(t *testing.T) {
+func TestBasicSearchUsesMatchingSpecialtyProjectionWhenPackHasNoOriginalLane(t *testing.T) {
 	for _, test := range []struct {
-		pack  string
-		query string
+		pack          string
+		query         string
+		lane          string
+		variant       string
+		wantQueryPart string
 	}{
-		{pack: "developer", query: "golang api"},
-		{pack: "fresh", query: "latest security news 2026"},
+		{pack: "developer", query: "golang api", lane: "searxng-developer", variant: "docs", wantQueryPart: "official docs"},
+		{pack: "fresh", query: "latest security news 2026", lane: "searxng-fresh", variant: "freshness", wantQueryPart: "recent updates"},
 	} {
 		t.Run(test.pack, func(t *testing.T) {
 			primary := &recordingExpansionSearcher{responses: func(search.Query) []search.Hit {
@@ -351,18 +354,85 @@ func TestBasicSearchFallsBackToPrimaryWhenPlannedLanesAreAdvancedOnly(t *testing
 			if len(hits) != 1 || hits[0].URL != "https://primary.example/result" {
 				t.Fatalf("hits = %+v, want primary fallback result", hits)
 			}
-			wantProvenance := []model.DiscoveryProvenance{{Provider: "searxng", Lane: "searxng", Variant: "original"}}
-			if !reflect.DeepEqual(hits[0].Provenance, wantProvenance) || hits[0].Metadata["rrf_sources"] != "searxng:original" {
-				t.Fatalf("fallback provenance = %#v metadata=%#v, want %#v", hits[0].Provenance, hits[0].Metadata, wantProvenance)
+			wantProvenance := []model.DiscoveryProvenance{{Provider: "searxng", Lane: test.lane, Variant: test.variant}}
+			if !reflect.DeepEqual(hits[0].Provenance, wantProvenance) || hits[0].Metadata["rrf_sources"] != test.lane+":"+test.variant {
+				t.Fatalf("specialty provenance = %#v metadata=%#v, want %#v", hits[0].Provenance, hits[0].Metadata, wantProvenance)
 			}
 			queries := primary.recordedQueries()
 			if len(queries) != 1 {
-				t.Fatalf("primary calls = %d, want one original request", len(queries))
+				t.Fatalf("primary calls = %d, want one specialty request", len(queries))
 			}
-			if got := queries[0]; got.Q != test.query || got.ExactMatch || got.MaxResults != 7 {
-				t.Fatalf("primary query = %+v, want unchanged basic query", got)
+			if got := queries[0]; !strings.Contains(strings.ToLower(got.Q), test.wantQueryPart) || got.ExactMatch || got.MaxResults != 7 {
+				t.Fatalf("primary query = %+v, want %s projection containing %q", got, test.variant, test.wantQueryPart)
 			}
 		})
+	}
+}
+
+func TestBasicSearchPreservesDeveloperProjectionWhenFreshnessAlsoMatches(t *testing.T) {
+	searcher := &recordingExpansionSearcher{responses: func(search.Query) []search.Hit {
+		return []search.Hit{{URL: "https://go.dev/doc/"}}
+	}}
+	spec, err := discovery.DefaultSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := discovery.NewRegistryFromSpec(
+		spec,
+		map[string]search.Searcher{"searxng": searcher},
+		"searxng",
+		[]string{"developer", "fresh"},
+		[]string{"searxng"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Pipeline{Searcher: searcher, DiscoveryPlanner: registry, AdvancedSearchConcurrency: 2}
+	query := "latest Kubernetes API documentation"
+	if _, err := p.searchCandidates(context.Background(), Options{Query: query, TimeRange: "month"}, 7); err != nil {
+		t.Fatal(err)
+	}
+	queries := searcher.recordedQueries()
+	if len(queries) != 1 {
+		t.Fatalf("search calls = %d, want one developer projection: %+v", len(queries), queries)
+	}
+	got := queries[0]
+	wantEngines := []string{"github", "gitlab", "stackoverflow"}
+	if !reflect.DeepEqual(got.Engines, wantEngines) || got.TimeRange != "month" ||
+		strings.Contains(strings.ToLower(got.Q), "news") || !strings.Contains(strings.ToLower(got.Q), "official") {
+		t.Fatalf("overlapping developer/fresh query = %+v, want developer controls without the freshness projection", got)
+	}
+}
+
+func TestBasicSearchKeepsGeneralLaneForAmbiguousDeveloperWord(t *testing.T) {
+	searcher := &recordingExpansionSearcher{responses: func(search.Query) []search.Hit {
+		return []search.Hit{{URL: "https://travel.example/java/"}}
+	}}
+	spec, err := discovery.DefaultSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := discovery.NewRegistryFromSpec(
+		spec,
+		map[string]search.Searcher{"searxng": searcher},
+		"searxng",
+		[]string{"developer"},
+		[]string{"searxng"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Pipeline{Searcher: searcher, DiscoveryPlanner: registry, AdvancedSearchConcurrency: 2}
+	if _, err := p.searchCandidates(context.Background(), Options{Query: "Java travel guide"}, 7); err != nil {
+		t.Fatal(err)
+	}
+	queries := searcher.recordedQueries()
+	if len(queries) != 1 {
+		t.Fatalf("search calls = %d, want one general request: %+v", len(queries), queries)
+	}
+	got := queries[0]
+	if got.Q != "Java travel guide" || len(got.Engines) != 0 {
+		t.Fatalf("ambiguous developer query = %+v, want unchanged general search", got)
 	}
 }
 

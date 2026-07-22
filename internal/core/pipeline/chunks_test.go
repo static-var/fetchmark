@@ -25,6 +25,24 @@ func TestAttachQueryChunksPhraseMatchOutranksBagOfTerms(t *testing.T) {
 	}
 }
 
+func TestAttachQueryChunksIgnoresQuestionScaffolding(t *testing.T) {
+	results := []model.SearchResult{{
+		Content: &model.Content{MainText: strings.Join([]string{
+			"How do users interact with readers? How do teams interact with readers?",
+			"SQLite WAL checkpoints coordinate reader access while a transaction remains active.",
+		}, "\n\n")},
+	}}
+
+	attachQueryChunks(results, "How do SQLite WAL checkpoints interact with readers?", 2)
+
+	if len(results[0].Chunks) != 2 {
+		t.Fatalf("chunks = %+v, want 2", results[0].Chunks)
+	}
+	if !strings.Contains(results[0].Chunks[0].Text, "SQLite WAL checkpoints") {
+		t.Fatalf("topical terms should outrank repeated question scaffolding: %+v", results[0].Chunks)
+	}
+}
+
 func TestAttachQueryChunksTermFrequencyBeatsOneOffLongChunk(t *testing.T) {
 	results := []model.SearchResult{{
 		Content: &model.Content{MainText: strings.Join([]string{
@@ -98,6 +116,24 @@ func TestAttachQueryChunksPhraseBoostRequiresTokenBoundaries(t *testing.T) {
 	}
 	if !strings.Contains(results[0].Chunks[0].Text, "go dev command") {
 		t.Fatalf("phrase boost should require exact token boundaries: %+v", results[0].Chunks)
+	}
+}
+
+func TestAttachQueryChunksFallsBackForProperNameStopWords(t *testing.T) {
+	results := []model.SearchResult{{
+		Content: &model.Content{MainText: strings.Join([]string{
+			"Research teams catalogued archival recordings without naming performers.",
+			"The Who recorded live performances throughout the band's early career.",
+		}, "\n\n")},
+	}}
+
+	attachQueryChunks(results, "The Who", 1)
+
+	if len(results[0].Chunks) != 1 {
+		t.Fatalf("chunks = %+v, want 1", results[0].Chunks)
+	}
+	if !strings.Contains(results[0].Chunks[0].Text, "The Who") {
+		t.Fatalf("proper-name query should retain its matching passage: %+v", results[0].Chunks)
 	}
 }
 

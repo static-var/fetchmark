@@ -284,7 +284,7 @@ func validEvidenceToken(value string) bool {
 
 func validDiscoveryVariant(variant string) bool {
 	switch variant {
-	case "original", "exact", "freshness", "docs", "other":
+	case "original", "exact", "freshness", "docs", "concept", "other":
 		return true
 	default:
 		return false

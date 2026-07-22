@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -30,6 +32,7 @@ import (
 	"github.com/staticvar/fetchmark/internal/core/indexpack"
 	"github.com/staticvar/fetchmark/internal/core/pipeline"
 	"github.com/staticvar/fetchmark/internal/core/search"
+	"github.com/staticvar/fetchmark/internal/evaluationmanifest"
 )
 
 type stubSearcher struct{}
@@ -113,7 +116,7 @@ func TestBuildDiscoveryPlannerFromSpecDoesNotRereadConfigurationFile(t *testing.
 	if err != nil {
 		t.Fatalf("DefaultSpec: %v", err)
 	}
-	planner, primary, err := buildDiscoveryPlannerFromSpec(cfg, stubSearcher{}, &http.Client{}, nil, spec)
+	planner, primary, err := buildDiscoveryPlannerFromSpec(cfg, stubSearcher{}, &http.Client{}, nil, spec, nil)
 	if err != nil {
 		t.Fatalf("buildDiscoveryPlannerFromSpec: %v", err)
 	}
@@ -133,7 +136,7 @@ func TestBuildDiscoveryPlannerBindsOptInNativeMwmblLane(t *testing.T) {
 	found := false
 	for _, source := range sources {
 		if source.ID == "mwmbl-general" {
-			found = source.ProviderID == "mwmbl" && source.ProviderKind == "mwmbl" && reflect.DeepEqual(source.Variants, []string{"original"})
+			found = source.ProviderID == "mwmbl" && source.ProviderKind == "mwmbl" && reflect.DeepEqual(source.Variants, []string{"original", "concept"})
 		}
 	}
 	if !found {
@@ -419,6 +422,83 @@ func TestBuildDiscoveryPlannerOpensOptInFreshFeedIndex(t *testing.T) {
 	hits, err := feedSource.Search(context.Background(), search.Query{Q: "latest stable Python release", MaxResults: 5})
 	if err != nil || len(hits) != 1 || hits[0].Metadata["feed_source"] != "python" {
 		t.Fatalf("feed hits = %+v err=%v", hits, err)
+	}
+}
+
+func TestBuildDiscoveryPlannerOpensOptInOfficialDocIndex(t *testing.T) {
+	fixturePath, err := filepath.Abs(filepath.Join("..", "..", "internal", "adapters", "docindex", "testdata", "official-docs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot map[string]any
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
+	snapshot["generated_at"] = now
+	for _, rawSource := range snapshot["sources"].([]any) {
+		source := rawSource.(map[string]any)
+		source["observed_at"] = now
+		source["robots_observed_at"] = now
+		for _, rawDocument := range source["documents"].([]any) {
+			document := rawDocument.(map[string]any)
+			document["observed_at"] = now
+			document["robots_observed_at"] = now
+		}
+	}
+	raw, err = json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotPath := filepath.Join(t.TempDir(), "official-docs.json")
+	if err := os.WriteFile(snapshotPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := discoveryTestConfig()
+	cfg.DiscoveryEnabledSources = append(cfg.DiscoveryEnabledSources, "docindex")
+	cfg.OfficialDocIndexFile = snapshotPath
+	spec, err := discovery.DefaultSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeBindings := evaluationmanifest.RuntimeBindings{}
+	planner, primary, err := buildDiscoveryPlannerFromSpec(cfg, stubSearcher{}, &http.Client{}, nil, spec, &runtimeBindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSnapshotSHA256 := sha256.Sum256(raw)
+	if got, want := runtimeBindings.OfficialDocIndexSnapshotSHA256, hex.EncodeToString(wantSnapshotSHA256[:]); got != want {
+		t.Fatalf("loaded document snapshot binding = %q, want %q", got, want)
+	}
+	closer, ok := primary.(io.Closer)
+	if !ok {
+		t.Fatal("primary searcher does not own official-doc-index lifecycle")
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	sources := planner.Sources(search.Query{Q: "Kotlin coroutine API documentation"})
+	var docSource search.Searcher
+	for _, source := range sources {
+		if source.ID == "official-developer-docs" {
+			docSource = source.Searcher
+			if source.Weight != 1.0 || len(source.Variants) != 1 || source.Variants[0] != "original" {
+				t.Fatalf("official docs lane = %+v", source)
+			}
+		}
+	}
+	if docSource == nil {
+		t.Fatalf("sources = %+v", sources)
+	}
+	moderate := 1
+	hits, err := docSource.Search(context.Background(), search.Query{
+		Q: "Kotlin coroutine cancellation", MaxResults: 5, Language: "en", SafeSearch: &moderate,
+	})
+	if err != nil || len(hits) == 0 || hits[0].Metadata["document_source"] != "kotlin" {
+		t.Fatalf("official docs hits = %+v err=%v", hits, err)
 	}
 }
 

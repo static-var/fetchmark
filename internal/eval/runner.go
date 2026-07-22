@@ -83,6 +83,7 @@ type Record struct {
 	ConfigurationID            string                  `json:"configuration_id,omitempty"`
 	BuildSHA256                string                  `json:"build_sha256,omitempty"`
 	ConfigurationSHA256        string                  `json:"configuration_sha256,omitempty"`
+	CaseSHA256                 string                  `json:"case_sha256,omitempty"`
 	CaseID                     string                  `json:"case_id"`
 	Intent                     Intent                  `json:"intent"`
 	Query                      string                  `json:"query"`
@@ -469,6 +470,10 @@ func (r Runner) runCase(ctx context.Context, client *http.Client, endpoint strin
 		}
 		return record
 	}
+	if err := validateSearchResponseEnvelope(c, response); err != nil {
+		record.Error = "invalid_response"
+		return record
+	}
 	if err := validateDiscoveryHTTPOutcome(response.Discovery, true); err != nil {
 		record.Error = "invalid_discovery_report"
 		return record
@@ -501,10 +506,28 @@ func (r Runner) runCase(ctx context.Context, client *http.Client, endpoint strin
 	return record
 }
 
+func validateSearchResponseEnvelope(c Case, response searchResponse) error {
+	if response.Query != c.Query || response.Count != len(response.Results) || len(response.Results) > c.MaxResults {
+		return errInvalidEvaluationResponse
+	}
+	seenURLs := make(map[string]struct{}, len(response.Results))
+	for _, result := range response.Results {
+		parsed, err := url.Parse(result.URL)
+		if err != nil || parsed.User != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return errInvalidEvaluationResponse
+		}
+		if _, duplicate := seenURLs[result.URL]; duplicate {
+			return errInvalidEvaluationResponse
+		}
+		seenURLs[result.URL] = struct{}{}
+	}
+	return nil
+}
+
 func baseRecord(c Case, runID, revision, configurationID string, started time.Time, failure string) Record {
 	return Record{
 		SchemaVersion: 1, RunID: runID, Revision: revision, ConfigurationID: configurationID,
-		CaseID: c.ID, Intent: c.Intent, Query: c.Query,
+		CaseSHA256: CaseSHA256(c), CaseID: c.ID, Intent: c.Intent, Query: c.Query,
 		Tags: append([]string(nil), c.Tags...), SearchDepth: c.SearchDepth,
 		ExpectedDomains: append([]string(nil), c.ExpectedDomains...), FreshnessSensitive: c.FreshnessSensitive,
 		StartedAt: started.UTC(), Error: failure,
@@ -651,7 +674,7 @@ func validNormalizedSourceObservation(observation SourceObservation) bool {
 		return false
 	}
 	switch observation.Variant {
-	case "original", "exact", "freshness", "docs", "other":
+	case "original", "exact", "freshness", "docs", "concept", "other":
 		return true
 	default:
 		return false

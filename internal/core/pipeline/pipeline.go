@@ -51,6 +51,14 @@ type Ranker interface {
 	Score(query string, results []model.SearchResult) []model.SearchResult
 }
 
+type controlAwareRanker interface {
+	ScoreWithControls(query string, results []model.SearchResult, controls corerank.SearchControls) []model.SearchResult
+}
+
+type controlAwareFilteringRanker interface {
+	ScoreAndFilterWithControls(query string, results []model.SearchResult, controls corerank.SearchControls) []model.SearchResult
+}
+
 // Renderer turns a URL into post-JS HTML. The pipeline calls it when
 // the first-pass extractor flags a page as js_required, and only if
 // Options.Render is true or the pipeline was configured with
@@ -473,8 +481,25 @@ func (p *Pipeline) process(ctx context.Context, o Options, seed []model.SearchRe
 	// picked by MainText length and input order, which can drop the
 	// more relevant duplicate.
 	if p.Ranker != nil && query != "" {
-		results = p.Ranker.Score(query, results)
+		profile := discovery.ProfileQuery(search.Query{
+			Q: query, Categories: o.Categories, TimeRange: o.TimeRange, SearchDepth: o.SearchDepth,
+		})
+		controls := corerank.SearchControls{Fresh: profile.Fresh}
+		filteredDuringScoring := false
 		if o.applyRelevanceFloor {
+			if ranker, ok := p.Ranker.(controlAwareFilteringRanker); ok {
+				results = ranker.ScoreAndFilterWithControls(query, results, controls)
+				filteredDuringScoring = true
+			}
+		}
+		if !filteredDuringScoring {
+			if ranker, ok := p.Ranker.(controlAwareRanker); ok {
+				results = ranker.ScoreWithControls(query, results, controls)
+			} else {
+				results = p.Ranker.Score(query, results)
+			}
+		}
+		if o.applyRelevanceFloor && !filteredDuringScoring {
 			results = corerank.FilterLowConfidence(query, results)
 		}
 	}

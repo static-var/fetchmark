@@ -12,21 +12,27 @@ import (
 	"html"
 	"math"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 	"unicode"
 
+	"github.com/staticvar/fetchmark/internal/core/discovery"
 	"github.com/staticvar/fetchmark/internal/core/model"
+	"github.com/staticvar/fetchmark/internal/core/search"
 )
-
-var twentyXXYearPattern = regexp.MustCompile(`\b20[0-9]{2}\b`)
 
 // BM25 parameters (Okapi defaults).
 const (
-	k1                      = 1.5
-	b                       = 0.75
-	titleWeight             = 2.0
+	k1 = 1.5
+	b  = 0.75
+	// Field weights encode the reliability order of page-owned metadata. The
+	// bounded passage remains useful but cannot overpower title or headings by
+	// repeating query terms.
+	titleWeight             = 2.2
+	headingWeight           = 1.6
+	snippetWeight           = 1.0
+	passageWeight           = 0.85
+	topicalEvidenceWeight   = 0.6
 	engineBonusMax          = 0.25
 	confidenceScoreFloor    = 3.0
 	confidenceCoverageFloor = 0.15
@@ -47,6 +53,13 @@ type Ranker struct {
 	now func() time.Time
 }
 
+// SearchControls carries request policy that cannot be inferred reliably from
+// query text. The pipeline derives Fresh from the same discovery profile used
+// to select source packs.
+type SearchControls struct {
+	Fresh bool
+}
+
 // New constructs a Ranker.
 func New() *Ranker { return &Ranker{now: time.Now} }
 
@@ -61,33 +74,43 @@ func (r *Ranker) currentTime() time.Time {
 // slice sorted in descending score order. Results with empty extracted
 // content still receive a score derived from title + snippet.
 func (r *Ranker) Score(query string, results []model.SearchResult) []model.SearchResult {
-	q := tokenize(query)
-	if len(q) == 0 || len(results) == 0 {
-		return results
+	return r.ScoreWithControls(query, results, SearchControls{Fresh: isFreshnessQuery(query)})
+}
+
+// ScoreWithControls scores results using explicit request policy while keeping
+// Score available for existing callers and test fakes.
+func (r *Ranker) ScoreWithControls(query string, results []model.SearchResult, controls SearchControls) []model.SearchResult {
+	results, _ = r.scoreWithControls(query, results, controls)
+	return results
+}
+
+// ScoreAndFilterWithControls shares the field analysis between scoring and the
+// confidence floor, avoiding a second scan of extracted page bodies.
+func (r *Ranker) ScoreAndFilterWithControls(query string, results []model.SearchResult, controls SearchControls) []model.SearchResult {
+	results, documents := r.scoreWithControls(query, results, controls)
+	return filterLowConfidence(query, results, documents)
+}
+
+func (r *Ranker) scoreWithControls(query string, results []model.SearchResult, controls SearchControls) ([]model.SearchResult, []lexicalDocument) {
+	q := newTopicalQuery(query)
+	if len(q.terms) == 0 || len(results) == 0 {
+		return results, nil
 	}
 
-	docs := make([][]string, len(results))
-	titles := make([][]string, len(results))
-	var totalLen int
+	documents := make([]lexicalDocument, len(results))
 	for i := range results {
-		text := results[i].Snippet
-		if c := results[i].Content; c != nil {
-			text = text + " " + c.MainText
-		}
-		docs[i] = tokenize(text)
-		titles[i] = tokenize(pickTitle(results[i]))
-		totalLen += len(docs[i]) + len(titles[i])
+		documents[i] = newLexicalDocument(q, results[i])
 	}
-	avgLen := float64(totalLen) / float64(len(results))
-	if avgLen == 0 {
-		avgLen = 1
-	}
+	averageTitleLength := averageFieldLength(documents, func(document lexicalDocument) []string { return document.title })
+	averageHeadingLength := averageFieldLength(documents, func(document lexicalDocument) []string { return document.headings })
+	averageSnippetLength := averageFieldLength(documents, func(document lexicalDocument) []string { return document.snippet })
+	averagePassageLength := averageFieldLength(documents, func(document lexicalDocument) []string { return document.passage })
 
-	idf := make(map[string]float64, len(q))
-	for _, term := range q {
+	idf := make(map[string]float64, len(q.terms))
+	for _, term := range q.terms {
 		var df int
-		for i := range results {
-			if containsTerm(docs[i], term) || containsTerm(titles[i], term) {
+		for _, document := range documents {
+			if lexicalDocumentContains(document, term) {
 				df++
 			}
 		}
@@ -96,14 +119,14 @@ func (r *Ranker) Score(query string, results []model.SearchResult) []model.Searc
 
 	for i := range results {
 		score := 0.0
-		docLen := float64(len(docs[i]) + len(titles[i]))
-		for _, term := range q {
-			tf := float64(countTerm(docs[i], term)) + titleWeight*float64(countTerm(titles[i], term))
-			if tf == 0 {
-				continue
-			}
-			score += idf[term] * (tf * (k1 + 1)) / (tf + k1*(1-b+b*docLen/avgLen))
+		document := documents[i]
+		for _, term := range q.terms {
+			score += idf[term] * (titleWeight*bm25Field(document.title, term, averageTitleLength) +
+				headingWeight*bm25Field(document.headings, term, averageHeadingLength) +
+				snippetWeight*bm25Field(document.snippet, term, averageSnippetLength) +
+				passageWeight*bm25Field(document.passage, term, averagePassageLength))
 		}
+		score += topicalEvidenceWeight * topicalEvidenceScore(document.evidence)
 		// Engine-diversity additive bonus: up to +engineBonusMax for
 		// 3+ distinct engines. Small, additive, documented.
 		n := len(results[i].Engines)
@@ -111,7 +134,7 @@ func (r *Ranker) Score(query string, results []model.SearchResult) []model.Searc
 			bonus := engineBonusMax * math.Min(float64(n-1)/2.0, 1.0)
 			score += bonus
 		}
-		score += qualityAdjustmentAt(query, results[i], r.currentTime())
+		score += qualityAdjustmentForFreshnessAt(results[i], r.currentTime(), controls.Fresh)
 		results[i].Score = score
 	}
 
@@ -119,9 +142,10 @@ func (r *Ranker) Score(query string, results []model.SearchResult) []model.Searc
 	for i := 1; i < len(results); i++ {
 		for j := i; j > 0 && results[j].Score > results[j-1].Score; j-- {
 			results[j], results[j-1] = results[j-1], results[j]
+			documents[j], documents[j-1] = documents[j-1], documents[j]
 		}
 	}
-	return results
+	return results, documents
 }
 
 // FilterLowConfidence keeps only results with deterministic lexical evidence
@@ -129,14 +153,19 @@ func (r *Ranker) Score(query string, results []model.SearchResult) []model.Searc
 // returning a high-scoring document whose title, URL, and independent source
 // provenance provide no query support. The input order is preserved.
 func FilterLowConfidence(query string, results []model.SearchResult) []model.SearchResult {
-	queryTerms := uniqueTerms(confidenceTokens(query))
+	return filterLowConfidence(query, results, nil)
+}
+
+func filterLowConfidence(query string, results []model.SearchResult, documents []lexicalDocument) []model.SearchResult {
+	queryProfile := newTopicalQuery(query)
+	queryTerms := queryProfile.terms
 	if len(queryTerms) == 0 {
 		return results[:0]
 	}
 	querySet := termSet(queryTerms)
 	queryAcronyms := queryAcronymSet(query)
 	kept := results[:0]
-	for _, result := range results {
+	for index, result := range results {
 		title := confidenceTitle(result)
 		titleTerms := uniqueTerms(confidenceTokens(title))
 		titleSet := termSet(titleTerms)
@@ -153,6 +182,17 @@ func FilterLowConfidence(query string, results []model.SearchResult) []model.Sea
 			(titleHits >= 1 && titleCoverage >= 0.5 && result.Score >= confidenceScoreFloor) ||
 			(titleHits >= 1 && urlHits >= 1 && queryCoverage >= confidenceCoverageFloor) ||
 			(providers >= 2 && queryCoverage >= confidenceCoverageFloor)
+		if !lexicallySupported {
+			topicalEvidence := topicalEvidence{}
+			if len(documents) == len(results) {
+				topicalEvidence = documents[index].evidence
+			} else {
+				topicalEvidence = newLexicalDocument(queryProfile, result).evidence
+			}
+			lexicallySupported = topicalEvidence.matches >= 2 &&
+				topicalEvidence.coverage >= 0.6 &&
+				(topicalEvidence.phraseTerms >= 2 || topicalEvidence.proximity >= 0.6)
+		}
 		if lexicallySupported {
 			kept = append(kept, result)
 		}
@@ -170,28 +210,23 @@ func confidenceTitle(result model.SearchResult) string {
 }
 
 func confidenceTokens(value string) []string {
-	words := strings.FieldsFunc(strings.ToLower(html.UnescapeString(value)), func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
-	})
-	out := words[:0]
-	for _, word := range words {
-		if len([]rune(word)) <= 1 {
-			continue
-		}
-		if _, stop := confidenceStopWords[word]; stop {
-			continue
-		}
-		out = append(out, singularConfidenceTerm(word))
-	}
-	return out
+	return TopicalTokens(value)
 }
 
 func singularConfidenceTerm(word string) string {
 	runes := []rune(word)
-	if len(runes) > 5 && strings.HasSuffix(word, "ies") {
+	if len(runes) > 5 && strings.HasSuffix(word, "ies") && word != "series" && word != "species" {
 		return string(runes[:len(runes)-3]) + "y"
 	}
-	if len(runes) > 4 && strings.HasSuffix(word, "s") && !strings.HasSuffix(word, "ss") {
+	if len(runes) > 5 && strings.HasSuffix(word, "sses") {
+		return string(runes[:len(runes)-2])
+	}
+	if len(runes) > 4 && strings.HasSuffix(word, "s") &&
+		!strings.HasSuffix(word, "ss") &&
+		!strings.HasSuffix(word, "is") &&
+		!strings.HasSuffix(word, "us") &&
+		!strings.HasSuffix(word, "ics") &&
+		word != "news" && word != "series" && word != "species" {
 		return string(runes[:len(runes)-1])
 	}
 	return word
@@ -326,8 +361,11 @@ func qualityAdjustment(query string, result model.SearchResult) float64 {
 }
 
 func qualityAdjustmentAt(query string, result model.SearchResult, now time.Time) float64 {
+	return qualityAdjustmentForFreshnessAt(result, now, isFreshnessQuery(query))
+}
+
+func qualityAdjustmentForFreshnessAt(result model.SearchResult, now time.Time, fresh bool) float64 {
 	adj := 0.0
-	fresh := isFreshnessQuery(query)
 	u, err := url.Parse(result.URL)
 	host := ""
 	if err == nil {
@@ -371,28 +409,7 @@ func hasRecentPublishedAt(r model.SearchResult, now time.Time) bool {
 }
 
 func isFreshnessQuery(query string) bool {
-	q := strings.ToLower(query)
-	phraseMarkers := []string{"this week", "this month"}
-	for _, marker := range phraseMarkers {
-		if strings.Contains(q, marker) {
-			return true
-		}
-	}
-
-	tokens := tokenize(query)
-	markers := map[string]struct{}{
-		"latest": {},
-		"recent": {},
-		"new":    {},
-		"news":   {},
-		"today":  {},
-	}
-	for _, token := range tokens {
-		if _, ok := markers[token]; ok {
-			return true
-		}
-	}
-	return twentyXXYearPattern.MatchString(q)
+	return discovery.ProfileQuery(search.Query{Q: query}).Fresh
 }
 
 func isSocialHost(host string) bool {

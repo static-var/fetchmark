@@ -197,3 +197,34 @@ func TestBuildRejectsUnknownEnabledConfiguration(t *testing.T) {
 		t.Fatalf("Build error = %v", err)
 	}
 }
+
+func TestBuildWithRuntimeBindingsIncludesLoadedDocumentSnapshot(t *testing.T) {
+	spec, err := discovery.DefaultSpec()
+	if err != nil {
+		t.Fatalf("DefaultSpec: %v", err)
+	}
+	cfg := config.Config{
+		DiscoveryEnabledPacks:   []string{"developer"},
+		DiscoveryEnabledSources: []string{"docindex"},
+		DiscoveryPrimarySource:  "docindex",
+	}
+	first := strings.Repeat("a", 64)
+	second := strings.Repeat("b", 64)
+	manifest, _, firstDigest, err := BuildWithRuntimeBindings(cfg, spec, RuntimeBindings{OfficialDocIndexSnapshotSHA256: first})
+	if err != nil {
+		t.Fatalf("BuildWithRuntimeBindings: %v", err)
+	}
+	if manifest.Discovery.OfficialDocIndexSnapshotSHA256 != first {
+		t.Fatalf("document snapshot binding = %q", manifest.Discovery.OfficialDocIndexSnapshotSHA256)
+	}
+	_, _, secondDigest, err := BuildWithRuntimeBindings(cfg, spec, RuntimeBindings{OfficialDocIndexSnapshotSHA256: second})
+	if err != nil {
+		t.Fatalf("BuildWithRuntimeBindings changed snapshot: %v", err)
+	}
+	if firstDigest == secondDigest {
+		t.Fatal("different loaded document snapshots produced the same evaluation identity")
+	}
+	if _, _, _, err := BuildWithRuntimeBindings(cfg, spec, RuntimeBindings{}); err == nil {
+		t.Fatal("enabled document index accepted a missing runtime snapshot binding")
+	}
+}

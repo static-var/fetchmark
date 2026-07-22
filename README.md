@@ -197,11 +197,12 @@ All config is environment-driven. Copy `.env.example` and edit.
 | `FM_ADVANCED_SEARCH_CONCURRENCY` | `4` | Maximum concurrent advanced discovery lanes (1–16) |
 | `FM_DISCOVERY_PACK_FILE` | _(built in)_ | Optional strict v1 JSON source-pack registry |
 | `FM_DISCOVERY_ENABLED_PACKS` | all built-ins | Ordered source-pack allowlist |
-| `FM_DISCOVERY_ENABLED_SOURCES` | `searxng,wikipedia,crossref` | Strict source allowlist; append opt-in `arxiv`, `mwmbl`, `wiby`, `stackexchange`, `github`, `pubmed`, `yacy`, and/or `feedindex`, or omit `searxng` for a SearX-free process |
+| `FM_DISCOVERY_ENABLED_SOURCES` | `searxng,wikipedia,crossref` | Strict source allowlist; append opt-in `arxiv`, `mwmbl`, `wiby`, `stackexchange`, `github`, `pubmed`, `yacy`, `feedindex`, and/or `docindex`, or omit `searxng` for a SearX-free process |
 | `FM_DISCOVERY_PRIMARY_SOURCE` | `searxng` | Enabled first/fallback source; defaults preserve SearXNG-first behavior |
 | `FM_DISCOVERY_PROVIDER_MAX_BODY` | `2 MiB` | Maximum native-provider response body |
 | `FM_OPEN_PACK_REGISTRY_FILE` | _(unset)_ | Absolute process-owned, non-writable trust registry; open-pack sources stay opt-in |
 | `FM_FEED_INDEX_FILE` | _(unset)_ | Absolute, immutable RSS/Atom metadata snapshot; required only when opt-in `feedindex` discovery is enabled |
+| `FM_OFFICIAL_DOC_INDEX_FILE` | _(unset)_ | Absolute, immutable official-document metadata snapshot; required only when opt-in `docindex` discovery is enabled |
 | `FM_FEDERATION_IDENTITY_FILE` / `_TRUST_REGISTRY_FILE` | _(unset)_ | Paired absolute secure files for explicitly enabled trusted peers |
 | `FM_FEDERATION_LISTEN_ADDR` | _(unset)_ | Separate plain-HTTP listener for a private TLS ingress; requires curated mode |
 | `FM_CONTACT` | _(unset)_ | Optional contact appended to provider identity; default UA already has a project URL |
@@ -306,6 +307,50 @@ Native, Tavily, Exa, and Brave search responses therefore include
 `Link: <https://wiby.me/>; rel="via"; title="Wiby"` when the returned page
 contains at least one Wiby result. The header is absent otherwise, and vendor
 JSON response shapes do not change.
+
+### Enable the official-document metadata index
+
+The `developer` pack can search an operator-built snapshot of official
+documentation without a paid API, embeddings, a local LLM, or query-time
+network access in the discovery adapter:
+
+```bash
+export FM_OFFICIAL_DOC_INDEX_FILE=/etc/fetchmark/official-docs/official-docs.json
+export FM_DISCOVERY_ENABLED_SOURCES=searxng,wikipedia,crossref,docindex
+```
+
+The file must be an absolute, operator-owned regular file. Fetchmark reads it
+once at startup into a bounded in-memory lexical index and never changes it.
+The strict v1 JSON schema records the snapshot operator and contact/policy
+URLs; each source records its owner, source URL, exact allowed hosts, license,
+and policy URL; and each URL/title/heading record carries affirmative
+robots/noindex observations plus canonical language and explicit safe-content
+classification. Unknown fields, non-canonical HTTP(S) URLs,
+userinfo, private hosts, missing policy evidence, duplicates, and configured
+size/count overruns fail startup. A small schema fixture lives at
+`internal/adapters/docindex/testdata/official-docs.json`.
+
+The adapter retains only URL, title, headings, observation time, and declared
+provenance. It does not crawl, refresh, or download documents; ordinary
+Fetchmark live fetch/extraction policy still applies after a URL is selected.
+Because the snapshot is a bounded corpus, a no-match response is diagnostic
+and never claims that no relevant official document exists elsewhere. The
+source is disabled by default and existing native and vendor-compatible
+response shapes are unchanged.
+
+Snapshot generation, source-policy observation, and every document's
+robots/noindex observation must be no more than seven days old. Evidence at
+exactly seven days is accepted; after that boundary the lane yields no hits
+until the operator installs a fresh snapshot and restarts Fetchmark.
+
+The Docker Compose files mount `${FM_OFFICIAL_DOC_INDEX_HOST_DIR}` read-only at
+`/etc/fetchmark/official-docs`. The bundled default is `deploy/official-docs`;
+set `FM_OFFICIAL_DOC_INDEX_FILE` to the container path of a snapshot inside
+that directory. The distroless process runs as UID/GID 65532, so the host
+directory and snapshot must be owned by `65532:65532` and must not be writable
+by group or world. See `deploy/official-docs/README.md` for exact preparation
+commands.
+
 
 ### Enable the native Stack Overflow lane
 

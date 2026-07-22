@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/staticvar/fetchmark/internal/buildidentity"
 	"github.com/staticvar/fetchmark/internal/config"
 	"github.com/staticvar/fetchmark/internal/core/discovery"
 )
@@ -33,21 +34,28 @@ type Manifest struct {
 }
 
 type DiscoveryManifest struct {
-	PrimarySource         string                 `json:"primary_source"`
-	EnabledSources        []string               `json:"enabled_sources"`
-	EnabledPacks          []string               `json:"enabled_packs"`
-	Registry              discovery.RegistrySpec `json:"registry"`
-	AdvancedConcurrency   int                    `json:"advanced_concurrency"`
-	ProviderMaxBodyBytes  int64                  `json:"provider_max_body_bytes"`
-	SearxngCooldownMS     int64                  `json:"searxng_cooldown_ms"`
-	CacheFreshTTLMS       int64                  `json:"cache_fresh_ttl_ms"`
-	CacheStaleTTLMS       int64                  `json:"cache_stale_ttl_ms"`
-	CacheRefreshTimeoutMS int64                  `json:"cache_refresh_timeout_ms"`
-	CacheEntries          int                    `json:"cache_entries"`
-	CacheBytes            int64                  `json:"cache_bytes"`
-	CacheMaxEntryBytes    int64                  `json:"cache_max_entry_bytes"`
-	CacheMaxInflight      int                    `json:"cache_max_inflight"`
-	PrivateBindingSHA256  string                 `json:"private_binding_sha256,omitempty"`
+	PrimarySource                  string                 `json:"primary_source"`
+	EnabledSources                 []string               `json:"enabled_sources"`
+	EnabledPacks                   []string               `json:"enabled_packs"`
+	Registry                       discovery.RegistrySpec `json:"registry"`
+	AdvancedConcurrency            int                    `json:"advanced_concurrency"`
+	ProviderMaxBodyBytes           int64                  `json:"provider_max_body_bytes"`
+	SearxngCooldownMS              int64                  `json:"searxng_cooldown_ms"`
+	CacheFreshTTLMS                int64                  `json:"cache_fresh_ttl_ms"`
+	CacheStaleTTLMS                int64                  `json:"cache_stale_ttl_ms"`
+	CacheRefreshTimeoutMS          int64                  `json:"cache_refresh_timeout_ms"`
+	CacheEntries                   int                    `json:"cache_entries"`
+	CacheBytes                     int64                  `json:"cache_bytes"`
+	CacheMaxEntryBytes             int64                  `json:"cache_max_entry_bytes"`
+	CacheMaxInflight               int                    `json:"cache_max_inflight"`
+	PrivateBindingSHA256           string                 `json:"private_binding_sha256,omitempty"`
+	OfficialDocIndexSnapshotSHA256 string                 `json:"official_doc_index_snapshot_sha256,omitempty"`
+}
+
+// RuntimeBindings identifies immutable state from the exact source instances
+// opened for this process. It deliberately contains no filesystem paths.
+type RuntimeBindings struct {
+	OfficialDocIndexSnapshotSHA256 string
 }
 
 type RetrievalManifest struct {
@@ -138,9 +146,39 @@ type endpointPolicy struct {
 // emits deterministic JSON plus its lowercase SHA-256. Raw endpoints,
 // credentials, contacts, peer identities, and filesystem paths are excluded.
 func Build(cfg config.Config, spec discovery.RegistrySpec) (Manifest, []byte, string, error) {
+	return build(cfg, spec, RuntimeBindings{}, false)
+}
+
+// BuildWithRuntimeBindings emits an evaluation identity that includes the
+// exact immutable discovery snapshots loaded by the running process.
+func BuildWithRuntimeBindings(cfg config.Config, spec discovery.RegistrySpec, bindings RuntimeBindings) (Manifest, []byte, string, error) {
+	return build(cfg, spec, bindings, true)
+}
+
+func build(cfg config.Config, spec discovery.RegistrySpec, bindings RuntimeBindings, requireRuntimeBindings bool) (Manifest, []byte, string, error) {
 	resolved, enabledSources, enabledPacks, sourceKinds, privateBindingSHA256, err := resolveRegistry(cfg, spec)
 	if err != nil {
 		return Manifest{}, nil, "", err
+	}
+	docIndexEnabled := false
+	for _, kind := range sourceKinds {
+		if kind == "docindex" {
+			docIndexEnabled = true
+			break
+		}
+	}
+	docIndexSnapshotSHA256 := strings.TrimSpace(bindings.OfficialDocIndexSnapshotSHA256)
+	if docIndexSnapshotSHA256 != "" {
+		canonical, ok := buildidentity.Parse(docIndexSnapshotSHA256)
+		if !ok || canonical != docIndexSnapshotSHA256 {
+			return Manifest{}, nil, "", errors.New("evaluation manifest: invalid official document index snapshot SHA-256")
+		}
+	}
+	if requireRuntimeBindings && docIndexEnabled && docIndexSnapshotSHA256 == "" {
+		return Manifest{}, nil, "", errors.New("evaluation manifest: enabled official document index is missing its loaded snapshot SHA-256")
+	}
+	if !docIndexEnabled && docIndexSnapshotSHA256 != "" {
+		return Manifest{}, nil, "", errors.New("evaluation manifest: official document index snapshot binding supplied while source is disabled")
 	}
 	primarySource := cfg.DiscoveryPrimarySource
 	for index, id := range unique(cfg.DiscoveryEnabledSources) {
@@ -171,7 +209,8 @@ func Build(cfg config.Config, spec discovery.RegistrySpec) (Manifest, []byte, st
 			CacheStaleTTLMS: cfg.DiscoveryCacheStaleTTL.Milliseconds(), CacheRefreshTimeoutMS: cfg.DiscoveryRefreshTimeout.Milliseconds(),
 			CacheEntries: cfg.DiscoveryCacheEntries, CacheBytes: cfg.DiscoveryCacheBytes,
 			CacheMaxEntryBytes: cfg.DiscoveryCacheMaxEntryBytes, CacheMaxInflight: cfg.DiscoveryMaxInflight,
-			PrivateBindingSHA256: privateBindingSHA256,
+			PrivateBindingSHA256:           privateBindingSHA256,
+			OfficialDocIndexSnapshotSHA256: docIndexSnapshotSHA256,
 		},
 		Retrieval: RetrievalManifest{
 			FetchConcurrency: cfg.FetchConcurrency, PerHostConcurrency: cfg.PerHostConcurrency,

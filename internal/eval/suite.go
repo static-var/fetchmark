@@ -4,6 +4,8 @@ package eval
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,6 +51,17 @@ type Case struct {
 	TimeRange          string   `json:"time_range,omitempty"`
 	ExpectedDomains    []string `json:"expected_domains,omitempty"`
 	FreshnessSensitive bool     `json:"freshness_sensitive,omitempty"`
+}
+
+// CaseSHA256 binds relevance judgments to every fixed suite field, including
+// request controls that are intentionally not repeated in compact run records.
+func CaseSHA256(c Case) string {
+	raw, err := json.Marshal(c)
+	if err != nil {
+		panic(fmt.Sprintf("eval: encode fixed case identity: %v", err))
+	}
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:])
 }
 
 // Suite is a validated ordered collection of cases.
@@ -121,8 +134,12 @@ func (s Suite) Validate() error {
 		if !strings.HasPrefix(c.ID, string(c.Intent)+"-") {
 			return fmt.Errorf("eval: case %q does not match intent %q", c.ID, c.Intent)
 		}
-		if strings.TrimSpace(c.Query) == "" {
+		trimmedQuery := strings.TrimSpace(c.Query)
+		if trimmedQuery == "" {
 			return fmt.Errorf("eval: case %q has empty query", c.ID)
+		}
+		if c.Query != trimmedQuery {
+			return fmt.Errorf("eval: case %q query has leading or trailing whitespace", c.ID)
 		}
 		if c.MaxResults < 1 || c.MaxResults > 50 {
 			return fmt.Errorf("eval: case %q max_results must be 1..50", c.ID)

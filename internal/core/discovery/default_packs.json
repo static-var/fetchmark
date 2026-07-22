@@ -120,6 +120,16 @@
       "max_concurrency": 1,
       "rate_per_second": 100,
       "burst": 10
+    },
+    {
+      "id": "docindex",
+      "kind": "docindex",
+      "weight": 1.0,
+      "max_results": 20,
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "rate_per_second": 100,
+      "burst": 10
     }
   ],
   "packs": [
@@ -129,7 +139,7 @@
       "sources": [
         {"id": "searxng-default", "source": "searxng", "weight": 1.0, "variants": ["original", "exact"]},
         {"id": "searxng-open", "source": "searxng", "weight": 0.9, "variants": ["original"], "engines": ["mwmbl", "wiby", "yacy"], "max_results": 30},
-        {"id": "mwmbl-general", "source": "mwmbl", "weight": 1.0, "variants": ["original"], "max_results": 20},
+        {"id": "mwmbl-general", "source": "mwmbl", "weight": 1.0, "variants": ["original", "concept"], "max_results": 20},
         {"id": "wiby-general", "source": "wiby", "weight": 1.0, "variants": ["original"], "max_results": 12},
         {"id": "yacy-general", "source": "yacy", "weight": 1.0, "variants": ["original"], "max_results": 20},
         {"id": "scrapling-general", "source": "scrapling", "weight": 1.0, "variants": ["original"], "engines": ["google", "duckduckgo"], "max_results": 20}
@@ -141,7 +151,8 @@
       "sources": [
         {"id": "searxng-developer", "source": "searxng", "weight": 0.9, "variants": ["docs"], "engines": ["github", "gitlab", "stackoverflow"], "max_results": 30},
         {"id": "stackexchange-developer", "source": "stackexchange", "weight": 1.0, "variants": ["original"], "max_results": 10},
-        {"id": "github-developer", "source": "github", "weight": 1.0, "variants": ["original"], "max_results": 20}
+        {"id": "github-developer", "source": "github", "weight": 1.0, "variants": ["original"], "max_results": 20},
+        {"id": "official-developer-docs", "source": "docindex", "weight": 1.0, "variants": ["original"], "max_results": 20}
       ]
     },
     {

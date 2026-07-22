@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -31,6 +34,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv fu
 	live := fs.Bool("live", false, "execute live HTTP queries (disabled by default)")
 	recordsPath := fs.String("records", "", "existing JSONL run artifact to analyze offline")
 	labelsPath := fs.String("labels", "", "completed relevance-label JSONL for -records")
+	qrelsPath := fs.String("qrels", "", "pooled cross-run relevance judgments JSONL for -records")
 	labelTemplatePath := fs.String("label-template", "", "new blind relevance-label template path for -records")
 	labelUIPath := fs.String("label-ui", "", "new self-contained offline relevance-labeling HTML path for -records")
 	endpoint := fs.String("endpoint", "http://127.0.0.1:8080/v1/search", "Fetchmark /v1/search endpoint")
@@ -55,8 +59,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv fu
 		return 2
 	}
 	if strings.TrimSpace(*recordsPath) == "" {
-		if strings.TrimSpace(*labelsPath) != "" || strings.TrimSpace(*labelTemplatePath) != "" || strings.TrimSpace(*labelUIPath) != "" {
-			fmt.Fprintln(stderr, "fetchmark-eval: -labels, -label-template, and -label-ui require -records")
+		if strings.TrimSpace(*labelsPath) != "" || strings.TrimSpace(*qrelsPath) != "" || strings.TrimSpace(*labelTemplatePath) != "" || strings.TrimSpace(*labelUIPath) != "" {
+			fmt.Fprintln(stderr, "fetchmark-eval: -labels, -qrels, -label-template, and -label-ui require -records")
 			return 2
 		}
 	} else {
@@ -64,7 +68,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv fu
 			fmt.Fprintln(stderr, "fetchmark-eval: -records cannot be combined with live-run controls")
 			return 2
 		}
-		return analyzeRecords(*recordsPath, *labelsPath, *labelTemplatePath, *labelUIPath, stdout, stderr)
+		if strings.TrimSpace(*labelsPath) != "" && strings.TrimSpace(*qrelsPath) != "" {
+			fmt.Fprintln(stderr, "fetchmark-eval: -labels and -qrels are mutually exclusive")
+			return 2
+		}
+		return analyzeRecords(*recordsPath, *labelsPath, *qrelsPath, *labelTemplatePath, *labelUIPath, stdout, stderr)
 	}
 	if !*live && (strings.TrimSpace(*configurationManifestOutput) != "" || *requireConfigurationSHA256) {
 		fmt.Fprintln(stderr, "fetchmark-eval: configuration manifest controls require -live")
@@ -297,7 +305,7 @@ func samplePerIntent(suite feval.Suite, perIntent int) (feval.Suite, error) {
 	return feval.Suite{Cases: selected}, nil
 }
 
-func analyzeRecords(recordsPath, labelsPath, labelTemplatePath, labelUIPath string, stdout, stderr io.Writer) int {
+func analyzeRecords(recordsPath, labelsPath, qrelsPath, labelTemplatePath, labelUIPath string, stdout, stderr io.Writer) int {
 	recordsFile, err := os.Open(recordsPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "fetchmark-eval: open records: %v\n", err)
@@ -342,6 +350,40 @@ func analyzeRecords(recordsPath, labelsPath, labelTemplatePath, labelUIPath stri
 		report["labels"] = labelsPath
 		report["relevance"] = relevance
 	}
+	if strings.TrimSpace(qrelsPath) != "" {
+		qrelsFile, err := os.Open(qrelsPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "fetchmark-eval: open qrels: %v\n", err)
+			return 1
+		}
+		qrelsDigest := sha256.New()
+		qrels, loadErr := feval.LoadPooledRelevanceLabels(io.TeeReader(qrelsFile, qrelsDigest))
+		closeErr := qrelsFile.Close()
+		if loadErr != nil {
+			fmt.Fprintf(stderr, "fetchmark-eval: %v\n", loadErr)
+			return 1
+		}
+		if closeErr != nil {
+			fmt.Fprintf(stderr, "fetchmark-eval: close qrels: %v\n", closeErr)
+			return 1
+		}
+		relevance, err := feval.ScoreRelevancePooled(records, qrels)
+		if err != nil {
+			fmt.Fprintf(stderr, "fetchmark-eval: score qrels: %v\n", err)
+			return 1
+		}
+		report["qrels"] = qrelsPath
+		report["qrels_sha256"] = hex.EncodeToString(qrelsDigest.Sum(nil))
+		origins := make(map[string]struct{})
+		sourceRunIDs := make(map[string]struct{})
+		for _, qrel := range qrels {
+			origins[string(qrel.JudgmentOrigin)] = struct{}{}
+			sourceRunIDs[qrel.SourceRunID] = struct{}{}
+		}
+		report["qrels_judgment_origins"] = sortedKeys(origins)
+		report["qrels_source_run_ids"] = sortedKeys(sourceRunIDs)
+		report["relevance"] = relevance
+	}
 	if strings.TrimSpace(labelTemplatePath) != "" {
 		if err := createLabelTemplate(labelTemplatePath, records); err != nil {
 			fmt.Fprintf(stderr, "fetchmark-eval: create label template: %v\n", err)
@@ -357,6 +399,15 @@ func analyzeRecords(recordsPath, labelsPath, labelTemplatePath, labelUIPath stri
 		report["label_ui"] = labelUIPath
 	}
 	return writeJSON(stdout, stderr, report)
+}
+
+func sortedKeys(values map[string]struct{}) []string {
+	keys := make([]string, 0, len(values))
+	for value := range values {
+		keys = append(keys, value)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func createLabelTemplate(path string, records []feval.Record) error {

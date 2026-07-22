@@ -82,6 +82,12 @@ func LoadRecords(reader io.Reader) ([]Record, error) {
 				return nil, fmt.Errorf("eval: record %d has invalid configuration_sha256", index+1)
 			}
 		}
+		if record.CaseSHA256 != "" {
+			canonical, ok := buildidentity.Parse(record.CaseSHA256)
+			if !ok || canonical != record.CaseSHA256 {
+				return nil, fmt.Errorf("eval: record %d has invalid case_sha256", index+1)
+			}
+		}
 		if !validBaselineIdentity(record.Revision) || !validBaselineIdentity(record.ConfigurationID) {
 			return nil, fmt.Errorf("eval: record %d has invalid baseline identity", index+1)
 		}

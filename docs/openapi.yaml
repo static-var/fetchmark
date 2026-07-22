@@ -190,9 +190,9 @@ components:
       type: object
       required: [provider, lane, variant]
       properties:
-        provider: { type: string, description: "Bounded discovery adapter kind, such as scrapling, searxng, wikipedia, crossref, arxiv, mwmbl, wiby, stackexchange, github, pubmed, yacy, openpack, local-index, or federation." }
+        provider: { type: string, description: "Bounded discovery adapter kind, such as scrapling, searxng, wikipedia, crossref, arxiv, mwmbl, wiby, stackexchange, github, pubmed, yacy, docindex, openpack, local-index, or federation." }
         lane: { type: string, description: "Validated source-pack lane. Private federation binding IDs are never exposed." }
-        variant: { type: string, enum: [original, exact, freshness, docs, other] }
+        variant: { type: string, enum: [original, exact, freshness, docs, concept, other] }
 
     DiscoveryParseFallback:
       type: object
@@ -227,7 +227,7 @@ components:
       properties:
         provider: { type: string, maxLength: 48, description: "Trusted adapter kind from the validated discovery plan." }
         lane: { type: string, maxLength: 48, description: "Trusted source-pack lane; private federation identities remain redacted." }
-        variant: { type: string, enum: [original, exact, freshness, docs, other] }
+        variant: { type: string, enum: [original, exact, freshness, docs, concept, other] }
         status: { type: string, enum: [healthy, partial, degraded_empty, authoritative_empty, failed] }
         candidate_count: { type: integer, minimum: 0, maximum: 100, description: "Unique canonical candidates returned before fetch/extraction." }
         duration_ms: { type: integer, minimum: 0, maximum: 86400000 }

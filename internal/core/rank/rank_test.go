@@ -1,6 +1,7 @@
 package rank
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +19,32 @@ func TestScore_TitleWeightBeatsBodyMatch(t *testing.T) {
 	}
 	if r[0].Score <= r[1].Score {
 		t.Fatalf("scores not strictly ordered: %v %v", r[0].Score, r[1].Score)
+	}
+}
+
+func TestScore_FocusedPassageBeatsRepeatedWholeBodyTerms(t *testing.T) {
+	results := []model.SearchResult{
+		{
+			URL:   "https://example.org/archive",
+			Title: "Migration archive",
+			Content: &model.Content{MainText: strings.Repeat(
+				"Bird reports discuss routes. Migration records are indexed separately. ", 80,
+			)},
+		},
+		{
+			URL:     "https://example.org/field-study",
+			Title:   "Coastal field study",
+			Snippet: "Researchers mapped seasonal movement.",
+			Content: &model.Content{
+				Headings: []string{"Bird migration routes"},
+				MainText: "Field teams mapped bird migration routes across two coastal corridors and compared route timing.",
+			},
+		},
+	}
+
+	got := New().Score("bird migration routes", results)
+	if got[0].URL != "https://example.org/field-study" {
+		t.Fatalf("focused passage should beat repeated dispersed body terms; got %q first (scores %.3f, %.3f)", got[0].URL, got[0].Score, got[1].Score)
 	}
 }
 
@@ -57,15 +84,24 @@ func TestRankerPenalizesSocialResultsForFreshnessQueries(t *testing.T) {
 	}
 }
 
-func TestRankerDoesNotTreatFreshnessSubstringsAsFreshnessQueries(t *testing.T) {
-	results := []model.SearchResult{
-		{URL: "https://x.com/energy/status/123", Title: "Renewable energy trends", Snippet: "renewable energy trends"},
-		{URL: "https://example.org/renewable-energy-trends", Title: "Renewable energy trends", Snippet: "renewable energy trends"},
-	}
-
-	r := New().Score("renewable energy trends", results)
-	if r[0].URL != "https://x.com/energy/status/123" {
-		t.Fatalf("renewable should not trigger freshness penalties; got %q first", r[0].URL)
+func TestRankerDoesNotTreatFreshnessSubstringsOrProperNounsAsFreshnessQueries(t *testing.T) {
+	for _, query := range []string{
+		"renewable energy trends",
+		"this weekend hiking routes",
+		"New York subway map",
+		"New Zealand visa requirements",
+		"New Balance shoes",
+	} {
+		t.Run(query, func(t *testing.T) {
+			results := []model.SearchResult{
+				{URL: "https://x.com/hiking/status/123", Title: query, Snippet: query},
+				{URL: "https://example.org/hiking-routes", Title: query, Snippet: query},
+			}
+			r := New().Score(query, results)
+			if r[0].URL != "https://x.com/hiking/status/123" {
+				t.Fatalf("freshness substring should not trigger penalties; got %q first", r[0].URL)
+			}
+		})
 	}
 }
 
@@ -87,6 +123,20 @@ func TestRankerPenalizesHomepagesForFreshnessQueries(t *testing.T) {
 	r := New().Score("recent bird species discovery", results)
 	if r[0].URL == "https://birds.example.org/" {
 		t.Fatalf("homepage should be penalized for freshness query; got %q first", r[0].URL)
+	}
+}
+
+func TestRankerTreatsCurrentAsFreshnessQuery(t *testing.T) {
+	now := time.Now().UTC()
+	recent := now.Add(-24 * time.Hour)
+	results := []model.SearchResult{
+		{URL: "https://en.wikipedia.org/wiki/Bird_flu", Title: "Current bird flu outlook", Snippet: "current bird flu outlook"},
+		{URL: "https://example.org/news/bird-flu-outlook", Title: "Current bird flu outlook", Snippet: "current bird flu outlook", PublishedAt: &recent},
+	}
+
+	got := New().Score("current bird flu outlook", results)
+	if got[0].PublishedAt == nil {
+		t.Fatalf("current query should prefer recent article over reference result; got %q first", got[0].URL)
 	}
 }
 
@@ -216,6 +266,88 @@ func TestFilterLowConfidenceUsesCrossProviderAgreementOnlyWithLexicalSupport(t *
 	got := FilterLowConfidence("How do heat pumps move heat into a building?", results)
 	if len(got) != 1 || got[0].URL != "https://example.org/heat-pump-guide" {
 		t.Fatalf("provenance-aware filter = %+v", got)
+	}
+}
+
+func TestFilterLowConfidenceKeepsStrongFocusedPassageEvidence(t *testing.T) {
+	results := []model.SearchResult{{
+		URL:     "https://database.example.org/concurrency",
+		Title:   "Database concurrency notes",
+		Snippet: "A practical explanation for application developers.",
+		Content: &model.Content{
+			Headings: []string{"Checkpoint behavior"},
+			MainText: "SQLite WAL checkpoints can wait for readers because an active reader pins the end mark needed by the checkpoint.",
+		},
+	}}
+
+	ranked := New().Score("How do SQLite WAL checkpoints interact with readers?", results)
+	got := FilterLowConfidence("How do SQLite WAL checkpoints interact with readers?", ranked)
+	if len(got) != 1 {
+		t.Fatalf("strong focused passage evidence was dropped: %+v", ranked)
+	}
+}
+
+func TestTopicalTokensPreservesConceptSuffixesAndNormalizesSafePlurals(t *testing.T) {
+	got := TopicalTokens("analysis status physics series species news routes batteries classes")
+	want := []string{"analysis", "status", "physics", "series", "species", "news", "route", "battery", "class"}
+	if len(got) != len(want) {
+		t.Fatalf("TopicalTokens() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("TopicalTokens() = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestTopicalTokensPreservesPunctuationBearingIdentifiers(t *testing.T) {
+	got := TopicalTokens("C++ C# http.Client")
+	want := []string{"c++", "c#", "http", "client"}
+	if len(got) != len(want) {
+		t.Fatalf("TopicalTokens() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("TopicalTokens() = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestScanTopicalTokensStopsAtRequestedLimit(t *testing.T) {
+	text := strings.Repeat("alpha ", maxTopicalBodyTokens+1) + strings.Repeat("unscanned ", maxTopicalBodyTokens*8)
+
+	tokens, scannedBytes := scanTopicalTokens(text, maxTopicalBodyTokens)
+
+	if len(tokens) != maxTopicalBodyTokens {
+		t.Fatalf("tokens = %d, want %d", len(tokens), maxTopicalBodyTokens)
+	}
+	if scannedBytes >= len(text)/2 {
+		t.Fatalf("scanner consumed %d/%d bytes after reaching token limit", scannedBytes, len(text))
+	}
+	for _, token := range tokens {
+		if token != "alpha" {
+			t.Fatalf("scanner crossed limit into tail token %q", token)
+		}
+	}
+
+	stopWords := strings.Repeat("the ", maxTopicalBodyTokens+1) + strings.Repeat("unscanned ", maxTopicalBodyTokens*8)
+	tokens, scannedBytes = scanTopicalTokens(stopWords, maxTopicalBodyTokens)
+	if len(tokens) != 0 {
+		t.Fatalf("stop-word scan emitted tokens: %v", tokens)
+	}
+	if scannedBytes >= len(stopWords)/2 {
+		t.Fatalf("stop-word scanner consumed %d/%d bytes after reaching work limit", scannedBytes, len(stopWords))
+	}
+}
+
+func TestTopicalEvidenceUsesClosestCoveringSpan(t *testing.T) {
+	query := newTopicalQuery("alpha beta gamma")
+	tokens := append([]string{"alpha"}, strings.Fields(strings.Repeat("filler ", 40))...)
+	tokens = append(tokens, "beta", "gamma", "alpha")
+
+	evidence := measureTopicalEvidence(query, tokens)
+	if evidence.proximity != 1 {
+		t.Fatalf("proximity = %.3f, want closest three-term span score 1", evidence.proximity)
 	}
 }
 
