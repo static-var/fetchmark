@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/staticvar/fetchmark/internal/api/middleware"
 	"github.com/staticvar/fetchmark/internal/core/pipeline"
@@ -47,7 +48,10 @@ type parseRequest struct {
 // errBadRequest is used by decodeJSON to signal client-side failures.
 var errBadRequest = errors.New("bad_request")
 
-const maxRequestTimeoutMS = 60_000
+const (
+	maxRequestTimeoutMS = 60_000
+	maxQueryRunes       = 400
+)
 
 func decodeJSON(r *http.Request, v any) error {
 	r.Body = http.MaxBytesReader(nil, r.Body, 1<<20)
@@ -55,6 +59,13 @@ func decodeJSON(r *http.Request, v any) error {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		return errBadRequest
+	}
+	return nil
+}
+
+func validateQueryLength(query string) error {
+	if utf8.RuneCountInString(query) > maxQueryRunes {
+		return errors.New("query must be at most 400 characters")
 	}
 	return nil
 }
@@ -139,6 +150,11 @@ func parseHandler(d Deps) http.HandlerFunc {
 		}
 		if len(req.URLs) == 0 {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "urls required"})
+			return
+		}
+		req.Query = strings.TrimSpace(req.Query)
+		if err := validateQueryLength(req.Query); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
 		if err := validateFormats(req.Formats); err != nil {

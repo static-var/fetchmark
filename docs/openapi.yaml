@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Fetchmark API
-  version: "0.1.0"
+  version: "0.1.1"
   description: |
     Fetchmark is a self-hostable open-discovery API with explicit Tavily,
     Exa, and Brave compatibility routes. It brokers native open sources and
@@ -83,7 +83,7 @@ components:
       type: object
       required: [query]
       properties:
-        query:           { type: string, example: "site:go.dev slices" }
+        query:           { type: string, maxLength: 400, example: "site:go.dev slices" }
         engines:         { type: array, items: { type: string } }
         categories:
           type: array
@@ -142,7 +142,7 @@ components:
       required: [urls]
       properties:
         urls:            { type: array, items: { type: string, format: uri } }
-        query:           { type: string, description: "Optional — enables ranking." }
+        query:           { type: string, maxLength: 400, description: "Optional — enables ranking." }
         formats:         { type: array, items: { type: string, enum: [json, markdown, html] } }
         render:          { type: boolean, description: "When true, fetch pages with the configured rendering path for JavaScript-heavy content." }
         timeout_ms:      { type: integer, minimum: 1, maximum: 60000 }
@@ -192,7 +192,10 @@ components:
       properties:
         provider: { type: string, description: "Bounded discovery adapter kind, such as scrapling, searxng, wikipedia, crossref, arxiv, mwmbl, wiby, stackexchange, github, pubmed, yacy, docindex, openpack, local-index, or federation." }
         lane: { type: string, description: "Validated source-pack lane. Private federation binding IDs are never exposed." }
-        variant: { type: string, enum: [original, exact, freshness, docs, concept, other] }
+        variant:
+          type: string
+          enum: [original, exact, freshness, docs, concept, other]
+          description: "Discovery query variant. concept identifies a generated conceptual-expansion query."
 
     DiscoveryParseFallback:
       type: object
@@ -227,7 +230,10 @@ components:
       properties:
         provider: { type: string, maxLength: 48, description: "Trusted adapter kind from the validated discovery plan." }
         lane: { type: string, maxLength: 48, description: "Trusted source-pack lane; private federation identities remain redacted." }
-        variant: { type: string, enum: [original, exact, freshness, docs, concept, other] }
+        variant:
+          type: string
+          enum: [original, exact, freshness, docs, concept, other]
+          description: "Discovery query variant. concept identifies a generated conceptual-expansion query."
         status: { type: string, enum: [healthy, partial, degraded_empty, authoritative_empty, failed] }
         candidate_count: { type: integer, minimum: 0, maximum: 100, description: "Unique canonical candidates returned before fetch/extraction." }
         duration_ms: { type: integer, minimum: 0, maximum: 86400000 }
@@ -311,7 +317,7 @@ components:
       type: object
       required: [query]
       properties:
-        query: { type: string }
+        query: { type: string, maxLength: 400 }
         search_depth: { type: string, enum: [basic, advanced, fast, ultra-fast] }
         chunks_per_source: { type: integer, minimum: 1, maximum: 3 }
         max_results: { type: integer, minimum: 1, maximum: 20, default: 5 }
@@ -329,7 +335,7 @@ components:
       type: object
       required: [query]
       properties:
-        query: { type: string }
+        query: { type: string, maxLength: 400 }
         includeDomains: { type: array, items: { type: string } }
         excludeDomains: { type: array, items: { type: string } }
         numResults: { type: integer, minimum: 1, maximum: 100, default: 10 }
@@ -337,8 +343,20 @@ components:
         contents:
           type: object
           properties:
-            text: { oneOf: [{ type: boolean }, { type: object }] }
-            highlights: { oneOf: [{ type: boolean }, { type: object }], description: A distinct highlights query is not supported. }
+            text: { $ref: "#/components/schemas/ExaContentControl" }
+            highlights:
+              allOf:
+                - { $ref: "#/components/schemas/ExaContentControl" }
+              description: A distinct highlights query is not supported.
+
+    ExaContentControl:
+      oneOf:
+        - type: boolean
+        - type: object
+          additionalProperties: false
+          properties:
+            maxCharacters: { type: integer, minimum: 1, maximum: 10000 }
+            query: { type: string, maxLength: 400 }
 
     ExaContentsRequest:
       type: object
@@ -348,8 +366,11 @@ components:
       properties:
         ids: { type: array, minItems: 1, maxItems: 100, items: { type: string, format: uri } }
         urls: { type: array, minItems: 1, maxItems: 100, items: { type: string, format: uri } }
-        text: { oneOf: [{ type: boolean }, { type: object }] }
-        highlights: { type: object, description: Requires a non-empty query property. }
+        text: { $ref: "#/components/schemas/ExaContentControl" }
+        highlights:
+          allOf:
+            - { $ref: "#/components/schemas/ExaContentControl" }
+          description: Requires a non-empty query property.
       description: Exactly one of ids or urls is required. Fetchmark IDs are URLs.
 
     ExaErrorResponse:
@@ -421,7 +442,7 @@ paths:
               schema:
                 type: object
                 properties:
-                  query:   { type: string }
+                  query:   { type: string, maxLength: 400 }
                   count:   { type: integer }
                   results: { type: array, items: { $ref: "#/components/schemas/SearchResult" } }
                   discovery: { $ref: "#/components/schemas/DiscoveryReport" }

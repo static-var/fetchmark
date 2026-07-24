@@ -319,7 +319,7 @@ func exaContentsHandler(d Deps) http.HandlerFunc {
 			writeExaError(writer, request, http.StatusServiceUnavailable, "pipeline not ready", "INTERNAL_ERROR")
 			return
 		}
-		query := vendorRequest.Highlights.Query
+		query := strings.TrimSpace(vendorRequest.Highlights.Query)
 		formats := []string{"json", "markdown", "html"}
 		chunksPerSource := 0
 		if vendorRequest.Highlights.Enabled {
@@ -351,8 +351,11 @@ func validateExaContentsRequest(request exaContentsRequest, cap int) ([]string, 
 	if rawValueSet(request.Summary) || rawValueSet(request.Extras) || rawValueSet(request.Subpages) || rawValueSet(request.Livecrawl) || rawValueSet(request.MaxAgeHours) {
 		return nil, newExaRequestError("INVALID_REQUEST_BODY", "summary, extras, subpages, livecrawl, and maxAgeHours are not supported")
 	}
-	if request.Highlights.Enabled && request.Highlights.Query == "" {
+	if request.Highlights.Enabled && strings.TrimSpace(request.Highlights.Query) == "" {
 		return nil, newExaRequestError("INVALID_REQUEST_BODY", "highlights.query is required for contents highlights")
+	}
+	if err := validateQueryLength(strings.TrimSpace(request.Highlights.Query)); err != nil {
+		return nil, newExaRequestError("INVALID_REQUEST_BODY", err.Error())
 	}
 	var urls []string
 	if request.URLs != nil {

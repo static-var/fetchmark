@@ -83,7 +83,7 @@ func translateBraveRequest(query url.Values, cap int) (searchRequest, int, int, 
 	if q == "" {
 		return searchRequest{}, 0, 0, errors.New("q is required")
 	}
-	if utf8.RuneCountInString(q) > 400 || len(strings.Fields(q)) > 50 {
+	if utf8.RuneCountInString(q) > maxQueryRunes || len(strings.Fields(q)) > 50 {
 		return searchRequest{}, 0, 0, errors.New("q must be at most 400 characters and 50 words")
 	}
 	count, err := braveIntParameter(query, "count", 20, 1, 20)

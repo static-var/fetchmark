@@ -416,6 +416,63 @@ func TestSearch_MissingQueryIs400(t *testing.T) {
 	}
 }
 
+func TestNativeRoutesRejectOversizedQueriesBeforePipelineWork(t *testing.T) {
+	const publicQueryRuneLimit = 400
+	oversized := strings.Repeat("界", publicQueryRuneLimit+1)
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{name: "search", path: "/v1/search", body: `{"query":"` + oversized + `"}`},
+		{name: "parse", path: "/v1/parse", body: `{"urls":["https://example.com"],"query":"` + oversized + `"}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			router, pipe := newTestRouter(nil)
+			request := httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(test.body))
+			request.Header.Set("X-API-Key", "k1")
+			recorder := httptest.NewRecorder()
+
+			router.ServeHTTP(recorder, request)
+
+			if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "query must be at most") {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			if pipe.searchCalls != 0 || pipe.parseCalls != 0 {
+				t.Fatalf("pipeline calls search=%d parse=%d", pipe.searchCalls, pipe.parseCalls)
+			}
+		})
+	}
+}
+
+func TestNativeRoutesAcceptQueryAtPublicLimit(t *testing.T) {
+	const publicQueryRuneLimit = 400
+	query := strings.Repeat("界", publicQueryRuneLimit)
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{name: "search", path: "/v1/search", body: `{"query":"` + query + `"}`},
+		{name: "parse", path: "/v1/parse", body: `{"urls":["https://example.com"],"query":"` + query + `"}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			router, _ := newTestRouter(nil)
+			request := httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(test.body))
+			request.Header.Set("X-API-Key", "k1")
+			recorder := httptest.NewRecorder()
+
+			router.ServeHTTP(recorder, request)
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
 func TestSearch_UnsupportedEngineControlIsTypedClientError(t *testing.T) {
 	r, p := newTestRouter(nil)
 	p.err = &search.UnsupportedControlError{Control: "engines", Reason: "no enabled SearXNG discovery source"}

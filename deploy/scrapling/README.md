@@ -5,6 +5,12 @@ profile and a bounded asynchronous page pool. `POST /v1/search` accepts only a
 query, a compiled engine allowlist, and a bounded result count. Google and
 DuckDuckGo are the default engines and are visited concurrently.
 
+Release images are published at
+`ghcr.io/static-var/fetchmark-scrapling` with the same semantic-version,
+branch, and short-SHA tags as the main Fetchmark image. Local Compose builds
+use `fetchmark-scrapling:0.4.12` as their cache identity; that local image tag
+is separate from the pinned upstream Scrapling dependency version.
+
 Using the default lane discloses each eligible query to Google and DuckDuckGo.
 Fetchmark rejects controls this sidecar cannot preserve instead of silently
 weakening them.

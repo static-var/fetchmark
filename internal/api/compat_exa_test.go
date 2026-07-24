@@ -200,6 +200,24 @@ func TestExaCompatErrorTagsMatchExaWireContract(t *testing.T) {
 	}
 }
 
+func TestExaContentsRejectsOversizedHighlightsQueryBeforePipelineWork(t *testing.T) {
+	const publicQueryRuneLimit = 400
+	pipe := &fakePipeline{}
+	request := httptest.NewRequest(http.MethodPost, "/compat/exa/contents", strings.NewReader(
+		`{"urls":["https://example.com"],"highlights":{"query":"`+
+			strings.Repeat("x", publicQueryRuneLimit+1)+`"}}`,
+	))
+	request.Header.Set("x-api-key", "k1")
+	recorder := httptest.NewRecorder()
+
+	compatTestRouter(pipe).ServeHTTP(recorder, request)
+
+	assertExaErrorEnvelope(t, recorder, http.StatusBadRequest, "INVALID_REQUEST_BODY")
+	if pipe.parseCalls != 0 {
+		t.Fatalf("pipeline parse calls=%d", pipe.parseCalls)
+	}
+}
+
 func TestExaCompatValidNumResultsAboveInstanceCapIsExceeded(t *testing.T) {
 	router := NewRouter(Deps{
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),

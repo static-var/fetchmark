@@ -340,6 +340,49 @@ func TestScanTopicalTokensStopsAtRequestedLimit(t *testing.T) {
 	}
 }
 
+func TestLexicalWorkIsBoundedForAdversarialRepeatedInput(t *testing.T) {
+	const (
+		queryTokenLimit = 128
+		fieldTokenLimit = 256
+	)
+	query := newTopicalQuery(strings.Repeat("repeat ", 200_000))
+	if len(query.ordered) != queryTokenLimit {
+		t.Fatalf("query tokens = %d, want bounded at %d", len(query.ordered), queryTokenLimit)
+	}
+
+	document := newLexicalDocument(query, model.SearchResult{
+		Title:   strings.Repeat("repeat ", 200_000),
+		Snippet: strings.Repeat("repeat ", 200_000),
+		Content: &model.Content{
+			Headings: []string{strings.Repeat("repeat ", 200_000)},
+			MainText: strings.Repeat("repeat ", maxTopicalBodyTokens*2),
+		},
+	})
+	if len(document.title) != fieldTokenLimit {
+		t.Fatalf("title tokens = %d, want bounded at %d", len(document.title), fieldTokenLimit)
+	}
+	if len(document.snippet) != fieldTokenLimit {
+		t.Fatalf("snippet tokens = %d, want bounded at %d", len(document.snippet), fieldTokenLimit)
+	}
+	if len(document.headings) != fieldTokenLimit {
+		t.Fatalf("heading tokens = %d, want bounded at %d", len(document.headings), fieldTokenLimit)
+	}
+	if len(document.passage) > passageTokenLimit {
+		t.Fatalf("passage tokens = %d, want at most %d", len(document.passage), passageTokenLimit)
+	}
+	if document.evidence.phraseTerms > queryTokenLimit {
+		t.Fatalf("phrase terms = %d, query bound = %d", document.evidence.phraseTerms, queryTokenLimit)
+	}
+}
+
+func TestLongestQueryPhraseFindsLongestContiguousMatch(t *testing.T) {
+	query := strings.Fields("one two three four five")
+	text := strings.Fields("zero two three four six")
+	if got := longestQueryPhrase(query, text); got != 3 {
+		t.Fatalf("longestQueryPhrase() = %d, want 3", got)
+	}
+}
+
 func TestTopicalEvidenceUsesClosestCoveringSpan(t *testing.T) {
 	query := newTopicalQuery("alpha beta gamma")
 	tokens := append([]string{"alpha"}, strings.Fields(strings.Repeat("filler ", 40))...)

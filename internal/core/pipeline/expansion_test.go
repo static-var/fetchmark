@@ -212,6 +212,45 @@ func TestBasicSearchUsesSecondaryProvidersWhenPrimaryUnderfillsCandidateWindow(t
 	}
 }
 
+func TestBasicSearchUsesSecondaryProvidersWhenPrimaryRelevantResultsUnderfillWindow(t *testing.T) {
+	var secondaryCalls atomic.Int32
+	primary := expansionSearchFunc(func(context.Context, search.Query) ([]search.Hit, error) {
+		return []search.Hit{
+			{URL: "https://go.dev/doc/", Title: "Go concurrency patterns", Snippet: "Goroutines and channels"},
+			{URL: "https://example.com/cooking", Title: "Cooking pasta"},
+			{URL: "https://example.com/gardening", Title: "Growing tomatoes"},
+		}, nil
+	})
+	secondary := expansionSearchFunc(func(context.Context, search.Query) ([]search.Hit, error) {
+		secondaryCalls.Add(1)
+		return []search.Hit{{URL: "https://secondary.example/concurrency", Title: "More Go concurrency patterns"}}, nil
+	})
+	primarySource := discovery.Source{ID: "scrapling-general", ProviderID: "scrapling", ProviderKind: "scrapling", Searcher: primary, Variants: []string{"original"}}
+	p := &Pipeline{
+		DiscoveryPlanner: primaryExpansionPlanner{
+			primary: primarySource,
+			sources: []discovery.Source{
+				primarySource,
+				{ID: "searxng-open", ProviderID: "searxng", ProviderKind: "searxng", Searcher: secondary, Variants: []string{"original"}},
+			},
+		},
+		AdvancedSearchConcurrency: 2,
+	}
+
+	candidates, err := p.searchCandidateSet(context.Background(), Options{Query: "Go concurrency patterns", MaxResults: 2}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondaryCalls.Load() != 1 || len(candidates.lanes) != 2 {
+		t.Fatalf("candidates=%+v secondary_calls=%d", candidates, secondaryCalls.Load())
+	}
+	if candidates.hits[0].URL != "https://go.dev/doc/" || !slices.ContainsFunc(candidates.hits, func(hit search.Hit) bool {
+		return hit.URL == "https://secondary.example/concurrency"
+	}) {
+		t.Fatalf("candidates=%+v, want Scrapling winner first and relevant secondary result included", candidates.hits)
+	}
+}
+
 func TestBasicSearchObservesUnderfilledPrimaryLaneOnce(t *testing.T) {
 	const laneID = "scrapling-underfill-observation"
 	primaryCounter := obs.DiscoveryLaneTotal.WithLabelValues("scrapling", laneID, "original", string(search.BatchHealthy))

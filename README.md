@@ -263,11 +263,14 @@ docker compose -f deploy/docker-compose.external.yml up -d --build
 ```
 
 Basic and advanced searches both use the enabled source-pack plan. Basic depth
-issues at most one original-query lane per planned provider and uses the same
-weighted RRF merge without generating advanced query variants. An explicit
-`engines` request still means a SearXNG engine selection; without enabled
-SearXNG, the native API returns HTTP 400 with `error=unsupported_control` and
-`control=engines` rather than silently ignoring the control.
+issues at most one lane per planned provider: the original query by default, or
+the matching deterministic docs/freshness projection when an enabled specialty
+pack explicitly supports it. It uses the same weighted RRF merge without
+fanning out across advanced query variants. Exact-match and explicit `engines`
+requests keep the original query; `engines` still means a SearXNG engine
+selection. Without enabled SearXNG, the native API returns HTTP 400 with
+`error=unsupported_control` and `control=engines` rather than silently ignoring
+the control.
 
 ### Enable the native Mwmbl lane
 
