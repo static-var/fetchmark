@@ -145,7 +145,7 @@ jobs:
         run: |
           smoke_platform() {
             platform="$1"
-            container_id="$(docker run --detach --platform "$platform" "$SCRAPLING_CANDIDATE")"
+            container_id="$(docker run --detach --platform "$platform" --health-start-period 120s --health-timeout 15s "$SCRAPLING_CANDIDATE")"
             for _ in $(seq 1 90); do
               if ! status="$(docker inspect --format '{{.State.Health.Status}}' "$container_id")"; then
                 docker logs "$container_id" || true
