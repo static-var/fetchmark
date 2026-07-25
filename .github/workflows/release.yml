@@ -160,6 +160,7 @@ jobs:
               fi
               if [ "$status" = healthy ]; then
                 docker rm --force "$container_id" >/dev/null
+                docker image rm --force "$SCRAPLING_CANDIDATE" >/dev/null
                 return 0
               fi
               if [ "$status" = unhealthy ]; then
