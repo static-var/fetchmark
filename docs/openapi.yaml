@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Fetchmark API
-  version: "0.1.1"
+  version: "0.1.2"
   description: |
     Fetchmark is a self-hostable open-discovery API with explicit Tavily,
     Exa, and Brave compatibility routes. It brokers native open sources and
