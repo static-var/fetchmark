@@ -142,7 +142,7 @@
         {"id": "mwmbl-general", "source": "mwmbl", "weight": 1.0, "variants": ["original", "concept"], "max_results": 20},
         {"id": "wiby-general", "source": "wiby", "weight": 1.0, "variants": ["original"], "max_results": 12},
         {"id": "yacy-general", "source": "yacy", "weight": 1.0, "variants": ["original"], "max_results": 20},
-        {"id": "scrapling-general", "source": "scrapling", "weight": 1.0, "variants": ["original"], "engines": ["google", "duckduckgo"], "max_results": 20}
+        {"id": "scrapling-general", "source": "scrapling", "weight": 1.0, "variants": ["original"], "engines": ["duckduckgo", "brave"], "max_results": 20}
       ]
     },
     {

@@ -291,7 +291,7 @@ func TestBuildDiscoveryPlannerBindsOptInScraplingLane(t *testing.T) {
 	}
 	sources := planner.Sources(search.Query{Q: "latest runtime release"})
 	for _, source := range sources {
-		if source.ID == "scrapling-general" && source.ProviderID == "scrapling" && source.ProviderKind == "scrapling" && reflect.DeepEqual(source.Engines, []string{"google", "duckduckgo"}) {
+		if source.ID == "scrapling-general" && source.ProviderID == "scrapling" && source.ProviderKind == "scrapling" && reflect.DeepEqual(source.Engines, []string{"duckduckgo", "brave"}) {
 			return
 		}
 	}

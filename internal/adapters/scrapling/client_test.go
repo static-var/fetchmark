@@ -18,6 +18,16 @@ func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, 
 	return function(request)
 }
 
+func TestNormalizedEnginesDefaultsToDuckDuckGoAndBrave(t *testing.T) {
+	engines, err := normalizedEngines(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(engines, ","); got != "duckduckgo,brave" {
+		t.Fatalf("default engines = %q, want duckduckgo,brave", got)
+	}
+}
+
 func TestClientSearchBatchMapsPartialResultsAndChallengeEvidence(t *testing.T) {
 	var received searchRequest
 	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {

@@ -302,7 +302,7 @@ type sidecarFallback struct {
 
 func normalizedEngines(raw []string) ([]string, error) {
 	if len(raw) == 0 {
-		return []string{"google", "duckduckgo", "brave"}, nil
+		return []string{"duckduckgo", "brave"}, nil
 	}
 	engines := make([]string, 0, len(raw))
 	seen := make(map[string]struct{}, len(raw))
