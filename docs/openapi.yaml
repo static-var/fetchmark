@@ -358,6 +358,17 @@ components:
             maxCharacters: { type: integer, minimum: 1, maximum: 10000 }
             query: { type: string, maxLength: 400 }
 
+    ExaContentsHighlightsControl:
+      oneOf:
+        - type: boolean
+          enum: [false]
+        - type: object
+          additionalProperties: false
+          required: [query]
+          properties:
+            maxCharacters: { type: integer, minimum: 1, maximum: 10000 }
+            query: { type: string, minLength: 1, maxLength: 400, pattern: '\S' }
+
     ExaContentsRequest:
       type: object
       oneOf:
@@ -369,8 +380,8 @@ components:
         text: { $ref: "#/components/schemas/ExaContentControl" }
         highlights:
           allOf:
-            - { $ref: "#/components/schemas/ExaContentControl" }
-          description: Requires a non-empty query property.
+            - { $ref: "#/components/schemas/ExaContentsHighlightsControl" }
+          description: Use false to disable highlights or an object with a non-blank query.
       description: Exactly one of ids or urls is required. Fetchmark IDs are URLs.
 
     ExaErrorResponse:
