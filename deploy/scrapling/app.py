@@ -32,6 +32,7 @@ MAX_CLEANED_DOM_INPUT_BYTES = 512 * 1024
 # Increment when an engine selector contract changes so logs identify the parser generation.
 PARSER_VERSION = 1
 SUPPORTED_ENGINES = ("google", "duckduckgo", "brave")
+DEFAULT_ENGINES = ("duckduckgo", "brave")
 ENGINE_HOSTS = {
     "google": ("google.com", "google.co.in", "accounts.google.com", "support.google.com"),
     "duckduckgo": ("duckduckgo.com",),
@@ -683,7 +684,7 @@ class SidecarHandler(BaseHTTPRequestHandler):
         query = _clean_text(payload.get("query"), MAX_QUERY_BYTES)
         if not query:
             raise ValueError("query is required")
-        raw_engines = payload.get("engines", list(SUPPORTED_ENGINES))
+        raw_engines = payload.get("engines", list(DEFAULT_ENGINES))
         if not isinstance(raw_engines, list) or not raw_engines:
             raise ValueError("engines must be a non-empty list")
         engines: list[str] = []

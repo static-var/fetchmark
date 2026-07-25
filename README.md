@@ -110,7 +110,7 @@ optional private, allowlisted, URL-only index federation workflow.
 {
   "query": "...",              // required on /v1/search
   "max_results": 10,           // caps returned list
-  "engines": ["google","duckduckgo"],
+  "engines": ["duckduckgo","brave"],
   "categories": ["general","news"],
   "language": "en",
   "time_range": "year",        // day, week, month, year; provider support varies
@@ -515,8 +515,8 @@ contribution, latency, domain, and blind relevance evidence. See the official
 ### Scrapling browser discovery and render fallback
 
 The Docker deployment runs Scrapling as Fetchmark's primary discovery lane. A
-single persistent headless Chromium context keeps a bounded page pool: Google
-and DuckDuckGo search concurrently, while separate page slots render
+single persistent headless Chromium context keeps a bounded page pool:
+DuckDuckGo and Brave Search run concurrently, while separate page slots render
 JavaScript-dependent destination pages when ordinary HTTP extraction reports
 `js_required` or retains only metadata without a usable body.
 
@@ -536,7 +536,9 @@ SearXNG because only that adapter can preserve its engine contract.
 accepts destination URLs only through Fetchmark's renderer path and forces all
 browser traffic through Fetchmark's connection-time egress proxy, preserving
 redirect and DNS-rebinding SSRF protection. Robots checks still run before the
-renderer is called. CAPTCHA solving remains disabled.
+renderer is called. Google remains available to custom discovery packs, but is
+not enabled by default because datacenter egress commonly receives 429 challenge
+pages. CAPTCHA solving remains disabled.
 
 When a search-engine selector breaks, the sidecar reports
 `result_selector_miss` or `snippet_selector_miss` and includes a bounded cleaned

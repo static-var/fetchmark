@@ -22,6 +22,18 @@ from app import (
 
 
 class ScraplingSidecarTest(unittest.TestCase):
+    def test_search_request_defaults_to_duckduckgo_and_brave(self):
+        payload = json.dumps({"query": "default engines"}).encode("utf-8")
+        handler = object.__new__(SidecarHandler)
+        handler.headers = {"Content-Length": str(len(payload))}
+        handler.rfile = io.BytesIO(payload)
+
+        query, engines, max_results = handler._read_request()
+
+        self.assertEqual(query, "default engines")
+        self.assertEqual(engines, ["duckduckgo", "brave"])
+        self.assertEqual(max_results, 20)
+
     def test_search_service_fetches_engines_concurrently(self):
         both_started = threading.Barrier(2)
 

@@ -41,6 +41,25 @@ func TestDefaultSpecEnforcesScraplingBoundedBrowserPoolCeiling(t *testing.T) {
 	t.Fatal("missing Scrapling source")
 }
 
+func TestDefaultSpecUsesDuckDuckGoAndBraveForScrapling(t *testing.T) {
+	spec, err := DefaultSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pack := range spec.Packs {
+		for _, source := range pack.Sources {
+			if source.LaneID != "scrapling-general" {
+				continue
+			}
+			if want := []string{"duckduckgo", "brave"}; !reflect.DeepEqual(source.Engines, want) {
+				t.Fatalf("Scrapling default engines = %v, want %v", source.Engines, want)
+			}
+			return
+		}
+	}
+	t.Fatal("missing Scrapling general lane")
+}
+
 func TestDefaultSpecEnforcesYaCyConservativeServiceCeiling(t *testing.T) {
 	spec, err := DefaultSpec()
 	if err != nil {
