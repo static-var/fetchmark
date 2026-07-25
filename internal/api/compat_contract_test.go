@@ -93,6 +93,48 @@ func TestCompatibilityResponseBudgetsKeepVendorErrorShapes(t *testing.T) {
 	}
 }
 
+func TestCompatibilityRoutesRejectOversizedQueriesBeforePipelineWork(t *testing.T) {
+	const publicQueryRuneLimit = 400
+	oversized := strings.Repeat("x", publicQueryRuneLimit+1)
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		body       string
+		header     string
+		wantStatus int
+	}{
+		{name: "tavily", method: http.MethodPost, path: "/compat/tavily/search", body: `{"query":"` + oversized + `"}`, header: "Authorization", wantStatus: http.StatusBadRequest},
+		{name: "exa", method: http.MethodPost, path: "/compat/exa/search", body: `{"query":"` + oversized + `"}`, header: "x-api-key", wantStatus: http.StatusBadRequest},
+		{name: "brave", method: http.MethodGet, path: "/compat/brave/res/v1/web/search?q=" + oversized, header: "X-Subscription-Token", wantStatus: http.StatusUnprocessableEntity},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			pipe := &fakePipeline{}
+			router := compatibilityRouter(config.Config{
+				APIKeys: []string{"k1"}, MaxResults: 10, ResultsCap: 50, RespectRobots: true,
+				MaxRequestOutputBytes: 1 << 20,
+			}, pipe)
+			request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+			if test.header == "Authorization" {
+				request.Header.Set(test.header, "Bearer k1")
+			} else {
+				request.Header.Set(test.header, "k1")
+			}
+			recorder := httptest.NewRecorder()
+
+			router.ServeHTTP(recorder, request)
+
+			if recorder.Code != test.wantStatus {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			if pipe.searchCalls != 0 {
+				t.Fatalf("pipeline search calls=%d", pipe.searchCalls)
+			}
+		})
+	}
+}
+
 func TestCompatibilityResponsesDoNotExposeNativeDiscoveryProvenance(t *testing.T) {
 	pipe := &fakePipeline{results: []model.SearchResult{{
 		URL: "https://example.com", Title: "Example", Snippet: "Example result",

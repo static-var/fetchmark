@@ -194,7 +194,7 @@ services:
     build:
       context: ./scrapling
       dockerfile: Dockerfile
-    image: fetchmark-scrapling:0.4.11
+    image: fetchmark-scrapling:0.4.12
     restart: unless-stopped
     environment:
       SCRAPLING_PROFILE_DIR: /data/profile

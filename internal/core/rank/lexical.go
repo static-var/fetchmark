@@ -10,10 +10,12 @@ import (
 )
 
 const (
-	maxTopicalBodyTokens = 8_192
-	maxTopicalTokenRunes = 128
-	passageTokenLimit    = 160
-	passageTokenOverlap  = 32
+	maxTopicalQueryTokens = 128
+	maxTopicalFieldTokens = 256
+	maxTopicalBodyTokens  = 8_192
+	maxTopicalTokenRunes  = 128
+	passageTokenLimit     = 160
+	passageTokenOverlap   = 32
 )
 
 type topicalQuery struct {
@@ -43,6 +45,11 @@ type lexicalDocument struct {
 // specific stemmer.
 func TopicalTokens(value string) []string {
 	tokens, _ := scanTopicalTokens(html.UnescapeString(value), 0)
+	return tokens
+}
+
+func boundedTopicalTokens(value string, maxTokens int) []string {
+	tokens, _ := scanTopicalTokens(html.UnescapeString(value), maxTokens)
 	return tokens
 }
 
@@ -96,18 +103,18 @@ func scanTopicalTokens(value string, maxTokens int) ([]string, int) {
 }
 
 func newTopicalQuery(value string) topicalQuery {
-	ordered := TopicalTokens(value)
+	ordered := boundedTopicalTokens(value, maxTopicalQueryTokens)
 	terms := uniqueTerms(ordered)
 	return topicalQuery{ordered: ordered, terms: terms, set: termSet(terms)}
 }
 
 func newLexicalDocument(query topicalQuery, result model.SearchResult) lexicalDocument {
 	document := lexicalDocument{
-		title:   TopicalTokens(confidenceTitle(result)),
-		snippet: TopicalTokens(result.Snippet),
+		title:   boundedTopicalTokens(confidenceTitle(result), maxTopicalFieldTokens),
+		snippet: boundedTopicalTokens(result.Snippet, maxTopicalFieldTokens),
 	}
 	if result.Content != nil {
-		document.headings = TopicalTokens(strings.Join(result.Content.Headings, " "))
+		document.headings = boundedTopicalTokens(strings.Join(result.Content.Headings, " "), maxTopicalFieldTokens)
 		document.passage, _ = bestTopicalPassage(query, result.Content.MainText)
 	}
 	document.evidence = bestTopicalEvidence(query,
@@ -194,17 +201,23 @@ func topicalEvidenceScore(evidence topicalEvidence) float64 {
 }
 
 func longestQueryPhrase(query, text []string) int {
+	if len(query) == 0 || len(text) == 0 {
+		return 0
+	}
+	previous := make([]int, len(text)+1)
+	current := make([]int, len(text)+1)
 	best := 0
-	for qi := range query {
-		for ti := range text {
-			length := 0
-			for qi+length < len(query) && ti+length < len(text) && query[qi+length] == text[ti+length] {
-				length++
-			}
-			if length > best {
-				best = length
+	for _, queryToken := range query {
+		clear(current)
+		for textIndex, textToken := range text {
+			if queryToken == textToken {
+				current[textIndex+1] = previous[textIndex] + 1
+				if current[textIndex+1] > best {
+					best = current[textIndex+1]
+				}
 			}
 		}
+		previous, current = current, previous
 	}
 	return best
 }

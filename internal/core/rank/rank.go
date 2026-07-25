@@ -210,7 +210,7 @@ func confidenceTitle(result model.SearchResult) string {
 }
 
 func confidenceTokens(value string) []string {
-	return TopicalTokens(value)
+	return boundedTopicalTokens(value, maxTopicalFieldTokens)
 }
 
 func singularConfidenceTerm(word string) string {

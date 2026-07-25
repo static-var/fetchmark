@@ -158,8 +158,9 @@ func (p *Pipeline) executeDiscoveryPlan(ctx context.Context, lanes []discoveryLa
 
 	primaryOutcomes := executeDiscoveryLanes(ctx, primaryLanes, concurrency)
 	primaryCandidates, primaryErr := summarizeLaneOutcomes(ctx, primaryOutcomes, candidateCap)
-	primaryFillsWindow := requiredResults <= 0 || len(primaryCandidates.hits) >= requiredResults
-	if primaryErr == nil && primaryFillsWindow && primaryCandidatesRelevant(query, primaryCandidates) {
+	relevantPrimaryCandidates := primaryRelevantCandidateCount(query, primaryCandidates)
+	primaryFillsWindow := requiredResults <= 0 || relevantPrimaryCandidates >= requiredResults
+	if primaryErr == nil && primaryFillsWindow && relevantPrimaryCandidates > 0 {
 		observeLaneOutcomes(primaryOutcomes)
 		return primaryCandidates, nil
 	}
@@ -167,9 +168,9 @@ func (p *Pipeline) executeDiscoveryPlan(ctx context.Context, lanes []discoveryLa
 	return collectLaneOutcomes(ctx, append(primaryOutcomes, secondaryOutcomes...), candidateCap)
 }
 
-func primaryCandidatesRelevant(query string, candidates candidateSet) bool {
+func primaryRelevantCandidateCount(query string, candidates candidateSet) int {
 	if len(candidates.hits) == 0 || (candidates.status != search.BatchHealthy && candidates.status != search.BatchPartial) {
-		return false
+		return 0
 	}
 	results := make([]model.SearchResult, 0, len(candidates.hits))
 	for _, hit := range candidates.hits {
@@ -179,7 +180,7 @@ func primaryCandidatesRelevant(query string, candidates candidateSet) bool {
 		})
 	}
 	results = corerank.New().Score(query, results)
-	return len(corerank.FilterLowConfidence(query, results)) > 0
+	return len(corerank.FilterLowConfidence(query, results))
 }
 
 func collectLaneOutcomes(ctx context.Context, outcomes []laneOutcome, candidateCap int) (candidateSet, error) {

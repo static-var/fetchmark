@@ -40,6 +40,9 @@ func executeCanonicalSearch(d Deps, r *http.Request, req searchRequest) (canonic
 	if req.Query == "" {
 		return canonicalSearchResponse{}, &searchExecutionError{Status: http.StatusBadRequest, Code: "query_required"}
 	}
+	if err := validateQueryLength(req.Query); err != nil {
+		return canonicalSearchResponse{}, &searchExecutionError{Status: http.StatusBadRequest, Code: "invalid_request", Cause: err}
+	}
 	if err := validateSearchControls(req); err != nil {
 		return canonicalSearchResponse{}, &searchExecutionError{Status: http.StatusBadRequest, Code: "invalid_request", Cause: err}
 	}
